@@ -1,0 +1,323 @@
+{
+	"name": "sf-devops",
+	"displayName": "Salesforce DevOps",
+	"description": "Generic, settings-driven Salesforce CI/CD workflow — 1-click story management, pipeline status, environment promotion",
+	"version": "2.0.0",
+	"publisher": "your-company",
+	"engines": {
+		"vscode": "^1.85.0"
+	},
+	"categories": [
+		"Other"
+	],
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"main": "./out/extension.js",
+	"contributes": {
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "sf-devops",
+					"title": "Salesforce DevOps",
+					"icon": "resources/sf-devops-icon.svg"
+				}
+			]
+		},
+		"views": {
+			"sf-devops": [
+				{
+					"id": "sfDevopsStoryView",
+					"name": "Current Story",
+					"type": "webview"
+				},
+				{
+					"id": "sfDevopsCoverageView",
+					"name": "Code Coverage",
+					"type": "webview"
+				},
+				{
+					"id": "sfDevopsPipelineView",
+					"name": "Pipeline Status",
+					"type": "tree"
+				},
+				{
+					"id": "sfDevopsEnvView",
+					"name": "Environments",
+					"type": "tree"
+				}
+			]
+		},
+		"commands": [
+			{
+				"command": "sfDevops.resumeStory",
+				"title": "Resume Previous Story",
+				"icon": "$(history)",
+				"category": "Salesforce DevOps"
+			},
+			{
+				"command": "sfDevops.startStory",
+				"title": "Start New Story",
+				"icon": "$(add)",
+				"category": "Salesforce DevOps"
+			},
+			{
+				"command": "sfDevops.commitAndPush",
+				"title": "Commit & Publish Feature Branch",
+				"icon": "$(git-commit)",
+				"category": "Salesforce DevOps"
+			},
+			{
+				"command": "sfDevops.promoteEnv",
+				"title": "Promote & Deploy to Environment...",
+				"icon": "$(rocket)",
+				"category": "Salesforce DevOps"
+			},
+			{
+				"command": "sfDevops.validateEnv",
+				"title": "Validate Only against Environment...",
+				"icon": "$(check)",
+				"category": "Salesforce DevOps"
+			},
+			{
+				"command": "sfDevops.resumePromotion",
+				"title": "Resume",
+				"icon": "$(debug-continue)",
+				"category": "Salesforce DevOps"
+			},
+			{
+				"command": "sfDevops.cancelPromotion",
+				"title": "Cancel",
+				"icon": "$(close)",
+				"category": "Salesforce DevOps"
+			},
+			{
+				"command": "sfDevops.viewPipelineStatus",
+				"title": "Refresh Pipeline Status",
+				"icon": "$(refresh)",
+				"category": "Salesforce DevOps"
+			},
+			{
+				"command": "sfDevops.syncBranch",
+				"title": "Sync Branch with Dev",
+				"icon": "$(sync)",
+				"category": "Salesforce DevOps"
+			},
+			{
+				"command": "sfDevops.openSettings",
+				"title": "Configure Settings",
+				"icon": "$(gear)",
+				"category": "Salesforce DevOps"
+			}
+		],
+		"configuration": {
+			"title": "Salesforce DevOps",
+			"properties": {
+				"sfDevops.gitProvider": {
+					"type": "string",
+					"description": "Git hosting provider for pull requests and pipeline status. Only \"bitbucket\" is implemented today; other values fall back to Bitbucket with a warning.",
+					"enum": [
+						"bitbucket"
+					],
+					"default": "bitbucket"
+				},
+				"sfDevops.repoWorkspace": {
+					"type": "string",
+					"description": "Workspace/organization slug of the Git repo (Bitbucket workspace). Falls back to the deprecated sfDevops.bitbucketWorkspace if unset.",
+					"default": ""
+				},
+				"sfDevops.repoSlug": {
+					"type": "string",
+					"description": "Repository slug of the Git repo. Falls back to the deprecated sfDevops.bitbucketRepoSlug if unset.",
+					"default": ""
+				},
+				"sfDevops.bitbucketWorkspace": {
+					"type": "string",
+					"description": "Deprecated — use sfDevops.repoWorkspace instead. Kept for backward compatibility.",
+					"default": "",
+					"deprecationMessage": "Use sfDevops.repoWorkspace instead."
+				},
+				"sfDevops.bitbucketRepoSlug": {
+					"type": "string",
+					"description": "Deprecated — use sfDevops.repoSlug instead. Kept for backward compatibility.",
+					"default": "",
+					"deprecationMessage": "Use sfDevops.repoSlug instead."
+				},
+				"sfDevops.roles": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"description": "The full set of role names your team uses. Reference these names in sfDevops.environments[].requiredRole.",
+					"default": [
+						"developer",
+						"TrackLead"
+					]
+				},
+				"sfDevops.role": {
+					"type": "string",
+					"description": "This user's role — must be one of sfDevops.roles. Controls which \"Promote & Deploy\" buttons are enabled, per environment's requiredRole.",
+					"default": "developer"
+				},
+				"sfDevops.baseBranch": {
+					"type": "string",
+					"description": "Branch new feature branches are cut from, and the branch staleness/sync checks compare against (e.g. \"main\").",
+					"default": "main"
+				},
+				"sfDevops.devBranch": {
+					"type": "string",
+					"description": "Deprecated — the first entry of sfDevops.environments now defines this branch. Kept for backward compatibility with 1.x settings.",
+					"default": "dev",
+					"deprecationMessage": "Set the branch on the first entry of sfDevops.environments instead."
+				},
+				"sfDevops.featureBranchTemplate": {
+					"type": "string",
+					"description": "Template for feature branch names. {storyId} is replaced with the story/ticket ID.",
+					"default": "feature/{storyId}"
+				},
+				"sfDevops.promotionBranchTemplate": {
+					"type": "string",
+					"description": "Template for \"Promote & Deploy\" branch names. {storyId} and {env} are replaced.",
+					"default": "promotion/{storyId}-to-{env}"
+				},
+				"sfDevops.validateBranchTemplate": {
+					"type": "string",
+					"description": "Template for \"Validate Only\" branch names. {storyId} and {env} are replaced.",
+					"default": "validate/{storyId}-to-{env}"
+				},
+				"sfDevops.environments": {
+					"type": "array",
+					"description": "The full deployment pipeline, in order. The FIRST entry is published straight from the feature branch (no PR) — e.g. \"dev\". Every later entry is reached via a promotion/validate branch + pull request. Each entry may be a plain environment name (legacy shorthand) or an object: { name, label?, branch? (defaults to name), icon? (a VS Code codicon id), requiredRole? (role name from sfDevops.roles needed to run Promote & Deploy into this environment — Validate Only is always unrestricted), coverageGate? (true = the Apex coverage check must pass before promoting into this environment) }.",
+					"items": {
+						"anyOf": [
+							{
+								"type": "string"
+							},
+							{
+								"type": "object",
+								"required": [
+									"name"
+								],
+								"properties": {
+									"name": {
+										"type": "string",
+										"description": "Environment identifier, also used as the git branch name unless \"branch\" is set."
+									},
+									"label": {
+										"type": "string",
+										"description": "Display label. Defaults to the uppercased name."
+									},
+									"branch": {
+										"type": "string",
+										"description": "Git branch name for this environment, if different from \"name\"."
+									},
+									"icon": {
+										"type": "string",
+										"description": "VS Code codicon id shown in the Environments tree view."
+									},
+									"requiredRole": {
+										"type": "string",
+										"description": "Role (from sfDevops.roles) required to Promote & Deploy into this environment."
+									},
+									"coverageGate": {
+										"type": "boolean",
+										"description": "Require the Apex coverage gate to pass before promoting into this environment."
+									}
+								}
+							}
+						]
+					},
+					"default": [
+						{
+							"name": "dev"
+						},
+						{
+							"name": "qa",
+							"coverageGate": true
+						},
+						{
+							"name": "uat",
+							"requiredRole": "TrackLead"
+						}
+					]
+				},
+				"sfDevops.terminalStageMessage": {
+					"type": "string",
+					"description": "Message shown once a story has been merged into the last configured environment. {lastEnvLabel} is replaced with that environment's label.",
+					"default": "Story deployed up to {lastEnvLabel}. Anything beyond this stage is handled outside this extension."
+				},
+				"sfDevops.ticketSystem": {
+					"type": "string",
+					"description": "The ticketing system story IDs come from. Purely descriptive (used in prompt text) except when \"none\", which skips format validation entirely.",
+					"enum": [
+						"jira",
+						"azureBoards",
+						"linear",
+						"github",
+						"none"
+					],
+					"default": "jira"
+				},
+				"sfDevops.ticketKeyPattern": {
+					"type": "string",
+					"description": "Regex (without slashes) used to recognize a story/ticket key, both when validating new story IDs and when extracting one from a branch name. Defaults to a Jira-shaped key (PROJECT-123), or one derived from sfDevops.jiraProjectKey if that's set.",
+					"default": ""
+				},
+				"sfDevops.jiraProjectKey": {
+					"type": "string",
+					"description": "Legacy shorthand: if set and sfDevops.ticketKeyPattern is empty, the pattern becomes \"<jiraProjectKey>-\\\\d+\".",
+					"default": ""
+				},
+				"sfDevops.ticketBaseUrl": {
+					"type": "string",
+					"description": "URL template for linking to a ticket, e.g. \"https://yourcompany.atlassian.net/browse/{storyId}\". Leave empty to hide the ticket link.",
+					"default": ""
+				},
+				"sfDevops.devOrgAlias": {
+					"type": "string",
+					"description": "sf CLI alias/username of the dev (source) org used for the coverage check. Leave empty to use the CLI default org.",
+					"default": ""
+				},
+				"sfDevops.coverageThreshold": {
+					"type": "number",
+					"description": "Minimum per-class Apex code coverage (%) required before a story with Apex can be promoted into the environment(s) with coverageGate: true.",
+					"default": 75
+				},
+				"sfDevops.coverageTimeoutSeconds": {
+					"type": "number",
+					"description": "How long to wait for the Apex test run to finish before timing out.",
+					"default": 600
+				},
+				"sfDevops.sourceRootFolder": {
+					"type": "string",
+					"description": "Salesforce DX source root folder name (the package directory in sfdx-project.json), used to detect Apex classes and other metadata changes.",
+					"default": "force-app"
+				},
+				"sfDevops.staleBranchThreshold": {
+					"type": "number",
+					"description": "Number of commits behind the base branch before the extension warns you to sync.",
+					"default": 5
+				}
+			}
+		}
+	},
+	"scripts": {
+		"vscode:prepublish": "npm run compile",
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./",
+		"package": "vsce package",
+		"lint": "eslint src --ext ts"
+	},
+	"devDependencies": {
+		"@types/node": "^20.0.0",
+		"@types/vscode": "^1.85.0",
+		"typescript": "^5.3.0",
+		"@vscode/vsce": "^2.22.0"
+	},
+	"dependencies": {},
+	"__metadata": {
+		"installedTimestamp": 1787411596342,
+		"targetPlatform": "undefined",
+		"size": 316597
+	}
+}

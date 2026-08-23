@@ -1,0 +1,99 @@
+// submitForReview.ts — "Commit & Publish Feature Branch" command
+// Commits the STAGED metadata, pushes the feature branch, then cherry-picks the story
+// straight onto the dev branch (no PR, no Dev org deploy). Conflicts on the dev
+// cherry-pick use the same resolve-and-resume flow.
+
+import * as vscode from "vscode";
+import { IGitProviderClient } from "../GitProviderClient";
+import { GitHelper }           from "../GitHelper";
+import { StoryWebviewProvider} from "../providers/StoryWebviewProvider";
+import { reportOperationConflict } from "./promoteStory";
+import { isFeatureBranch, extractStoryId } from "../config";
+
+export async function commitAndPush(
+    _bbClient:     IGitProviderClient,
+    gitHelper:     GitHelper,
+    storyProvider: StoryWebviewProvider
+): Promise<void> {
+    const branch = await gitHelper.currentBranch();
+
+    if (!isFeatureBranch(branch)) {
+        vscode.window.showWarningMessage("You must be on a feature branch to commit and publish.");
+        return;
+    }
+
+    const storyId = extractStoryId(branch);
+
+    const staged   = await gitHelper.stagedFiles();
+    const unpushed = await gitHelper.unpushedCommitCount();
+
+    // Nothing staged and nothing to push → guide the user.
+    if (staged.length === 0 && unpushed === 0) {
+        if (await gitHelper.hasUncommittedChanges()) {
+            vscode.window.showWarningMessage(
+                "Stage your metadata files first (Source Control view), then click Commit & Publish."
+            );
+        } else {
+            vscode.window.showWarningMessage("No staged changes to publish.");
+        }
+        return;
+    }
+
+    // Commit message only needed when there are staged changes to commit.
+    let commitMsg = "";
+    if (staged.length > 0) {
+        const defaultMsg = storyId ? `feat(${storyId}): ` : "feat: ";
+        const input = await vscode.window.showInputBox({
+            prompt:        "Commit message",
+            value:         defaultMsg,
+            validateInput: (v) => (v.trim().length > 5 ? undefined : "Please enter a meaningful message"),
+        });
+        if (!input) { return; }
+        commitMsg = input.trim();
+
+        // Multi-area mixing warning.
+        const { areas, hasMultiple } = await gitHelper.detectMultipleAreas();
+        if (hasMultiple) {
+            const areaList = areas.slice(0, 6).join(", ") + (areas.length > 6 ? "..." : "");
+            const choice   = await vscode.window.showWarningMessage(
+                `Changes span ${areas.length} areas: ${areaList}\n\nAre ALL of these for ${storyId || "this story"}?`,
+                { modal: true },
+                "Yes, commit all",
+                "Let me review first"
+            );
+            if (choice !== "Yes, commit all") { return; }
+        }
+    }
+
+    await vscode.window.withProgress(
+        {
+            location:    vscode.ProgressLocation.Notification,
+            title:       "Publishing feature branch and updating dev...",
+            cancellable: false,
+        },
+        async (progress) => {
+            try {
+                progress.report({ message: "Committing & pushing feature branch..." });
+                await gitHelper.commitStagedAndPushFeature(commitMsg || `feat(${storyId}): update`);
+
+                progress.report({ message: "Adding changes to dev branch..." });
+                const outcome = await gitHelper.publishToDevBranch(storyId);
+
+                if (outcome.status === "conflict") {
+                    await reportOperationConflict(outcome.conflicts, "dev branch");
+                    storyProvider.refresh();
+                    return;
+                }
+
+                vscode.window.showInformationMessage(
+                    `✅ ${storyId} published — feature branch pushed and changes added to the dev branch. ` +
+                    `Use "Promote & Deploy" or "Validate Only" for the next environment.`
+                );
+                storyProvider.refresh();
+            } catch (err) {
+                vscode.window.showErrorMessage(`Commit & Publish failed: ${err}`);
+            }
+        }
+    );
+}
+
