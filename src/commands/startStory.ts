@@ -5,7 +5,7 @@ import * as vscode from "vscode";
 import { IGitProviderClient } from "../GitProviderClient";
 import { GitHelper }          from "../GitHelper";
 import { StoryWebviewProvider}from "../providers/StoryWebviewProvider";
-import { getTicketSystem } from "../config";
+import { getTicketSystem, sanitizeStoryId } from "../config";
 
 export async function startStory(
     _bbClient:     IGitProviderClient,
@@ -31,7 +31,7 @@ export async function startStory(
         prompt:      `Enter ${label}`,
         placeHolder: ticketSystem === "none" ? "e.g. STORY-101" : "PROJ-123",
         validateInput: (v: string) =>
-            v.trim().length > 0 ? undefined : "Story ID cannot be empty",
+            sanitizeStoryId(v).length > 0 ? undefined : "Enter a story ID or short description with at least one letter/number",
     });
     if (!storyId) { return; }
 
@@ -42,10 +42,17 @@ export async function startStory(
             cancellable: false,
         },
         async () => {
+            const cleanStoryId = sanitizeStoryId(storyId).toUpperCase();
             try {
-                const branchName = await gitHelper.createFeatureBranch(
-                    storyId.trim().toUpperCase()
-                );
+                const branchName = await gitHelper.createFeatureBranch(cleanStoryId);
+
+                await gitHelper.appendAudit({
+                    operation: "startStory",
+                    storyId:   cleanStoryId,
+                    branch:    branchName,
+                    outcome:   "success",
+                    summary:   `Created and pushed ${branchName}`,
+                });
 
                 vscode.window.showInformationMessage(
                     `✅ Branch created: ${branchName}`,
@@ -58,6 +65,13 @@ export async function startStory(
 
                 storyProvider.refresh();
             } catch (err) {
+                await gitHelper.appendAudit({
+                    operation: "startStory",
+                    storyId:   cleanStoryId,
+                    outcome:   "failure",
+                    summary:   "Failed to create branch",
+                    details:   { error: String(err) },
+                });
                 vscode.window.showErrorMessage(`Failed to create branch: ${err}`);
             }
         }

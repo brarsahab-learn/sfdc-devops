@@ -2,7 +2,7 @@
 	"name": "sf-devops",
 	"displayName": "Salesforce DevOps",
 	"description": "Generic, settings-driven Salesforce CI/CD workflow — 1-click story management, pipeline status, environment promotion, and an org-per-branch 2GP packaging release gate",
-	"version": "3.0.1",
+	"version": "3.1.0",
 	"publisher": "your-company",
 	"engines": {
 		"vscode": "^1.85.0"
@@ -114,6 +114,18 @@
 				"title": "Prepare 2GP Beta from UAT",
 				"icon": "$(package)",
 				"category": "SF-Ops"
+			},
+			{
+				"command": "sfDevops.viewAuditLog",
+				"title": "View Audit Trail",
+				"icon": "$(checklist)",
+				"category": "Salesforce DevOps"
+			},
+			{
+				"command": "sfDevops.openDeploymentDashboard",
+				"title": "Open Deployment Dashboard",
+				"icon": "$(rocket)",
+				"category": "Salesforce DevOps"
 			}
 		],
 		"configuration": {
@@ -233,6 +245,16 @@
 									"orgAlias": {
 										"type": "string",
 										"description": "sf CLI alias/username of the org this environment deploys to. Purely informational/reference today — day-to-day deploys still happen via the CI pipeline triggered by the PR merge."
+									},
+									"deployTestLevel": {
+										"type": "string",
+										"enum": [
+											"NoTestRun",
+											"RunSpecifiedTests",
+											"RunLocalTests",
+											"RunAllTestsInOrg"
+										],
+										"description": "Apex test level used by the Deployment Dashboard's Deploy/Validate actions for this environment. Defaults to RunLocalTests."
 									}
 								}
 							}
@@ -304,6 +326,11 @@
 					"description": "How long to wait for the Apex test run to finish before timing out.",
 					"default": 600
 				},
+				"sfDevops.deployTimeoutSeconds": {
+					"type": "number",
+					"description": "Timeout (in seconds) for a single Deployment Dashboard deploy/validate run.",
+					"default": 900
+				},
 				"sfDevops.sourceRootFolder": {
 					"type": "string",
 					"description": "Salesforce DX source root folder name (the package directory in sfdx-project.json), used to detect Apex classes and other metadata changes.",
@@ -355,12 +382,16 @@
 						},
 						"patchOverrides": {
 							"type": "array",
-							"items": { "type": "string" },
+							"items": {
+								"type": "string"
+							},
 							"description": "Glob patterns (relative to sourceBase) for components that must go to unmanagedTarget instead of managedTarget — patch overrides, server-error workarounds, custom configs."
 						},
 						"excludedMetadata": {
 							"type": "array",
-							"items": { "type": "string" },
+							"items": {
+								"type": "string"
+							},
 							"description": "Glob patterns (relative to sourceBase) for components excluded from the 2GP beta entirely — copied to neither bucket."
 						},
 						"devHubOrgAlias": {

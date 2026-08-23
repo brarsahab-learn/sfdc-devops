@@ -34,11 +34,20 @@ export async function syncBranch(
         async () => {
             try {
                 await gitHelper.syncWithDev();
+                await gitHelper.appendAudit({
+                    operation: "syncBranch", branch: branch ?? undefined, outcome: "success",
+                    summary: `Synced ${branch} with ${base}`,
+                });
                 vscode.window.showInformationMessage(
                     `✅ ${branch} synced with ${base}`
                 );
                 storyProvider.refresh();
             } catch (err) {
+                await gitHelper.appendAudit({
+                    operation: "syncBranch", branch: branch ?? undefined, outcome: "failure",
+                    summary: `Sync with ${base} failed`,
+                    details: { error: String(err) },
+                });
                 vscode.window.showErrorMessage(
                     `Sync failed: ${err}\n\nResolve conflicts manually then run: git rebase --continue`
                 );

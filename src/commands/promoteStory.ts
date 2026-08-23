@@ -14,10 +14,20 @@ import { StoryWebviewProvider } from "../providers/StoryWebviewProvider";
 import { coverageSettings } from "./coverageCheck";
 import {
     isFeatureBranch, extractStoryId, getFeatureBranchPrefix,
-    getCoverageGateEnvironment, promoBranchName,
+    getCoverageGateEnvironment, promoBranchName, getBaseBranch, featureBranchName,
 } from "../config";
+import { buildPackageXml, AuditChangedFile } from "../AuditLog";
 
 export type PromoteMode = "validate" | "promote";
+
+/** Metadata changed on the story's feature branch vs base — used for the audit trail. */
+async function storyChangedFiles(gitHelper: GitHelper, storyId: string): Promise<AuditChangedFile[]> {
+    try {
+        return await gitHelper.diffNameStatusBetween(getBaseBranch(), featureBranchName(storyId));
+    } catch {
+        return [];
+    }
+}
 
 export async function promoteStory(
     bbClient:      IGitProviderClient,
@@ -89,6 +99,13 @@ export async function promoteStory(
                 const outcome = await gitHelper.beginPromotion(storyId, targetEnv, mode);
 
                 if (outcome.status === "conflict") {
+                    const changedFiles = await storyChangedFiles(gitHelper, storyId);
+                    const { xml: packageXml, unmapped: unmappedFiles } = buildPackageXml(changedFiles);
+                    await gitHelper.appendAudit({
+                        operation: mode, storyId, targetEnv, outcome: "conflict",
+                        summary: `Conflict preparing promotion branch for ${envUpper}`,
+                        details: { changedFiles, packageXml, unmappedFiles, conflicts: outcome.conflicts },
+                    });
                     await reportOperationConflict(outcome.conflicts, envUpper);
                     storyProvider.refresh();
                     return;
@@ -96,6 +113,11 @@ export async function promoteStory(
 
                 await finalizeAndFinish(bbClient, gitHelper, storyId, targetEnv, mode, storyProvider, progress);
             } catch (err) {
+                await gitHelper.appendAudit({
+                    operation: mode, storyId, targetEnv, outcome: "failure",
+                    summary: `${mode === "validate" ? "Validation" : "Promotion"} failed`,
+                    details: { error: String(err) },
+                });
                 vscode.window.showErrorMessage(`${mode === "validate" ? "Validation" : "Promotion"} failed: ${err}`);
             }
         }
@@ -119,6 +141,14 @@ export async function finalizeAndFinish(
     await gitHelper.finalizePromotion(storyId, targetEnv, mode);
 
     if (mode === "validate") {
+        const changedFiles = await storyChangedFiles(gitHelper, storyId);
+        const { xml: packageXml, unmapped: unmappedFiles } = buildPackageXml(changedFiles);
+        await gitHelper.appendAudit({
+            operation: "validate", storyId, targetEnv, outcome: "success",
+            summary: `Validation branch pushed against ${targetEnv.toUpperCase()}`,
+            details: { changedFiles, packageXml, unmappedFiles },
+        });
+
         await gitHelper.checkoutFeature(storyId);
         vscode.window.showInformationMessage(
             `✅ Validation started for ${storyId} against ${targetEnv.toUpperCase()} (check-only — nothing is deployed). ` +
@@ -145,6 +175,9 @@ export async function openPromotionPR(
 
     await gitHelper.checkoutFeature(storyId);
 
+    const changedFiles = await storyChangedFiles(gitHelper, storyId);
+    const { xml: packageXml, unmapped: unmappedFiles } = buildPackageXml(changedFiles);
+
     let prUrl = bbClient.buildPrUrl(promotionBranch, targetEnv);
     if (!prUrl) {
         // Settings don't have the repo identity — try deriving it from the origin remote.
@@ -153,6 +186,11 @@ export async function openPromotionPR(
         if (derived) { prUrl = bbClient.buildPrUrl(promotionBranch, targetEnv, derived); }
     }
     if (!prUrl) {
+        await gitHelper.appendAudit({
+            operation: "promote", storyId, targetEnv, branch: promotionBranch, outcome: "success",
+            summary: `${promotionBranch} pushed, but PR URL could not be determined`,
+            details: { changedFiles, packageXml, unmappedFiles },
+        });
         vscode.window.showWarningMessage(
             `${promotionBranch} was pushed, but the repo could not be determined. ` +
             `Set sfDevops.repoWorkspace and sfDevops.repoSlug to auto-open the PR page.`
@@ -160,6 +198,12 @@ export async function openPromotionPR(
         storyProvider.refresh();
         return;
     }
+
+    await gitHelper.appendAudit({
+        operation: "promote", storyId, targetEnv, branch: promotionBranch, outcome: "success",
+        summary: `${promotionBranch} pushed — PR opened against ${targetEnv.toUpperCase()}`,
+        details: { changedFiles, packageXml, unmappedFiles, prUrl },
+    });
 
     await vscode.env.openExternal(vscode.Uri.parse(prUrl));
 

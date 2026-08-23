@@ -104,11 +104,34 @@ export function buildTicketUrl(storyId: string): string | undefined {
     return fillTemplate(base, { storyId });
 }
 
-/** Extracts the story/ticket id from a branch name using the configured pattern. */
+/**
+ * Extracts the story/ticket id from a branch name using the configured pattern.
+ * Matches only against the part after the feature-branch prefix (e.g. "feature/") so a
+ * broad ticketKeyPattern can never capture the prefix itself and get fed back into
+ * featureBranchName(), which would double it up (e.g. "feature/feature/...").
+ */
 export function extractStoryId(branch: string | null | undefined): string {
     if (!branch) { return ""; }
-    const match = branch.match(getTicketKeyPattern());
+    const prefix   = getFeatureBranchPrefix();
+    const withoutPrefix = prefix.length > 0 && branch.startsWith(prefix) ? branch.slice(prefix.length) : branch;
+    const match = withoutPrefix.match(getTicketKeyPattern());
     return match ? match[0] : "";
+}
+
+/**
+ * Turns free-text story ID input into a valid git ref segment (a story ID can now be
+ * any text, not just a "PROJECT-123"-shaped key — see getTicketKeyPattern above).
+ * Collapses whitespace/punctuation runs to a single "-" and strips characters
+ * `git check-ref-format` rejects, so `featureBranchName()` always produces a valid branch.
+ */
+export function sanitizeStoryId(input: string): string {
+    return input
+        .trim()
+        .replace(/[\s~^:?*[\]\\]+/g, "-")   // git-forbidden / whitespace → "-"
+        .replace(/[^A-Za-z0-9._-]+/g, "-")  // anything else non-ref-safe → "-"
+        .replace(/\.{2,}/g, "-")            // ".." is forbidden in refs
+        .replace(/-{2,}/g, "-")
+        .replace(/^[-.\/]+|[-.\/]+$/g, ""); // no leading/trailing "-", ".", "/"
 }
 
 // ── Roles ────────────────────────────────────────────────────────────────────
@@ -131,6 +154,7 @@ export interface EnvironmentSetting {
     requiredRole?: string;
     coverageGate?: boolean;
     orgAlias?:    string;
+    deployTestLevel?: string;
 }
 
 export interface ResolvedEnvironment {
@@ -141,6 +165,7 @@ export interface ResolvedEnvironment {
     requiredRole?: string;
     coverageGate: boolean;
     orgAlias?:    string;
+    deployTestLevel: string;
 }
 
 const DEFAULT_ENVIRONMENTS: EnvironmentSetting[] = [
@@ -170,6 +195,7 @@ export function getEnvironments(): ResolvedEnvironment[] {
             requiredRole: e.requiredRole,
             coverageGate: e.coverageGate ?? false,
             orgAlias:     e.orgAlias,
+            deployTestLevel: e.deployTestLevel || "RunLocalTests",
         };
     });
 }
@@ -243,6 +269,11 @@ export function getProdOrgAlias(): string {
 
 export function getSourceRootFolder(): string {
     return cfg().get<string>("sourceRootFolder") || "force-app";
+}
+
+/** Timeout for a `sf project deploy start|validate` run, in seconds. */
+export function getDeployTimeoutSeconds(): number {
+    return cfg().get<number>("deployTimeoutSeconds") ?? 900;
 }
 
 // ── Misc ──────────────────────────────────────────────────────────────────────

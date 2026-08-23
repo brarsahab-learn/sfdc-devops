@@ -34,10 +34,22 @@ export async function resumePromotion(
                 const outcome = await gitHelper.continuePendingOperation();
 
                 if (outcome.status === "conflict") {
+                    await gitHelper.appendAudit({
+                        operation: "resumePromotion", storyId: op.storyId, targetEnv: op.targetEnv,
+                        outcome: "conflict",
+                        summary: `Still conflicting while resuming → ${label}`,
+                        details: { conflicts: outcome.conflicts },
+                    });
                     await reportOperationConflict(outcome.conflicts, label);
                     storyProvider.refresh();
                     return;
                 }
+
+                await gitHelper.appendAudit({
+                    operation: "resumePromotion", storyId: op.storyId, targetEnv: op.targetEnv,
+                    outcome: "success",
+                    summary: `Resumed cleanly → ${label}`,
+                });
 
                 if (op.kind === "dev-publish") {
                     progress.report({ message: "Pushing dev branch..." });
@@ -54,6 +66,12 @@ export async function resumePromotion(
                     bbClient, gitHelper, op.storyId, op.targetEnv!, op.mode ?? "promote", storyProvider, progress
                 );
             } catch (err) {
+                await gitHelper.appendAudit({
+                    operation: "resumePromotion", storyId: op.storyId, targetEnv: op.targetEnv,
+                    outcome: "failure",
+                    summary: "Resume failed",
+                    details: { error: String(err) },
+                });
                 vscode.window.showErrorMessage(`Resume failed: ${err}`);
             }
         }
@@ -81,6 +99,11 @@ export async function cancelPromotion(
     if (!confirm) { return; }
 
     await gitHelper.abortPendingOperation(op.storyId);
+    await gitHelper.appendAudit({
+        operation: "cancelPromotion", storyId: op.storyId, targetEnv: op.targetEnv,
+        outcome: "success",
+        summary: `Cancelled the ${label} for ${op.storyId}`,
+    });
     vscode.window.showInformationMessage(`Cancelled — back on feature/${op.storyId}.`);
     storyProvider.refresh();
 }

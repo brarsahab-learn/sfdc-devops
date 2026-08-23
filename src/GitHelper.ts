@@ -12,6 +12,7 @@ import {
     promoBranchName as buildPromoBranchName, getSourceRootFolder,
 } from "./config";
 import { createGitProviderClient } from "./GitProviderClient";
+import { AuditEntry, renderAuditHtml } from "./AuditLog";
 
 const execFileAsync = promisify(execFile);
 
@@ -97,6 +98,140 @@ export class GitHelper {
         }
     }
 
+    // ── Audit trail (local-only, per clone, in the git dir) ─────────────────────
+
+    async auditJsonPath(): Promise<string> {
+        return path.join(await this.gitDirPath(), "sf-devops-audit.json");
+    }
+
+    async auditHtmlPath(): Promise<string> {
+        return path.join(await this.gitDirPath(), "sf-devops-audit.html");
+    }
+
+    private async readAuditEntries(): Promise<AuditEntry[]> {
+        try {
+            const parsed = JSON.parse(fs.readFileSync(await this.auditJsonPath(), "utf8"));
+            return Array.isArray(parsed) ? parsed : [];
+        } catch {
+            return [];
+        }
+    }
+
+    /** Appends one entry to the audit trail and regenerates the HTML view. Best-effort — never throws. */
+    async appendAudit(entry: Omit<AuditEntry, "id" | "timestamp">): Promise<void> {
+        try {
+            const entries = await this.readAuditEntries();
+            entries.push({
+                ...entry,
+                id:        `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                timestamp: new Date().toISOString(),
+            });
+            fs.writeFileSync(await this.auditJsonPath(), JSON.stringify(entries, null, 2));
+            fs.writeFileSync(await this.auditHtmlPath(), renderAuditHtml(entries));
+        } catch { /* logging must never break the underlying operation */ }
+    }
+
+    /** Re-renders the audit HTML from the current JSON, e.g. before opening it. */
+    async regenerateAuditHtml(): Promise<void> {
+        try {
+            fs.writeFileSync(await this.auditHtmlPath(), renderAuditHtml(await this.readAuditEntries()));
+        } catch { /* best effort */ }
+    }
+
+    // ── Deployment state (local-only, per clone, in the git dir) ────────────────
+
+    private async deployStateFilePath(): Promise<string> {
+        return path.join(await this.gitDirPath(), "sf-devops-deploy-state.json");
+    }
+
+    private async readDeployState(): Promise<Record<string, { sha: string; deployedAt: string; [k: string]: any }>> {
+        try {
+            return JSON.parse(fs.readFileSync(await this.deployStateFilePath(), "utf8"));
+        } catch {
+            return {};
+        }
+    }
+
+    /** The last commit this extension deployed to `envName`, if any. */
+    async getDeployState(envName: string): Promise<{ sha: string; deployedAt: string } | null> {
+        const data = await this.readDeployState();
+        return data[envName] ?? null;
+    }
+
+    /** Records a successful deploy so future runs can diff "what changed since". Best-effort. */
+    async recordDeployed(envName: string, sha: string, extra: object = {}): Promise<void> {
+        const data = await this.readDeployState();
+        data[envName] = { sha, deployedAt: new Date().toISOString(), ...extra };
+        try {
+            fs.writeFileSync(await this.deployStateFilePath(), JSON.stringify(data, null, 2));
+        } catch { /* best effort */ }
+    }
+
+    private async notifiedStateFilePath(): Promise<string> {
+        return path.join(await this.gitDirPath(), "sf-devops-notified-state.json");
+    }
+
+    private async readNotifiedState(): Promise<Record<string, string>> {
+        try {
+            return JSON.parse(fs.readFileSync(await this.notifiedStateFilePath(), "utf8"));
+        } catch {
+            return {};
+        }
+    }
+
+    /** The last SHA the background poller already raised a "pending deployment" toast for. */
+    async getLastNotifiedSha(envName: string): Promise<string | null> {
+        const data = await this.readNotifiedState();
+        return data[envName] ?? null;
+    }
+
+    async setLastNotifiedSha(envName: string, sha: string): Promise<void> {
+        const data = await this.readNotifiedState();
+        data[envName] = sha;
+        try {
+            fs.writeFileSync(await this.notifiedStateFilePath(), JSON.stringify(data, null, 2));
+        } catch { /* best effort */ }
+    }
+
+    /** Current `origin/<branch>` HEAD sha, or null if the branch doesn't exist on the remote. */
+    async remoteHeadSha(branch: string): Promise<string | null> {
+        try {
+            return await this.git(["rev-parse", "--verify", `origin/${branch}`]);
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Like `commitLogBetween`, but takes raw refs with no `origin/` prefixing — needed
+     * when `fromRef` is a bare commit SHA (e.g. a recorded last-deployed marker) rather
+     * than a branch name.
+     */
+    async commitLogBetweenRaw(
+        fromRef: string,
+        toRef:   string
+    ): Promise<{ hash: string; date: string; author: string; message: string }[]> {
+        const format = "%H%x1f%aI%x1f%an%x1f%s";
+        const raw = await this.git(["log", `${fromRef}..${toRef}`, `--pretty=format:${format}`]);
+        return raw.split("\n").filter(Boolean).map(line => {
+            const [hash, date, author, message] = line.split("\x1f");
+            return { hash, date, author, message };
+        });
+    }
+
+    /** Files touched by a single commit, in the same shape as `diffNameStatusBetween`. */
+    async filesInCommit(sha: string): Promise<{ path: string; change: "added" | "modified" | "deleted" }[]> {
+        const raw = await this.git(["show", "--name-status", "--format=", sha]);
+        return raw.split("\n").filter(Boolean).map(line => {
+            const tab = line.indexOf("\t");
+            const code = line.slice(0, tab).trim();
+            const filePath = line.slice(tab + 1).trim();
+            const change: "added" | "modified" | "deleted" =
+                code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : "modified";
+            return { path: filePath, change };
+        });
+    }
+
     private async cherryPickInProgress(): Promise<boolean> {
         try {
             await this.git(["rev-parse", "--verify", "--quiet", "CHERRY_PICK_HEAD"]);
@@ -115,7 +250,15 @@ export class GitHelper {
     private async storySquashRef(storyId: string, base: string): Promise<string> {
         const featureBranch = featureBranchName(storyId);
         const tmpBranch     = `sf-devops-squash/${storyId}`;
-        const mergeBase     = await this.git(["merge-base", `origin/${base}`, `origin/${featureBranch}`]);
+
+        if (!(await this.remoteBranchExists(featureBranch))) {
+            throw new Error(
+                `Feature branch origin/${featureBranch} not found. Expected it to be pushed under this name ` +
+                `for story "${storyId}" — check that the branch was created via Start New Story and pushed.`
+            );
+        }
+
+        const mergeBase = await this.git(["merge-base", `origin/${base}`, `origin/${featureBranch}`]);
 
         await this.git(["checkout", "-B", tmpBranch, `origin/${featureBranch}`]);
         await this.git(["reset", "--soft", mergeBase]);

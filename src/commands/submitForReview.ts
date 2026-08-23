@@ -8,7 +8,8 @@ import { IGitProviderClient } from "../GitProviderClient";
 import { GitHelper }           from "../GitHelper";
 import { StoryWebviewProvider} from "../providers/StoryWebviewProvider";
 import { reportOperationConflict } from "./promoteStory";
-import { isFeatureBranch, extractStoryId } from "../config";
+import { isFeatureBranch, extractStoryId, getFeatureBranchPrefix } from "../config";
+import { buildPackageXml } from "../AuditLog";
 
 export async function commitAndPush(
     _bbClient:     IGitProviderClient,
@@ -22,7 +23,15 @@ export async function commitAndPush(
         return;
     }
 
-    const storyId = extractStoryId(branch);
+    // Fall back to the branch name (minus the feature-branch prefix) when no ticket-shaped
+    // key can be extracted — e.g. a free-text branch like "feature/unmanaged-package-changes".
+    // Without this, storyId ends up "" and featureBranchName("") builds a bogus/empty ref
+    // for the merge-base lookup instead of the branch that's actually checked out.
+    const storyId = extractStoryId(branch) || branch!.replace(getFeatureBranchPrefix(), "");
+    if (!storyId) {
+        vscode.window.showWarningMessage("Could not determine a story ID from the current branch name.");
+        return;
+    }
 
     const staged   = await gitHelper.stagedFiles();
     const unpushed = await gitHelper.unpushedCommitCount();
@@ -72,6 +81,9 @@ export async function commitAndPush(
             cancellable: false,
         },
         async (progress) => {
+            const changedFiles = staged.map(path => ({ path, change: "modified" as const }));
+            const { xml: packageXml, unmapped: unmappedFiles } = buildPackageXml(changedFiles);
+
             try {
                 progress.report({ message: "Committing & pushing feature branch..." });
                 await gitHelper.commitStagedAndPushFeature(commitMsg || `feat(${storyId}): update`);
@@ -80,10 +92,23 @@ export async function commitAndPush(
                 const outcome = await gitHelper.publishToDevBranch(storyId);
 
                 if (outcome.status === "conflict") {
+                    await gitHelper.appendAudit({
+                        operation: "commitAndPublish",
+                        storyId, branch: branch ?? undefined, outcome: "conflict",
+                        summary: `Conflict adding ${storyId} to the dev branch`,
+                        details: { commitMessage: commitMsg, changedFiles, packageXml, unmappedFiles, conflicts: outcome.conflicts },
+                    });
                     await reportOperationConflict(outcome.conflicts, "dev branch");
                     storyProvider.refresh();
                     return;
                 }
+
+                await gitHelper.appendAudit({
+                    operation: "commitAndPublish",
+                    storyId, branch: branch ?? undefined, outcome: "success",
+                    summary: `Published — feature branch pushed, changes added to dev`,
+                    details: { commitMessage: commitMsg, changedFiles, packageXml, unmappedFiles },
+                });
 
                 vscode.window.showInformationMessage(
                     `✅ ${storyId} published — feature branch pushed and changes added to the dev branch. ` +
@@ -91,6 +116,12 @@ export async function commitAndPush(
                 );
                 storyProvider.refresh();
             } catch (err) {
+                await gitHelper.appendAudit({
+                    operation: "commitAndPublish",
+                    storyId, branch: branch ?? undefined, outcome: "failure",
+                    summary: "Commit & Publish failed",
+                    details: { commitMessage: commitMsg, changedFiles, packageXml, unmappedFiles, error: String(err) },
+                });
                 vscode.window.showErrorMessage(`Commit & Publish failed: ${err}`);
             }
         }

@@ -9,6 +9,13 @@ import {
     extractStoryId, isFeatureBranch, getBaseBranch, getEnvironments, getPublishEnvironment,
     getPromotableEnvironments, canPromote, getTerminalStageMessage, promoBranchName, buildTicketUrl,
 } from "../config";
+import { runSetupChecks, SetupCheckItem } from "../SetupCheck";
+
+const SETUP_CONFIRMED_KEY = "sfDevops.setupConfirmed";
+
+function escapeHtml(s: string): string {
+    return String(s).replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]!));
+}
 
 export class StoryWebviewProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = "sfDevopsStoryView";
@@ -18,6 +25,7 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         private readonly _extensionUri: vscode.Uri,
         private readonly _bbClient: IGitProviderClient,
         private readonly _gitHelper: GitHelper,
+        private readonly _extContext: vscode.ExtensionContext,
         private readonly _userRole: string = "developer"
     ) {}
 
@@ -57,6 +65,16 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                     vscode.commands.executeCommand("sfDevops.syncBranch"); break;
                 case "refresh":
                     this.refresh(); break;
+                case "viewAuditLog":
+                    vscode.commands.executeCommand("sfDevops.viewAuditLog"); break;
+                case "openDeploymentDashboard":
+                    vscode.commands.executeCommand("sfDevops.openDeploymentDashboard"); break;
+                case "recheckSetup":
+                    this.refresh(); break;
+                case "confirmSetup":
+                    await this._extContext.workspaceState.update(SETUP_CONFIRMED_KEY, true);
+                    this.refresh();
+                    break;
             }
         });
 
@@ -67,6 +85,22 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         if (!this._view) { return; }
 
         try {
+            // Basic setup must be validated (and, the first time, explicitly confirmed)
+            // before anything else in this panel is shown.
+            const checks = await runSetupChecks(this._gitHelper, this._bbClient, this._extContext);
+            const requiredPassed = checks.filter(c => c.required).every(c => c.passed);
+            const confirmed = this._extContext.workspaceState.get<boolean>(SETUP_CONFIRMED_KEY, false);
+
+            if (!requiredPassed) {
+                if (confirmed) { await this._extContext.workspaceState.update(SETUP_CONFIRMED_KEY, false); }
+                this._view.webview.html = this._getSetupGateHtml(checks, false);
+                return;
+            }
+            if (!confirmed) {
+                this._view.webview.html = this._getSetupGateHtml(checks, true);
+                return;
+            }
+
             // A paused cherry-pick (conflict left for manual resolution) takes priority.
             const pending = await this._gitHelper.getPendingOperation();
             if (pending) {
@@ -250,9 +284,68 @@ ${onFeatureBranch ? `
 ` : ""}
 
 <div style="text-align:right; font-size:10px; color:#666; margin-top:4px">
+  <a href="#" onclick="send('openDeploymentDashboard')">🚀 deployments</a> &nbsp;|&nbsp;
+  <a href="#" onclick="send('viewAuditLog')">📋 audit trail</a> &nbsp;|&nbsp;
   <a href="#" onclick="send('refresh')">↻ refresh</a>
 </div>
 
+<script>
+  const vscode = acquireVsCodeApi();
+  function send(cmd, env) { vscode.postMessage({ command: cmd, env: env }); }
+</script>
+</body>
+</html>`;
+    }
+
+    /**
+     * Gated view shown until every required setup check passes AND the user has clicked
+     * "Confirm" once for this workspace. Nothing else in the panel renders until then.
+     */
+    private _getSetupGateHtml(checks: SetupCheckItem[], canConfirm: boolean): string {
+        const rows = checks.map(c => {
+            const icon = c.passed ? "✅" : (c.required ? "❌" : "⚠️");
+            const fixHtml = (!c.passed && c.fixSteps.length)
+                ? `<ol class="fix">${c.fixSteps.map(s => `<li>${escapeHtml(s)}</li>`).join("")}</ol>`
+                : "";
+            return `<div class="check ${c.passed ? "pass" : (c.required ? "fail" : "warn")}">
+  <div class="check-head"><span class="icon">${icon}</span><span class="label">${escapeHtml(c.label)}</span>${c.required ? "" : "<span class=\"opt\">optional</span>"}</div>
+  <div class="detail">${escapeHtml(c.detail)}</div>
+  ${fixHtml}
+</div>`;
+        }).join("");
+
+        const requiredFailing = checks.filter(c => c.required && !c.passed).length;
+        const statusBanner = requiredFailing > 0
+            ? `<div class="warning">⚠ ${requiredFailing} required check(s) failing — fix them below, then re-check.</div>`
+            : `<div class="info">✅ All required checks pass. Confirm below to start working.</div>`;
+
+        return `<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body     { font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; color: var(--vscode-foreground); }
+  h2       { font-size: 13px; margin: 4px 0 10px; }
+  .warning { background: #5a4a00; color: #ffd700; border-radius: 4px; padding: 6px 8px; font-size: 11px; margin-bottom: 10px; }
+  .info    { background: #1e3a5f; color: #90caf9; border-radius: 4px; padding: 6px 8px; font-size: 11px; margin-bottom: 10px; }
+  .check   { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
+  .check.fail { border-color: #c62828; }
+  .check.warn { border-color: #ffab70; }
+  .check-head { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+  .opt     { font-size: 10px; font-weight: normal; color: #888; margin-left: 4px; }
+  .detail  { font-size: 11px; color: var(--vscode-descriptionForeground); margin: 3px 0 0 22px; word-break: break-all; }
+  ol.fix   { margin: 6px 0 0 22px; padding-left: 16px; font-size: 11px; color: #ffab70; }
+  ol.fix li { padding: 1px 0; }
+  .btn     { display: block; width: 100%; padding: 7px; margin: 10px 0 4px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .btn-primary   { background: #0078d4; color: white; }
+  .btn-secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+</style>
+</head>
+<body>
+<h2>⚙ Setup Check</h2>
+${statusBanner}
+${rows}
+${canConfirm ? `<button class="btn btn-primary" onclick="send('confirmSetup')">✅ Confirm Setup &amp; Continue</button>` : ""}
+<button class="btn btn-secondary" onclick="send('recheckSetup')">🔄 Re-check Setup</button>
 <script>
   const vscode = acquireVsCodeApi();
   function send(cmd, env) { vscode.postMessage({ command: cmd, env: env }); }

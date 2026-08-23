@@ -68,12 +68,26 @@ export class CoverageWebviewProvider implements vscode.WebviewViewProvider {
                 const result = await runApexCoverage(root, apex, tests, threshold, devOrgAlias);
                 this._lastResult = result;
 
+                const testResults = {
+                    passed: result.passed, threshold, testsFailed: result.testsFailed, perClass: result.perClass,
+                };
+
                 if (result.error) {
+                    await this._gitHelper.appendAudit({
+                        operation: "runTests", storyId, outcome: "failure",
+                        summary: "Coverage check failed to run",
+                        details: { error: result.error },
+                    });
                     vscode.window.showErrorMessage(`Coverage check: ${result.error}`);
                 } else if (result.passed) {
                     await this._gitHelper.recordCoveragePassed(storyId, {
                         threshold, tests, classes: apex,
                         perClass: result.perClass,
+                    });
+                    await this._gitHelper.appendAudit({
+                        operation: "runTests", storyId, outcome: "success",
+                        summary: `Coverage passed (≥ ${threshold}%)`,
+                        details: { testResults },
                     });
                     const gateEnv = getCoverageGateEnvironment();
                     vscode.window.showInformationMessage(
@@ -82,6 +96,11 @@ export class CoverageWebviewProvider implements vscode.WebviewViewProvider {
                     this._storyProvider.refresh();
                 } else {
                     const failed = result.perClass.filter(c => !c.pass).map(c => `${c.name} ${c.percent}%`).join(", ");
+                    await this._gitHelper.appendAudit({
+                        operation: "runTests", storyId, outcome: "failure",
+                        summary: `Coverage below threshold or tests failed`,
+                        details: { testResults },
+                    });
                     vscode.window.showWarningMessage(
                         result.testsFailed > 0
                             ? `❌ ${result.testsFailed} test(s) failed — fix them and re-run.`

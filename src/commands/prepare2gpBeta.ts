@@ -11,6 +11,7 @@ import {
     getCurrentRole, getPackagingRequiredRole, getPackageBaselineBranch,
     getPackagingSourceBranch, extractStoryId,
 } from "../config";
+import { buildPackageXml } from "../AuditLog";
 
 export async function prepare2gpBetaCommand(
     providerClient: IGitProviderClient,
@@ -82,6 +83,21 @@ export async function prepare2gpBetaCommand(
                     `${result.unmanagedFiles.length} unmanaged, ${result.excludedFiles.length} excluded. ` +
                     `Release notes: ${result.releaseNotesPath}.`;
 
+                const changedFiles = [
+                    ...result.managedFiles.map(path => ({ path, change: "modified" as const })),
+                    ...result.unmanagedFiles.map(path => ({ path, change: "modified" as const })),
+                    ...result.deletedFiles.map(path => ({ path, change: "deleted" as const })),
+                ];
+                const { xml: packageXml, unmapped: unmappedFiles } = buildPackageXml(changedFiles);
+                await gitHelper.appendAudit({
+                    operation: "prepare2gpBeta", branch: result.branch, outcome: "success",
+                    summary: `${result.branch} pushed (v${result.version})`,
+                    details: {
+                        version: result.version, releaseNotesPath: result.releaseNotesPath,
+                        prUrl: result.prUrl, changedFiles, packageXml, unmappedFiles,
+                    },
+                });
+
                 if (result.prUrl) {
                     const choice = await vscode.window.showInformationMessage(summary, "Open PR");
                     if (choice === "Open PR") {
@@ -93,6 +109,11 @@ export async function prepare2gpBetaCommand(
                     );
                 }
             } catch (err) {
+                await gitHelper.appendAudit({
+                    operation: "prepare2gpBeta", outcome: "failure",
+                    summary: "Prepare 2GP Beta failed",
+                    details: { error: String(err) },
+                });
                 vscode.window.showErrorMessage(`Prepare 2GP Beta failed: ${err}`);
             } finally {
                 // Best-effort return to wherever the user was — this command isn't part of

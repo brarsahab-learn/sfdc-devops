@@ -1,4 +1,4 @@
-You are an expert TypeScript and VS Code Extension developer. This is the `sf-devops` VS Code extension, currently at version **3.0.1**, implementing an **Org-per-Branch Dual-Track Workflow** with an automated **2GP Packaging Release Gate & Documentation Engine**.
+You are an expert TypeScript and VS Code Extension developer. This is the `sf-devops` VS Code extension, currently at version **3.1.0**, implementing an **Org-per-Branch Dual-Track Workflow** with an automated **2GP Packaging Release Gate & Documentation Engine**, a local audit trail, a pre-flight Setup Check gate, and an in-extension Deployment Dashboard.
 
 ### High-Level Architecture
 

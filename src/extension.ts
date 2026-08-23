@@ -13,12 +13,14 @@ import { syncBranch }      from "./commands/syncBranch";
 import { prepare2gpBetaCommand } from "./commands/prepare2gpBeta";
 import { createGitProviderClient } from "./GitProviderClient";
 import { GitHelper }       from "./GitHelper";
+import { DeploymentDashboardPanel } from "./providers/DeploymentDashboardPanel";
 import {
     getCurrentRole, findEnvironment, canPromote,
-    isFeatureBranch, getBaseBranch, getStaleBranchThreshold,
+    isFeatureBranch, getBaseBranch, getStaleBranchThreshold, getPromotableEnvironments,
 } from "./config";
 
-let pipelinePoller: NodeJS.Timeout | undefined;
+let pipelinePoller:  NodeJS.Timeout | undefined;
+let deployPoller:    NodeJS.Timeout | undefined;
 
 export function activate(context: vscode.ExtensionContext) {
     console.log("Salesforce DevOps extension activated");
@@ -33,7 +35,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     // ── Register sidebar providers ───────────────────────────────────────────
     const storyProvider = new StoryWebviewProvider(
-        context.extensionUri, bbClient, gitHelper, userRole
+        context.extensionUri, bbClient, gitHelper, context, userRole
     );
     const coverageProvider = new CoverageWebviewProvider(
         context.extensionUri, gitHelper, storyProvider
@@ -117,12 +119,25 @@ export function activate(context: vscode.ExtensionContext) {
             });
             if (!picked) { return; }
             await gitHelper.checkoutBranch(picked);
+            await gitHelper.appendAudit({
+                operation: "resumeStory", branch: picked, outcome: "success",
+                summary: `Switched to ${picked}`,
+            });
             storyProvider.refresh();
             vscode.window.showInformationMessage(`Switched to ${picked}`);
         }),
 
         vscode.commands.registerCommand("sfDevops.openSettings", () => {
             vscode.commands.executeCommand("workbench.action.openSettings", "sfDevops");
+        }),
+
+        vscode.commands.registerCommand("sfDevops.viewAuditLog", async () => {
+            await gitHelper.regenerateAuditHtml();
+            await vscode.env.openExternal(vscode.Uri.file(await gitHelper.auditHtmlPath()));
+        }),
+
+        vscode.commands.registerCommand("sfDevops.openDeploymentDashboard", () => {
+            DeploymentDashboardPanel.createOrShow(gitHelper, userRole);
         }),
 
         // Dedicated 2GP Release Gate — occasional, admin-triggered, separate from the
@@ -138,11 +153,47 @@ export function activate(context: vscode.ExtensionContext) {
         dispose: () => { if (pipelinePoller) { clearInterval(pipelinePoller); } }
     });
 
+    // ── Poll for merges pending deployment every 60 seconds ─────────────────
+    // No external CI/webhook — this is what notices a merge landed on an env branch and
+    // hasn't been deployed via the Deployment Dashboard yet.
+    deployPoller = setInterval(() => { checkPendingDeployments(gitHelper); }, 60_000);
+    context.subscriptions.push({
+        dispose: () => { if (deployPoller) { clearInterval(deployPoller); } }
+    });
+
     // ── Warn if feature branch is behind prod on startup ────────────────────
     checkBranchStaleness(gitHelper, storyProvider);
 
     pipelineProvider.refresh();
     envProvider.refresh();
+}
+
+async function checkPendingDeployments(gitHelper: GitHelper): Promise<void> {
+    try {
+        await gitHelper.fetchRemote();
+        for (const env of getPromotableEnvironments()) {
+            const currentSha = await gitHelper.remoteHeadSha(env.branch);
+            if (!currentSha) { continue; }
+            const lastNotified = await gitHelper.getLastNotifiedSha(env.name);
+            if (lastNotified === currentSha) { continue; }  // already notified for this state
+
+            const lastDeploy = await gitHelper.getDeployState(env.name);
+            if (lastDeploy?.sha === currentSha) {
+                await gitHelper.setLastNotifiedSha(env.name, currentSha);  // caught up, nothing pending
+                continue;
+            }
+
+            await gitHelper.setLastNotifiedSha(env.name, currentSha);
+            const choice = await vscode.window.showInformationMessage(
+                `📦 New merge on ${env.label} — pending deployment.`,
+                "Open Dashboard"
+            );
+            if (choice === "Open Dashboard") {
+                await vscode.commands.executeCommand("sfDevops.openDeploymentDashboard");
+            }
+            DeploymentDashboardPanel.refreshIfOpen();
+        }
+    } catch { /* offline or transient — try again next tick */ }
 }
 
 async function checkBranchStaleness(
@@ -167,4 +218,5 @@ async function checkBranchStaleness(
 
 export function deactivate() {
     if (pipelinePoller) { clearInterval(pipelinePoller); }
+    if (deployPoller)   { clearInterval(deployPoller); }
 }
