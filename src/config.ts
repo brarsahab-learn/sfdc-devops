@@ -71,9 +71,11 @@ export function promoBranchName(storyId: string, env: string, mode: "validate" |
 // ── Ticketing / story ID ─────────────────────────────────────────────────────
 
 /**
- * Regex used to recognize a story/ticket key inside a branch name.
- * Falls back to deriving one from the (legacy) jiraProjectKey setting, then to a
- * generic Jira-shaped key, so existing configs keep working.
+ * Regex used to recognize a story/ticket key inside a branch name (e.g. to pull
+ * "IB-123" back out of a feature branch). Not used to validate story ID input —
+ * that accepts free text. Falls back to deriving one from the (legacy)
+ * jiraProjectKey setting, then to a generic Jira-shaped key, so existing configs
+ * keep working.
  */
 export function getTicketKeyPattern(): RegExp {
     const explicit = cfg().get<string>("ticketKeyPattern");
@@ -232,6 +234,11 @@ export function getCoverageTimeoutSeconds(): number {
 
 export function getDevOrgAlias(): string {
     return cfg().get<string>("devOrgAlias") || "";
+}
+
+/** Reference/informational only — prod is deployed by a separate DevOps team, not this extension. */
+export function getProdOrgAlias(): string {
+    return cfg().get<string>("prodOrgAlias") || "";
 }
 
 export function getSourceRootFolder(): string {

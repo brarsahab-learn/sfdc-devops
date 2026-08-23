@@ -271,7 +271,7 @@
 				},
 				"sfDevops.ticketKeyPattern": {
 					"type": "string",
-					"description": "Regex (without slashes) used to recognize a story/ticket key, both when validating new story IDs and when extracting one from a branch name. Defaults to a Jira-shaped key (PROJECT-123), or one derived from sfDevops.jiraProjectKey if that's set.",
+					"description": "Regex (without slashes) used to recognize a story/ticket key when extracting one from a branch name (e.g. \"IB-123\"). New story IDs are accepted as free text and are not validated against this pattern. Defaults to a Jira-shaped key (PROJECT-123), or one derived from sfDevops.jiraProjectKey if that's set.",
 					"default": ""
 				},
 				"sfDevops.jiraProjectKey": {
@@ -287,6 +287,11 @@
 				"sfDevops.devOrgAlias": {
 					"type": "string",
 					"description": "sf CLI alias/username of the dev (source) org used for the coverage check. Leave empty to use the CLI default org.",
+					"default": ""
+				},
+				"sfDevops.prodOrgAlias": {
+					"type": "string",
+					"description": "sf CLI alias/username of the production org (the \"main\" branch target). Reference/informational only — prod is deployed by a separate DevOps team, not by this extension.",
 					"default": ""
 				},
 				"sfDevops.coverageThreshold": {

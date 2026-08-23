@@ -5,7 +5,7 @@ import * as vscode from "vscode";
 import { IGitProviderClient } from "../GitProviderClient";
 import { GitHelper }          from "../GitHelper";
 import { StoryWebviewProvider}from "../providers/StoryWebviewProvider";
-import { getTicketKeyPattern, getTicketSystem } from "../config";
+import { getTicketSystem } from "../config";
 
 export async function startStory(
     _bbClient:     IGitProviderClient,
@@ -21,18 +21,17 @@ export async function startStory(
     }
 
     // Get the story/ticket ID from whichever ticketing system is configured
-    // (sfDevops.ticketSystem / sfDevops.ticketKeyPattern). Any format works, including
-    // free text, when ticketSystem is "none".
+    // (sfDevops.ticketSystem). Any format is accepted here, including free text
+    // (e.g. "IB-123" or an arbitrary description) — sfDevops.ticketKeyPattern is
+    // only used later to extract a key back out of a branch name.
     const ticketSystem = getTicketSystem();
-    const pattern      = getTicketKeyPattern();
-    const anchored     = new RegExp(`^(?:${pattern.source})$`, pattern.flags);
     const label        = ticketSystem === "none" ? "Story ID" : `${ticketSystem[0].toUpperCase()}${ticketSystem.slice(1)} Story ID`;
 
     const storyId = await vscode.window.showInputBox({
         prompt:      `Enter ${label}`,
         placeHolder: ticketSystem === "none" ? "e.g. STORY-101" : "PROJ-123",
         validateInput: (v: string) =>
-            ticketSystem === "none" || anchored.test(v.trim()) ? undefined : "Doesn't match sfDevops.ticketKeyPattern",
+            v.trim().length > 0 ? undefined : "Story ID cannot be empty",
     });
     if (!storyId) { return; }
 
