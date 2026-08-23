@@ -43,6 +43,34 @@ export class BitbucketClient implements IGitProviderClient {
         await this._context.secrets.delete("sfDevops.bbUsername"); // legacy key from older builds
     }
 
+    /**
+     * Like getAuthHeader(), but prompts for a token (once, then stored) if none exists yet.
+     * Used only by createPullRequest — an explicit, user-initiated action — never by the
+     * silent status reads above.
+     */
+    private async getOrPromptAuthHeader(): Promise<string | null> {
+        try {
+            return await this.getAuthHeader();
+        } catch {
+            const token = await vscode.window.showInputBox({
+                prompt: "Bitbucket Repository/Workspace Access Token (or Atlassian API token)",
+                password: true,
+                ignoreFocusOut: true,
+            });
+            if (!token) { return null; }
+            const email = await vscode.window.showInputBox({
+                prompt: "Atlassian account email (leave empty if using a Bitbucket Access Token)",
+                ignoreFocusOut: true,
+            });
+            await this._context.secrets.store("sfDevops.bbToken", token);
+            if (email) { await this._context.secrets.store("sfDevops.bbEmail", email); }
+            this._authHeader = email
+                ? `Basic ${Buffer.from(`${email}:${token}`).toString("base64")}`
+                : `Bearer ${token}`;
+            return this._authHeader;
+        }
+    }
+
     private get workspace(): string {
         return getRepoWorkspace();
     }
@@ -144,6 +172,44 @@ export class BitbucketClient implements IGitProviderClient {
             url:       `${BB_WEB}/${this.workspace}/${this.repoSlug}/pipelines/results/${p.build_number}`,
             createdOn: p.created_on,
         }));
+    }
+
+    /** Creates a real PR via the Bitbucket API (used by the 2GP Packaging Release Gate). */
+    async createPullRequest(
+        sourceBranch:      string,
+        destinationBranch: string,
+        title:             string,
+        body:              string,
+        repoOverride?:     { workspace: string; repoSlug: string }
+    ): Promise<{ url: string } | null> {
+        const workspace = repoOverride?.workspace || this.workspace;
+        const repoSlug  = repoOverride?.repoSlug  || this.repoSlug;
+        if (!workspace || !repoSlug) { return null; }
+
+        const auth = await this.getOrPromptAuthHeader();
+        if (!auth) { return null; }
+
+        try {
+            const result = await fetch(`${BB_API}/repositories/${workspace}/${repoSlug}/pullrequests`, {
+                method: "POST",
+                headers: { "Authorization": auth, "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    title,
+                    description: body,
+                    source:      { branch: { name: sourceBranch } },
+                    destination: { branch: { name: destinationBranch } },
+                }),
+            });
+            if (!result.ok) {
+                if (result.status === 401 || result.status === 403) { await this.clearCredentials(); }
+                throw new Error(`Bitbucket API ${result.status}: ${await result.text()}`);
+            }
+            const pr = await result.json() as any;
+            return { url: pr.links?.html?.href || `${BB_WEB}/${workspace}/${repoSlug}/pull-requests/${pr.id}` };
+        } catch (err) {
+            vscode.window.showWarningMessage(`Could not create the Bitbucket PR automatically: ${err}`);
+            return null;
+        }
     }
 
     // ── Repository info ──────────────────────────────────────────────────────

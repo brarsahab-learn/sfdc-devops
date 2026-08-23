@@ -6,6 +6,7 @@
 import * as vscode from "vscode";
 import { getGitProvider } from "./config";
 import { BitbucketClient } from "./BitbucketClient";
+import { GitHubClient } from "./GitHubClient";
 
 export interface PipelineRun {
     id:        number;
@@ -34,10 +35,26 @@ export interface IGitProviderClient {
 
     /** Parses an `origin` remote URL for this provider; null if it doesn't match. */
     parseRemoteUrl(remoteUrl: string): { workspace: string; repoSlug: string } | null;
+
+    /**
+     * Creates a real pull request via the provider's API (used by the 2GP Packaging
+     * Release Gate, which needs the generated release notes injected into the PR body —
+     * not just a prefilled browser form). Prompts for credentials if none are stored yet.
+     * Returns null if the repo identity is unknown or the API call fails; callers should
+     * fall back to buildPrUrl() + opening the browser in that case.
+     */
+    createPullRequest(
+        sourceBranch:      string,
+        destinationBranch: string,
+        title:             string,
+        body:              string,
+        repoOverride?:     { workspace: string; repoSlug: string }
+    ): Promise<{ url: string } | null>;
 }
 
 const registry: Record<string, new (context: vscode.ExtensionContext) => IGitProviderClient> = {
     bitbucket: BitbucketClient,
+    github:    GitHubClient,
 };
 
 /**

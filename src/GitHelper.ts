@@ -638,4 +638,89 @@ export class GitHelper {
     buildPRTitle(storyId: string, description: string, targetEnv: string): string {
         return `[${storyId}] ${description} → ${targetEnv.toUpperCase()}`;
     }
+
+    // ── Generic ref/branch primitives (used by the 2GP Packaging Release Gate) ─
+
+    /** Changed files between two remote refs, restricted to `pathspec` if given. */
+    async diffNameStatusBetween(
+        fromRef:  string,
+        toRef:    string,
+        pathspec?: string
+    ): Promise<{ path: string; change: "added" | "modified" | "deleted" }[]> {
+        const args = ["diff", "--name-status", `origin/${fromRef}`, `origin/${toRef}`];
+        if (pathspec) { args.push("--", pathspec); }
+        const raw = await this.git(args);
+
+        return raw.split("\n").filter(Boolean).map(line => {
+            const tab = line.indexOf("\t");
+            const code = line.slice(0, tab).trim();
+            const filePath = line.slice(tab + 1).trim();
+            const change: "added" | "modified" | "deleted" =
+                code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : "modified";
+            return { path: filePath, change };
+        });
+    }
+
+    /** File content at a remote ref, or null if it doesn't exist there. */
+    async fileContentAtRef(ref: string, filePath: string): Promise<string | null> {
+        try {
+            return await this.git(["show", `origin/${ref}:${filePath}`]);
+        } catch {
+            return null;
+        }
+    }
+
+    /** Commit log between two remote refs — used to build release notes' "work items" section. */
+    async commitLogBetween(
+        fromRef: string,
+        toRef:   string
+    ): Promise<{ hash: string; date: string; author: string; message: string }[]> {
+        const format = "%H%x1f%aI%x1f%an%x1f%s";
+        const raw = await this.git(["log", `origin/${fromRef}..origin/${toRef}`, `--pretty=format:${format}`]);
+        return raw.split("\n").filter(Boolean).map(line => {
+            const [hash, date, author, message] = line.split("\x1f");
+            return { hash: hash.slice(0, 7), date, author, message };
+        });
+    }
+
+    /** Creates (or resets) a local branch cut from a remote ref and checks it out. */
+    async createLocalBranchFrom(branchName: string, fromRef: string): Promise<void> {
+        await this.git(["fetch", "origin", "--prune"]);
+        await this.git(["checkout", "-B", branchName, `origin/${fromRef}`]);
+    }
+
+    /** Writes a file under the workspace root, creating parent directories as needed. */
+    async writeWorkspaceFile(relPath: string, content: string): Promise<void> {
+        const full = path.join(this.workspaceRoot, relPath);
+        await fs.promises.mkdir(path.dirname(full), { recursive: true });
+        await fs.promises.writeFile(full, content, "utf8");
+    }
+
+    /** Removes a file under the workspace root, if present. */
+    async removeWorkspaceFile(relPath: string): Promise<void> {
+        await fs.promises.rm(path.join(this.workspaceRoot, relPath), { force: true });
+    }
+
+    /** Reads a file under the workspace root, or null if it doesn't exist. */
+    async readWorkspaceFile(relPath: string): Promise<string | null> {
+        try {
+            return await fs.promises.readFile(path.join(this.workspaceRoot, relPath), "utf8");
+        } catch {
+            return null;
+        }
+    }
+
+    /** Stages everything and commits, if there's anything to commit. Returns whether a commit happened. */
+    async commitAllChanges(message: string): Promise<boolean> {
+        await this.git(["add", "-A"]);
+        const status = await this.git(["status", "--porcelain"]);
+        if (!status) { return false; }
+        await this.git(["commit", "-m", message]);
+        return true;
+    }
+
+    /** Pushes a local branch, creating its upstream on `origin`. */
+    async pushNewBranch(branchName: string): Promise<void> {
+        await this.git(["push", "-u", "origin", branchName]);
+    }
 }

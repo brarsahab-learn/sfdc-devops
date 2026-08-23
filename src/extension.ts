@@ -10,6 +10,7 @@ import { commitAndPush }   from "./commands/submitForReview";
 import { promoteStory }    from "./commands/promoteStory";
 import { resumePromotion, cancelPromotion } from "./commands/resumePromotion";
 import { syncBranch }      from "./commands/syncBranch";
+import { prepare2gpBetaCommand } from "./commands/prepare2gpBeta";
 import { createGitProviderClient } from "./GitProviderClient";
 import { GitHelper }       from "./GitHelper";
 import {
@@ -122,6 +123,12 @@ export function activate(context: vscode.ExtensionContext) {
 
         vscode.commands.registerCommand("sfDevops.openSettings", () => {
             vscode.commands.executeCommand("workbench.action.openSettings", "sfDevops");
+        }),
+
+        // Dedicated 2GP Release Gate — occasional, admin-triggered, separate from the
+        // day-to-day sprint commands above. See PackagingEngine.ts.
+        vscode.commands.registerCommand("sfDevops.prepare2gpBeta", async () => {
+            await prepare2gpBetaCommand(bbClient, gitHelper);
         })
     );
 

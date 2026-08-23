@@ -32,7 +32,7 @@ It manages your Salesforce story from **feature branch → dev → QA → UAT** 
    | `sfDevops.environments` | The full pipeline, in order. First entry publishes straight from the feature branch (no PR); every later entry is a promote/validate stage. Each entry can set its own branch name, icon, `requiredRole`, and `coverageGate`. | `dev` → `qa` (coverage-gated) → `uat` (requires `TrackLead`) |
    | `sfDevops.roles` | The role names your team uses. | `["developer", "TrackLead"]` |
    | `sfDevops.role` | This user's role — must be one of `sfDevops.roles`. Unlocks **Promote & Deploy** into any environment whose `requiredRole` matches. | `developer` |
-   | `sfDevops.gitProvider` / `sfDevops.repoWorkspace` / `sfDevops.repoSlug` | Git host and repo identity for pull requests and pipeline status. Only Bitbucket is implemented today. | `bitbucket` |
+   | `sfDevops.gitProvider` / `sfDevops.repoWorkspace` / `sfDevops.repoSlug` | Git host and repo identity for pull requests and pipeline status. `bitbucket` and `github` are implemented. | `bitbucket` |
    | `sfDevops.ticketSystem` / `sfDevops.ticketKeyPattern` / `sfDevops.ticketBaseUrl` | Which ticketing system story IDs come from, the regex used to recognize one, and an optional link-out. Set `ticketSystem` to `none` to skip format validation entirely. | `jira` |
    | `sfDevops.featureBranchTemplate` / `sfDevops.promotionBranchTemplate` / `sfDevops.validateBranchTemplate` | Branch naming templates (`{storyId}`, `{env}` placeholders). | `feature/{storyId}`, `promotion/{storyId}-to-{env}`, `validate/{storyId}-to-{env}` |
    | `sfDevops.devOrgAlias` | Dev-org alias for the coverage check. Empty = your default `sf` org. | `""` |
@@ -164,3 +164,37 @@ The operation continues from where it stopped.
 5. **Promote & Deploy — UAT** (TrackLead) → approve & merge the PR → UAT deploys.
 
 That's this extension's story lifecycle (Prod is deployed by the DevOps team separately). 🎉
+
+---
+
+## 12. 2GP Packaging Release Gate (new in v3.0.1)
+
+A **second, occasional track**, separate from the sprint flow above — it's how a batch of UAT-approved work gets turned into a 2GP package beta. It doesn't touch `sfDevops.environments`/`baseBranch` at all; everything it needs lives under `sfDevops.packaging` and two related settings.
+
+**Command:** `Ctrl+Shift+P` → **SF-Ops: Prepare 2GP Beta from UAT**
+
+What it does, in order:
+1. Compares `origin/<packagingSourceBranch>` (defaults to your `uat` environment's branch) against `origin/packageBaselineBranch` (default `2gp-main`).
+2. Creates `2gp-beta/vX.Y.Z`, cut fresh from the baseline.
+3. Sorts every changed file under `sourceBase` into one of three buckets:
+   - **`excludedMetadata`** glob matches → skipped entirely.
+   - **`patchOverrides`** glob matches → copied to `unmanagedTarget`.
+   - everything else → copied to `managedTarget`.
+4. Bumps the package version in `sfdx-project.json` (you pick patch/minor/major) and writes `docs/releases/vX.Y.Z-RELEASE-NOTES.md` — categorized file lists plus every commit (and any recognized story/ticket ID) between the two branches.
+5. Commits, pushes `2gp-beta/vX.Y.Z`, and opens a PR back to the baseline with the release notes as the PR body. If no Git host credentials are stored yet, it prompts once (then remembers) — if it still can't create the PR via the API, it falls back to opening a prefilled browser page instead.
+
+**Settings** (`Ctrl+,` → search `sfDevops.packag`):
+
+| Setting | What it's for | Default |
+|---|---|---|
+| `sfDevops.packageBaselineBranch` | The packaging baseline — beta branches are cut from here, PRs target here. | `2gp-main` |
+| `sfDevops.packagingSourceBranch` | Branch compared against the baseline. Empty = your `uat` environment's branch. | `""` |
+| `sfDevops.packagingRequiredRole` | Role required to run the command. Empty = anyone. | `""` |
+| `sfDevops.packaging.sourceBase` | Standard flat-structure root compared between branches. | `force-app/main/default` |
+| `sfDevops.packaging.managedTarget` / `unmanagedTarget` | Destination folders on the beta branch. | `force-app/managed/main/default`, `force-app/unmanaged/main/default` |
+| `sfDevops.packaging.patchOverrides` | Globs routed to `unmanagedTarget` (patch overrides, server-error workarounds, custom configs). | see settings default |
+| `sfDevops.packaging.excludedMetadata` | Globs left out of the beta entirely. | `**/profiles/**`, `**/settings/**` |
+| `sfDevops.packaging.docsDirectory` | Where the generated release notes go. | `docs/releases` |
+| `sfDevops.packaging.packageName` | Which `packageDirectories` entry in `sfdx-project.json` to version-bump. Empty = first one with a `versionNumber`. | `""` |
+
+> This command creates a real branch, pushes it, and opens a real PR. Review the confirmation dialog's summary before accepting.

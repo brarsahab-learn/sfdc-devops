@@ -1,8 +1,8 @@
 {
 	"name": "sf-devops",
 	"displayName": "Salesforce DevOps",
-	"description": "Generic, settings-driven Salesforce CI/CD workflow — 1-click story management, pipeline status, environment promotion",
-	"version": "2.0.0",
+	"description": "Generic, settings-driven Salesforce CI/CD workflow — 1-click story management, pipeline status, environment promotion, and an org-per-branch 2GP packaging release gate",
+	"version": "3.0.1",
 	"publisher": "your-company",
 	"engines": {
 		"vscode": "^1.85.0"
@@ -108,6 +108,12 @@
 				"title": "Configure Settings",
 				"icon": "$(gear)",
 				"category": "Salesforce DevOps"
+			},
+			{
+				"command": "sfDevops.prepare2gpBeta",
+				"title": "Prepare 2GP Beta from UAT",
+				"icon": "$(package)",
+				"category": "SF-Ops"
 			}
 		],
 		"configuration": {
@@ -115,9 +121,10 @@
 			"properties": {
 				"sfDevops.gitProvider": {
 					"type": "string",
-					"description": "Git hosting provider for pull requests and pipeline status. Only \"bitbucket\" is implemented today; other values fall back to Bitbucket with a warning.",
+					"description": "Git hosting provider for pull requests and pipeline status. \"bitbucket\" and \"github\" are implemented; other values fall back to Bitbucket with a warning.",
 					"enum": [
-						"bitbucket"
+						"bitbucket",
+						"github"
 					],
 					"default": "bitbucket"
 				},
@@ -222,6 +229,10 @@
 									"coverageGate": {
 										"type": "boolean",
 										"description": "Require the Apex coverage gate to pass before promoting into this environment."
+									},
+									"orgAlias": {
+										"type": "string",
+										"description": "sf CLI alias/username of the org this environment deploys to. Purely informational/reference today — day-to-day deploys still happen via the CI pipeline triggered by the PR merge."
 									}
 								}
 							}
@@ -297,6 +308,78 @@
 					"type": "number",
 					"description": "Number of commits behind the base branch before the extension warns you to sync.",
 					"default": 5
+				},
+				"sfDevops.packageBaselineBranch": {
+					"type": "string",
+					"description": "2GP Release Gate: the packaging baseline branch. \"Prepare 2GP Beta from UAT\" cuts its beta branch from here and opens its PR back to it.",
+					"default": "2gp-main"
+				},
+				"sfDevops.packagingSourceBranch": {
+					"type": "string",
+					"description": "2GP Release Gate: the branch compared against sfDevops.packageBaselineBranch to decide what's changed. Defaults to the \"uat\" entry's branch in sfDevops.environments if empty.",
+					"default": ""
+				},
+				"sfDevops.packagingRequiredRole": {
+					"type": "string",
+					"description": "Role (from sfDevops.roles) required to run \"SF-Ops: Prepare 2GP Beta from UAT\". Leave empty to allow any role.",
+					"default": ""
+				},
+				"sfDevops.packaging": {
+					"type": "object",
+					"description": "Settings for the 2GP Packaging Release Gate — how changed metadata between sfDevops.packagingSourceBranch and sfDevops.packageBaselineBranch is segregated and packaged.",
+					"properties": {
+						"packageName": {
+							"type": "string",
+							"description": "The \"package\" value of the packageDirectories entry in sfdx-project.json to version-bump. Leave empty to use the first entry that has a versionNumber."
+						},
+						"sourceBase": {
+							"type": "string",
+							"description": "Standard flat-structure source root compared between branches."
+						},
+						"managedTarget": {
+							"type": "string",
+							"description": "Destination folder (on the 2gp-beta branch) for metadata not matched by patchOverrides or excludedMetadata."
+						},
+						"unmanagedTarget": {
+							"type": "string",
+							"description": "Destination folder (on the 2gp-beta branch) for metadata matched by patchOverrides."
+						},
+						"docsDirectory": {
+							"type": "string",
+							"description": "Folder the generated vX.Y.Z-RELEASE-NOTES.md is written to."
+						},
+						"patchOverrides": {
+							"type": "array",
+							"items": { "type": "string" },
+							"description": "Glob patterns (relative to sourceBase) for components that must go to unmanagedTarget instead of managedTarget — patch overrides, server-error workarounds, custom configs."
+						},
+						"excludedMetadata": {
+							"type": "array",
+							"items": { "type": "string" },
+							"description": "Glob patterns (relative to sourceBase) for components excluded from the 2GP beta entirely — copied to neither bucket."
+						},
+						"devHubOrgAlias": {
+							"type": "string",
+							"description": "sf CLI alias/username of the Dev Hub used for this package. Reference setting — not yet invoked by \"Prepare 2GP Beta from UAT\" itself."
+						}
+					},
+					"default": {
+						"packageName": "",
+						"sourceBase": "force-app/main/default",
+						"managedTarget": "force-app/managed/main/default",
+						"unmanagedTarget": "force-app/unmanaged/main/default",
+						"docsDirectory": "docs/releases",
+						"patchOverrides": [
+							"**/classes/*ErrorWorkaround*",
+							"**/layouts/**",
+							"**/customMetadata/PatchConfig.*"
+						],
+						"excludedMetadata": [
+							"**/profiles/**",
+							"**/settings/**"
+						],
+						"devHubOrgAlias": ""
+					}
 				}
 			}
 		}
@@ -314,10 +397,5 @@
 		"typescript": "^5.3.0",
 		"@vscode/vsce": "^2.22.0"
 	},
-	"dependencies": {},
-	"__metadata": {
-		"installedTimestamp": 1787411596342,
-		"targetPlatform": "undefined",
-		"size": 316597
-	}
+	"dependencies": {}
 }

@@ -128,6 +128,7 @@ export interface EnvironmentSetting {
     icon?:        string;
     requiredRole?: string;
     coverageGate?: boolean;
+    orgAlias?:    string;
 }
 
 export interface ResolvedEnvironment {
@@ -137,6 +138,7 @@ export interface ResolvedEnvironment {
     icon:         string;
     requiredRole?: string;
     coverageGate: boolean;
+    orgAlias?:    string;
 }
 
 const DEFAULT_ENVIRONMENTS: EnvironmentSetting[] = [
@@ -165,6 +167,7 @@ export function getEnvironments(): ResolvedEnvironment[] {
             icon:         e.icon || "circle-outline",
             requiredRole: e.requiredRole,
             coverageGate: e.coverageGate ?? false,
+            orgAlias:     e.orgAlias,
         };
     });
 }
@@ -239,4 +242,65 @@ export function getSourceRootFolder(): string {
 
 export function getStaleBranchThreshold(): number {
     return cfg().get<number>("staleBranchThreshold") ?? 5;
+}
+
+// ── 2GP Packaging Release Gate (Dedicated 2GP Release Gate, triggered from the UAT
+// branch) ─────────────────────────────────────────────────────────────────────
+// A second, occasional track distinct from the day-to-day sprint flow above: it doesn't
+// touch sfDevops.environments/baseBranch at all, it compares UAT against a separate
+// packaging baseline branch and produces a 2GP beta PR. Everything it needs is under
+// sfDevops.packaging so it stays fully settings-driven, same as the rest of this file.
+
+export function getPackageBaselineBranch(): string {
+    return cfg().get<string>("packageBaselineBranch") || "2gp-main";
+}
+
+/** Branch the 2GP gate reads its "what changed" diff from — defaults to the UAT environment's branch. */
+export function getPackagingSourceBranch(): string {
+    const explicit = cfg().get<string>("packagingSourceBranch");
+    if (explicit) { return explicit; }
+    const uat = findEnvironment("uat");
+    return uat?.branch || "uat";
+}
+
+/** Role (from sfDevops.roles) required to run "Prepare 2GP Beta from UAT". Empty = unrestricted. */
+export function getPackagingRequiredRole(): string {
+    return cfg().get<string>("packagingRequiredRole") || "";
+}
+
+export interface PackagingSettings {
+    packageName:      string;
+    sourceBase:       string;
+    managedTarget:    string;
+    unmanagedTarget:  string;
+    docsDirectory:    string;
+    patchOverrides:   string[];
+    excludedMetadata: string[];
+    devHubOrgAlias:   string;
+}
+
+const DEFAULT_PACKAGING: PackagingSettings = {
+    packageName:      "",
+    sourceBase:       "force-app/main/default",
+    managedTarget:    "force-app/managed/main/default",
+    unmanagedTarget:  "force-app/unmanaged/main/default",
+    docsDirectory:    "docs/releases",
+    patchOverrides:   [],
+    excludedMetadata: ["**/profiles/**", "**/settings/**"],
+    devHubOrgAlias:   "",
+};
+
+/** Everything the 2GP Release Gate needs — a single settings object, sfDevops.packaging. */
+export function getPackagingSettings(): PackagingSettings {
+    const raw = cfg().get<Partial<PackagingSettings>>("packaging") || {};
+    return {
+        packageName:      raw.packageName ?? DEFAULT_PACKAGING.packageName,
+        sourceBase:       raw.sourceBase ?? DEFAULT_PACKAGING.sourceBase,
+        managedTarget:    raw.managedTarget ?? DEFAULT_PACKAGING.managedTarget,
+        unmanagedTarget:  raw.unmanagedTarget ?? DEFAULT_PACKAGING.unmanagedTarget,
+        docsDirectory:    raw.docsDirectory ?? DEFAULT_PACKAGING.docsDirectory,
+        patchOverrides:   raw.patchOverrides ?? DEFAULT_PACKAGING.patchOverrides,
+        excludedMetadata: raw.excludedMetadata ?? DEFAULT_PACKAGING.excludedMetadata,
+        devHubOrgAlias:   raw.devHubOrgAlias ?? DEFAULT_PACKAGING.devHubOrgAlias,
+    };
 }
