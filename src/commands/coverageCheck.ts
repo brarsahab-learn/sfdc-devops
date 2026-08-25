@@ -1,11 +1,10 @@
-// coverageCheck.ts — runs Apex tests in the dev (source) org and checks per-class coverage.
-// Used by the Code Coverage panel to enforce the one-time ≥ threshold gate before QA.
+// coverageCheck.ts — runs Apex tests in whichever org the story's changes are currently
+// sitting in and checks per-class coverage. Used by the Code Coverage panel to enforce
+// the one-time ≥ threshold gate before the story can be promoted into the gated environment.
 
-import { execFile } from "child_process";
-import { promisify } from "util";
-import { getCoverageThreshold, getDevOrgAlias, getCoverageTimeoutSeconds } from "../config";
-
-const execFileAsync = promisify(execFile);
+import { execSf } from "../SfCli";
+import { log, revealLog } from "../Log";
+import { getCoverageThreshold, getCoverageSourceOrg, getCoverageTimeoutSeconds } from "../config";
 
 export interface ClassCoverage {
     name:    string;
@@ -23,15 +22,17 @@ export interface CoverageResult {
 }
 
 /**
- * Runs `sf apex run test` for the given test classes against the dev org and returns
- * the coverage of the feature branch's Apex classes.
+ * Runs `sf apex run test` for the given test classes against the org the story's changes
+ * are currently in (see getCoverageSourceOrg — not always "dev": if the coverage gate sits
+ * further down the pipeline, this is that prior stage's org) and returns the coverage of
+ * the feature branch's Apex classes.
  */
 export async function runApexCoverage(
-    workspaceRoot:  string,
-    featureClasses: string[],
-    testClasses:    string[],
-    threshold:      number,
-    devOrgAlias:    string
+    workspaceRoot:   string,
+    featureClasses:  string[],
+    testClasses:     string[],
+    threshold:       number,
+    targetOrgAlias:  string
 ): Promise<CoverageResult> {
     const base: CoverageResult = {
         ran: false, passed: false, threshold, perClass: [], testsFailed: 0,
@@ -49,22 +50,25 @@ export async function runApexCoverage(
     const args = ["apex", "run", "test"];
     for (const t of testClasses) { args.push("--tests", t); }
     args.push("--code-coverage", "--json", "--wait", String(Math.max(1, Math.round(timeoutSeconds / 60))));
-    if (devOrgAlias) { args.push("--target-org", devOrgAlias); }
+    if (targetOrgAlias) { args.push("--target-org", targetOrgAlias); }
+
+    revealLog(`Running ${testClasses.length} Apex test class(es) against ${targetOrgAlias || "the default org"}`);
 
     let stdout = "";
     try {
-        const r = await execFileAsync("sf", args, {
+        const r = await execSf(args, {
             cwd: workspaceRoot,
             timeout: timeoutSeconds * 1000,   // tests can take minutes; configurable via sfDevops.coverageTimeoutSeconds
             maxBuffer: 20 * 1024 * 1024,
-            shell: true,                  // resolve sf / sf.cmd via PATH
         });
         stdout = r.stdout;
     } catch (e: any) {
         // sf exits non-zero on test failures but still emits JSON on stdout.
         stdout = e?.stdout ?? "";
         if (!stdout) {
-            return { ...base, error: friendlyCliError(e) };
+            const message = friendlyCliError(e);
+            log(`Failed — ${message}`);
+            return { ...base, error: message };
         }
     }
 
@@ -72,6 +76,7 @@ export async function runApexCoverage(
     try {
         parsed = JSON.parse(stdout);
     } catch {
+        log("Failed — could not read the Salesforce CLI response.");
         return { ...base, error: "Could not parse the Salesforce CLI response." };
     }
 
@@ -91,6 +96,17 @@ export async function runApexCoverage(
 
     const passed = failing === 0 && perClass.every((c) => c.pass);
 
+    if (passed) {
+        log(`Coverage check passed — ${perClass.length}/${perClass.length} class(es) ≥ ${threshold}%.`);
+    } else {
+        if (failing > 0) { log(`Coverage check failed — ${failing} test(s) failed.`); }
+        const below = perClass.filter(c => !c.pass);
+        if (below.length > 0) {
+            log(`${below.length} class(es) below ${threshold}%:`);
+            for (const c of below) { log(`  ${c.name}: ${c.percent}%`); }
+        }
+    }
+
     return { ran: true, passed, threshold, perClass, testsFailed: failing };
 }
 
@@ -100,15 +116,43 @@ function friendlyCliError(e: any): string {
         return "Salesforce CLI (sf) was not found on PATH. Install it and re-try.";
     }
     if (/No default environment|No target org|not authorized|expired/i.test(msg)) {
-        return "No authenticated dev org found. Authenticate the dev org (or set sfDevops.devOrgAlias).";
+        return "No authenticated org found for the configured alias — authenticate it (see the Setup Check panel) or fix sfDevops.devOrgAlias / environments[].orgAlias.";
     }
     return msg.split("\n")[0];
 }
 
-/** Reads the coverage threshold + dev org alias from settings. */
-export function coverageSettings(): { threshold: number; devOrgAlias: string } {
+/** Reads the coverage threshold + which org tests should actually run against. */
+export function coverageSettings(): { threshold: number; sourceOrgAlias: string; sourceOrgLabel: string } {
+    const { alias, label } = getCoverageSourceOrg();
     return {
-        threshold:   getCoverageThreshold(),
-        devOrgAlias: getDevOrgAlias(),
+        threshold:      getCoverageThreshold(),
+        sourceOrgAlias: alias,
+        sourceOrgLabel: label,
     };
+}
+
+export interface RelatedTestClasses {
+    /** Test class found for a feature class, by naming convention (<Class>Test, <Class>_Test, Test<Class>, <Class>Tests). */
+    found:   string[];
+    /** Feature classes with no matching test class found — still need one entered manually. */
+    missing: string[];
+}
+
+/**
+ * Guesses each feature class's test class by the naming convention Salesforce tooling
+ * (including VS Code's own Salesforce extension) already relies on — no dependency graph,
+ * no Tooling API query, just a filename match against what's actually in the repo. This is
+ * a best-effort suggestion, not a guarantee a class is actually tested by it.
+ */
+export function findRelatedTestClasses(featureClasses: string[], apexClassBasenames: Set<string>): RelatedTestClasses {
+    const found: string[] = [];
+    const missing: string[] = [];
+
+    for (const name of featureClasses) {
+        const candidates = [`${name}Test`, `${name}_Test`, `Test${name}`, `${name}Tests`];
+        const match = candidates.find(c => apexClassBasenames.has(c));
+        if (match) { found.push(match); } else { missing.push(name); }
+    }
+
+    return { found: Array.from(new Set(found)), missing };
 }

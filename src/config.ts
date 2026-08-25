@@ -137,11 +137,17 @@ export function sanitizeStoryId(input: string): string {
 // ── Roles ────────────────────────────────────────────────────────────────────
 
 export function getRoles(): string[] {
-    return cfg().get<string[]>("roles") || ["developer", "TrackLead"];
+    return cfg().get<string[]>("roles") || ["Developer", "Lead", "Admin"];
 }
 
+/**
+ * @deprecated Legacy fallback only — real role resolution goes through
+ * RoleManager.getEffectiveRole(context), which is password-gated for Lead/Admin and
+ * stored outside this freely-editable setting. This getter stays as the bootstrap
+ * default for a fresh install (before anyone has ever changed role via that flow).
+ */
 export function getCurrentRole(): string {
-    return cfg().get<string>("role") || "developer";
+    return cfg().get<string>("role") || "Developer";
 }
 
 // ── Environments ─────────────────────────────────────────────────────────────
@@ -153,8 +159,11 @@ export interface EnvironmentSetting {
     icon?:        string;
     requiredRole?: string;
     coverageGate?: boolean;
+    signoffGate?: boolean;
     orgAlias?:    string;
     deployTestLevel?: string;
+    /** Explicit override for "is this Prod" — see ResolvedEnvironment.isProd. */
+    isProd?:      boolean;
 }
 
 export interface ResolvedEnvironment {
@@ -164,14 +173,28 @@ export interface ResolvedEnvironment {
     icon:         string;
     requiredRole?: string;
     coverageGate: boolean;
+    /** True if a human sign-off must be recorded on THIS environment before the story can be promoted to whatever comes after it. */
+    signoffGate:  boolean;
     orgAlias?:    string;
     deployTestLevel: string;
+    /**
+     * True for the environment safety-critical gates (like auto-deploy-after-validate)
+     * must never bypass. Defaults to `name === "prod"` for backward compatibility, but can
+     * be set explicitly via sfDevops.environments[].isProd — e.g. if a team renames their
+     * production environment, the implicit name-based default would otherwise silently
+     * stop protecting it.
+     */
+    isProd:       boolean;
 }
 
 const DEFAULT_ENVIRONMENTS: EnvironmentSetting[] = [
     { name: "dev" },
-    { name: "qa",  coverageGate: true },
-    { name: "uat", requiredRole: "TrackLead" },
+    { name: "qa",   coverageGate: true },
+    { name: "uat",  requiredRole: "Lead" },
+    // Prod's branch is deliberately the same as sfDevops.baseBranch ("main") — a
+    // trunk-based model where feature branches cut from main and promotion eventually
+    // merges back into it. Admin-only: Lead can do everything except this last step.
+    { name: "prod", branch: "main", requiredRole: "Admin" },
 ];
 
 /**
@@ -185,19 +208,35 @@ export function getEnvironments(): ResolvedEnvironment[] {
     const raw = cfg().get<Array<EnvironmentSetting | string>>("environments");
     const list = (raw && raw.length > 0) ? raw : DEFAULT_ENVIRONMENTS;
 
-    return list.map((entry): ResolvedEnvironment => {
-        const e: EnvironmentSetting = typeof entry === "string" ? { name: entry } : entry;
-        return {
-            name:         e.name,
-            label:        e.label || e.name.toUpperCase(),
-            branch:       e.branch || e.name,
-            icon:         e.icon || "circle-outline",
-            requiredRole: e.requiredRole,
-            coverageGate: e.coverageGate ?? false,
-            orgAlias:     e.orgAlias,
-            deployTestLevel: e.deployTestLevel || "RunLocalTests",
-        };
-    });
+    return list
+        .filter((entry): entry is EnvironmentSetting | string => {
+            // A malformed sfDevops.environments entry (null, {}, missing "name") would
+            // otherwise throw deep inside every panel's refresh() with an unhelpful
+            // "Cannot read properties of undefined" — skip it with a clear warning instead.
+            const name = typeof entry === "string" ? entry : entry?.name;
+            if (!name) {
+                vscode.window.showWarningMessage(
+                    `Ignoring an sfDevops.environments entry with no "name" — check your settings.`
+                );
+                return false;
+            }
+            return true;
+        })
+        .map((entry): ResolvedEnvironment => {
+            const e: EnvironmentSetting = typeof entry === "string" ? { name: entry } : entry;
+            return {
+                name:         e.name,
+                label:        e.label || e.name.toUpperCase(),
+                branch:       e.branch || e.name,
+                icon:         e.icon || "circle-outline",
+                requiredRole: e.requiredRole,
+                coverageGate: e.coverageGate ?? false,
+                signoffGate:  e.signoffGate ?? false,
+                orgAlias:     e.orgAlias,
+                deployTestLevel: e.deployTestLevel || "RunRelevantTests",
+                isProd:       e.isProd ?? (e.name === "prod"),
+            };
+        });
 }
 
 /** The first configured environment — published directly from the feature branch, no PR. */
@@ -219,6 +258,29 @@ export function getCoverageGateEnvironment(): ResolvedEnvironment | undefined {
     return getPromotableEnvironments().find(e => e.coverageGate);
 }
 
+/**
+ * Where the coverage check should actually run tests: the org the story's changes are
+ * CURRENTLY sitting in — i.e. the environment immediately before the coverage-gated one
+ * in the pipeline — not always a hardcoded "dev". If the gate sits right after the
+ * publish stage (the common case), that's sfDevops.devOrgAlias (the canonical setting
+ * for that stage); if the gate is further down the pipeline (e.g. on uat after a qa
+ * stage), it's that prior environment's own orgAlias.
+ */
+export function getCoverageSourceOrg(): { alias: string; label: string } {
+    const devAlias = getDevOrgAlias();
+    const gateEnv  = getCoverageGateEnvironment();
+    if (!gateEnv) { return { alias: devAlias, label: "Dev" }; }
+
+    const envs = getEnvironments();
+    const idx  = envs.findIndex(e => e.name === gateEnv.name);
+    const prev = idx > 0 ? envs[idx - 1] : undefined;
+    if (!prev || idx === 1) {
+        // Gate sits right after the publish/dev stage — devOrgAlias is that stage's setting.
+        return { alias: devAlias || prev?.orgAlias || "", label: "Dev" };
+    }
+    return { alias: prev.orgAlias || devAlias || "", label: prev.label };
+}
+
 /** True if `role` is allowed to run Promote & Deploy into `env` (Validate Only is always allowed). */
 export function canPromote(role: string, env: ResolvedEnvironment): boolean {
     return !env.requiredRole || role === env.requiredRole;
@@ -237,6 +299,11 @@ export function getTerminalStageMessage(): string {
 
 export function getGitProvider(): string {
     return cfg().get<string>("gitProvider") || "bitbucket";
+}
+
+/** The raw sfDevops.gitProvider setting, or undefined if left unset — lets callers tell "unset" apart from "explicitly bitbucket" (getGitProvider() can't, since it applies the default itself). */
+export function getGitProviderRaw(): string | undefined {
+    return cfg().get<string>("gitProvider") || undefined;
 }
 
 /** Provider-neutral repo identity, falling back to the legacy Bitbucket-specific setting names. */
@@ -265,6 +332,69 @@ export function getDevOrgAlias(): string {
 /** Reference/informational only — prod is deployed by a separate DevOps team, not this extension. */
 export function getProdOrgAlias(): string {
     return cfg().get<string>("prodOrgAlias") || "";
+}
+
+// ── Org alias management (dev / qa / uat / prod) ─────────────────────────────
+// A fixed, canonical set of 4 slots — matches this extension's default pipeline
+// shape (DEFAULT_ENVIRONMENTS below) plus the reference-only prod setting. Used by
+// the Setup Check panel to let a user view/edit/authenticate each one directly,
+// without hand-editing settings.json.
+
+export type OrgAliasSlotKey = "dev" | "qa" | "uat" | "prod";
+
+export interface OrgAliasSlot {
+    key:   OrgAliasSlotKey;
+    label: string;
+    alias: string;
+}
+
+export function getOrgAliasSlots(): OrgAliasSlot[] {
+    const qa  = findEnvironment("qa");
+    const uat = findEnvironment("uat");
+    const prodEnv = findEnvironment("prod");
+
+    return [
+        { key: "dev",  label: "Dev",              alias: getDevOrgAlias() },
+        { key: "qa",   label: qa?.label  ?? "QA",  alias: qa?.orgAlias  ?? "" },
+        { key: "uat",  label: uat?.label ?? "UAT", alias: uat?.orgAlias ?? "" },
+        // prodEnv only exists if a team has deliberately opted "prod" into the real
+        // promotion pipeline (sfDevops.environments) — otherwise this stays the
+        // reference-only prodOrgAlias setting, same as everywhere else in the extension.
+        { key: "prod", label: prodEnv?.label ?? "Prod", alias: prodEnv?.orgAlias || getProdOrgAlias() },
+    ];
+}
+
+/** Materializes the resolved environments array (defaults included) into an explicit setting, so a single-field edit doesn't wipe out the rest. */
+async function updateEnvironmentOrgAlias(envName: string, alias: string): Promise<void> {
+    const raw = cfg().get<Array<EnvironmentSetting | string>>("environments");
+    const base: EnvironmentSetting[] = (raw && raw.length > 0)
+        ? raw.map(e => (typeof e === "string" ? { name: e } : { ...e }))
+        : DEFAULT_ENVIRONMENTS.map(e => ({ ...e }));
+
+    const existing = base.find(e => e.name === envName);
+    if (existing) { existing.orgAlias = alias; } else { base.push({ name: envName, orgAlias: alias }); }
+
+    await cfg().update("environments", base, vscode.ConfigurationTarget.Workspace);
+}
+
+/**
+ * Saves an org alias for one of the 4 canonical slots. "prod" is deliberately never
+ * added to sfDevops.environments here — that would silently turn Prod into a real,
+ * everyone-visible promotion stage. It only updates the reference-only prodOrgAlias
+ * setting, syncing environments[].orgAlias too if (and only if) a "prod" entry has
+ * already been deliberately added there.
+ */
+export async function setOrgAliasSlot(key: OrgAliasSlotKey, alias: string): Promise<void> {
+    if (key === "dev") {
+        await cfg().update("devOrgAlias", alias, vscode.ConfigurationTarget.Workspace);
+        return;
+    }
+    if (key === "prod") {
+        await cfg().update("prodOrgAlias", alias, vscode.ConfigurationTarget.Workspace);
+        if (getEnvironments().some(e => e.name === "prod")) { await updateEnvironmentOrgAlias("prod", alias); }
+        return;
+    }
+    await updateEnvironmentOrgAlias(key, alias);
 }
 
 export function getSourceRootFolder(): string {

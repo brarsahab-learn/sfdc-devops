@@ -4,7 +4,7 @@
 // not to BitbucketClient directly — so adding a provider is additive, not a rewrite.
 
 import * as vscode from "vscode";
-import { getGitProvider } from "./config";
+import { getGitProviderRaw } from "./config";
 import { BitbucketClient } from "./BitbucketClient";
 import { GitHubClient } from "./GitHubClient";
 
@@ -12,6 +12,8 @@ export interface PipelineRun {
     id:        number;
     state:     string;
     result:    string;
+    /** Provider-neutral "did this run succeed" — use this instead of comparing `result` (a raw, provider-specific string like Bitbucket's "SUCCESSFUL" vs GitHub's "success"). */
+    succeeded: boolean;
     branch:    string;
     commit:    string;
     url:       string;
@@ -19,6 +21,9 @@ export interface PipelineRun {
 }
 
 export interface IGitProviderClient {
+    /** Which provider this instance actually talks to — reflects auto-detection, not just the raw setting. */
+    readonly providerName: string;
+
     /** State of a PR from sourceBranch -> destinationBranch, using stored credentials if available. */
     getPRState(sourceBranch: string, destinationBranch: string): Promise<"open" | "merged" | "none" | "pipeline_running">;
 
@@ -35,6 +40,9 @@ export interface IGitProviderClient {
 
     /** Parses an `origin` remote URL for this provider; null if it doesn't match. */
     parseRemoteUrl(remoteUrl: string): { workspace: string; repoSlug: string } | null;
+
+    /** Builds the "view this branch" URL, opened in the browser. Same repoOverride/"" semantics as buildPrUrl. */
+    buildBranchUrl(branch: string, repoOverride?: { workspace: string; repoSlug: string }): string;
 
     /**
      * Creates a real pull request via the provider's API (used by the 2GP Packaging
@@ -57,13 +65,24 @@ const registry: Record<string, new (context: vscode.ExtensionContext) => IGitPro
     github:    GitHubClient,
 };
 
+/** Guesses the provider from the `origin` remote URL's host — used only when sfDevops.gitProvider is unset. */
+function detectProviderFromRemote(remoteUrl?: string | null): string | undefined {
+    if (!remoteUrl) { return undefined; }
+    if (/github\.com/i.test(remoteUrl))    { return "github"; }
+    if (/bitbucket\.org/i.test(remoteUrl)) { return "bitbucket"; }
+    return undefined;
+}
+
 /**
- * Instantiates the client for the configured sfDevops.gitProvider.
- * Unknown/unimplemented providers fall back to Bitbucket with a one-time warning rather
- * than crashing the extension, since most commands degrade gracefully without a client.
+ * Instantiates the client for sfDevops.gitProvider. An explicit setting always wins; when
+ * it's left unset, `remoteUrl` (the repo's `origin` remote, if known) picks the provider
+ * instead of silently assuming Bitbucket — so a GitHub-origin repo with no gitProvider set
+ * still resolves PR/pipeline status correctly. Unknown/unimplemented explicit values fall
+ * back to Bitbucket with a one-time warning rather than crashing the extension.
  */
-export function createGitProviderClient(context: vscode.ExtensionContext): IGitProviderClient {
-    const provider = getGitProvider();
+export function createGitProviderClient(context: vscode.ExtensionContext, remoteUrl?: string | null): IGitProviderClient {
+    const explicit = getGitProviderRaw();
+    const provider = explicit || detectProviderFromRemote(remoteUrl) || "bitbucket";
     const ClientClass = registry[provider];
     if (!ClientClass) {
         vscode.window.showWarningMessage(

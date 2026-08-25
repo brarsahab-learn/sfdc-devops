@@ -7,9 +7,13 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
+import { isOrgConnected } from "./SfCli";
 import { GitHelper } from "./GitHelper";
 import { IGitProviderClient } from "./GitProviderClient";
-import { getBaseBranch, getEnvironments, getSourceRootFolder, getRepoWorkspace, getRepoSlug, getGitProvider } from "./config";
+import {
+    getBaseBranch, getEnvironments, getSourceRootFolder, getRepoWorkspace, getRepoSlug,
+    getOrgAliasSlots,
+} from "./config";
 
 export interface SetupCheckItem {
     key:       string;
@@ -18,6 +22,8 @@ export interface SetupCheckItem {
     passed:    boolean;
     detail:    string;
     fixSteps:  string[];
+    /** Only populated on the "orgAuthentication" item — per-slot (dev/qa/uat/prod) connected status. */
+    connectedAliases?: Record<string, boolean>;
 }
 
 const PROVIDER_TOKEN_SECRET: Record<string, string> = {
@@ -32,15 +38,20 @@ export async function runSetupChecks(
 ): Promise<SetupCheckItem[]> {
     const items: SetupCheckItem[] = [];
 
-    const branch = await gitHelper.currentBranch();
+    const noWorkspaceOpen = (vscode.workspace.workspaceFolders?.length ?? 0) === 0;
+    const branch = noWorkspaceOpen ? null : await gitHelper.currentBranch();
     items.push({
         key: "gitRepo", label: "Git repository detected", required: true,
         passed: branch !== null,
-        detail: branch !== null ? `On branch "${branch}"` : "This workspace folder doesn't look like a git repository.",
-        fixSteps: branch !== null ? [] : [
-            "Open the folder that contains your cloned repo, or run `git init` / `git clone <url>` here.",
-            "Make sure `git` is installed and on your PATH.",
-        ],
+        detail: noWorkspaceOpen
+            ? "No folder is open in this VS Code window."
+            : (branch !== null ? `On branch "${branch}"` : "This workspace folder doesn't look like a git repository."),
+        fixSteps: branch !== null ? [] : noWorkspaceOpen
+            ? ["Use File > Open Folder... to open the repo you want to work in."]
+            : [
+                "Open the folder that contains your cloned repo, or run `git init` / `git clone <url>` here.",
+                "Make sure `git` is installed and on your PATH.",
+            ],
     });
 
     // Everything below needs a working repo — fetch once so remote-branch checks are current.
@@ -59,7 +70,7 @@ export async function runSetupChecks(
         ],
     });
 
-    const provider = getGitProvider();
+    const provider = providerClient.providerName;
     const settingsIdentity = getRepoWorkspace() && getRepoSlug();
     const derivedIdentity = remoteUrl ? providerClient.parseRemoteUrl(remoteUrl) : null;
     const identityResolved = Boolean(settingsIdentity || derivedIdentity);
@@ -105,9 +116,8 @@ export async function runSetupChecks(
         ],
     });
 
-    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     const sourceRoot = getSourceRootFolder();
-    const sourceFolderExists = Boolean(root && fs.existsSync(path.join(root, sourceRoot)));
+    const sourceFolderExists = fs.existsSync(path.join(gitHelper.getWorkspaceRoot(), sourceRoot));
     items.push({
         key: "sourceFolder", label: `Source folder "${sourceRoot}" present`, required: true,
         passed: sourceFolderExists,
@@ -117,6 +127,8 @@ export async function runSetupChecks(
             "Update sfDevops.sourceRootFolder to match your project's actual source folder name.",
         ],
     });
+
+    items.push(await checkOrgAuthentication(gitHelper.getWorkspaceRoot()));
 
     const tokenKey = PROVIDER_TOKEN_SECRET[provider];
     const hasToken = tokenKey ? Boolean(await context.secrets.get(tokenKey)) : false;
@@ -134,6 +146,52 @@ export async function runSetupChecks(
     return items;
 }
 
+/**
+ * Required: every one of the 4 canonical org-alias slots (Dev/QA/UAT/Prod — see
+ * config.getOrgAliasSlots) must have an alias set AND be currently authenticated.
+ * The Setup Check panel lets a user fill in and authenticate each one inline rather
+ * than hand-editing settings.json.
+ *
+ * Checks each slot individually via `sf org display --target-org <alias>` (run in
+ * parallel) rather than `sf org list` + set-membership: an org can carry more than one
+ * alias, and `sf org list` only ever reports one of them per org, so a slot configured
+ * with that org's "other" alias would show as never-authenticated even though it is.
+ * Per-slot display also resolves in a couple of seconds regardless of how many orgs
+ * you've ever authenticated, where `sf org list` scales with your entire org history.
+ */
+async function checkOrgAuthentication(workspaceRoot: string): Promise<SetupCheckItem> {
+    const slots = getOrgAliasSlots();
+    const base = { key: "orgAuthentication", label: "Configured org aliases authenticated (Dev/QA/UAT/Prod)", required: true };
+
+    const unset = slots.filter(s => !s.alias);
+    const toCheck = slots.filter(s => s.alias);
+    const results = await Promise.all(toCheck.map(async s => ({ slot: s, connected: await isOrgConnected(s.alias, workspaceRoot) })));
+
+    const connectedAliases: Record<string, boolean> = {};
+    for (const s of slots) { connectedAliases[s.key] = s.alias ? Boolean(results.find(r => r.slot.key === s.key)?.connected) : false; }
+
+    const notAuthenticated = results.filter(r => !r.connected).map(r => r.slot);
+    const passed = unset.length === 0 && notAuthenticated.length === 0;
+
+    const problems: string[] = [
+        ...unset.map(s => `${s.label}: no alias set`),
+        ...notAuthenticated.map(s => `${s.label} (${s.alias}): not authenticated`),
+    ];
+
+    return {
+        ...base,
+        passed,
+        detail: passed
+            ? `All 4 org aliases configured and authenticated: ${slots.map(s => `${s.label}=${s.alias}`).join(", ")}.`
+            : problems.join("; "),
+        fixSteps: passed ? [] : [
+            "Fill in and authenticate each org below (Setup Check panel), or",
+            ...notAuthenticated.map(s => `Run: sf org login web --alias ${s.alias}`),
+        ],
+        connectedAliases,
+    };
+}
+
 /** Everything after the git-repo check depends on a working repo — report the rest as failed-but-explained. */
 function skippedItems(): SetupCheckItem[] {
     const skippedDetail = "Skipped — fix the git repository check above first.";
@@ -143,6 +201,7 @@ function skippedItems(): SetupCheckItem[] {
         { key: "baseBranch",           label: "Base branch exists on origin",                      required: true,  passed: false, detail: skippedDetail, fixSteps: [] },
         { key: "environmentBranches",  label: "Configured environment branches exist on origin",   required: true,  passed: false, detail: skippedDetail, fixSteps: [] },
         { key: "sourceFolder",         label: "Source folder present",                             required: true,  passed: false, detail: skippedDetail, fixSteps: [] },
+        { key: "orgAuthentication",    label: "Configured org aliases authenticated (Dev/QA/UAT/Prod)", required: true,  passed: false, detail: skippedDetail, fixSteps: [] },
         { key: "providerCredentials",  label: "Provider credentials stored",                        required: false, passed: false, detail: skippedDetail, fixSteps: [] },
     ];
 }

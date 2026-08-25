@@ -5,32 +5,32 @@
 
 import * as vscode from "vscode";
 import { IGitProviderClient } from "../GitProviderClient";
-import { GitHelper } from "../GitHelper";
+import { GitHelper, warnUncommittedChanges } from "../GitHelper";
 import { prepare2gpBeta as runPrepare2gpBeta, BumpType } from "../PackagingEngine";
 import {
-    getCurrentRole, getPackagingRequiredRole, getPackageBaselineBranch,
+    getPackagingRequiredRole, getPackageBaselineBranch,
     getPackagingSourceBranch, extractStoryId,
 } from "../config";
+import { getEffectiveRole } from "../RoleManager";
 import { buildPackageXml } from "../AuditLog";
 
 export async function prepare2gpBetaCommand(
     providerClient: IGitProviderClient,
-    gitHelper:      GitHelper
+    gitHelper:      GitHelper,
+    context:        vscode.ExtensionContext
 ): Promise<void> {
     const requiredRole = getPackagingRequiredRole();
-    if (requiredRole && getCurrentRole() !== requiredRole) {
+    const currentRole  = getEffectiveRole(context);
+    if (requiredRole && currentRole !== requiredRole) {
         vscode.window.showWarningMessage(
             `Preparing a 2GP beta requires the "${requiredRole}" role (sfDevops.packagingRequiredRole). ` +
-            `Your role is "${getCurrentRole()}".`
+            `Your role is "${currentRole}".`
         );
         return;
     }
 
     if (await gitHelper.hasUncommittedChanges()) {
-        vscode.window.showWarningMessage(
-            "You have uncommitted changes in the workspace. Commit or stash them first — " +
-            "this command creates and checks out a new branch."
-        );
+        await warnUncommittedChanges(gitHelper, "Commit or stash your changes first — this command creates and checks out a new branch.");
         return;
     }
 

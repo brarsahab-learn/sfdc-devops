@@ -10,6 +10,7 @@ const GH_API = "https://api.github.com";
 const GH_WEB = "https://github.com";
 
 export class GitHubClient implements IGitProviderClient {
+    readonly providerName = "github";
     constructor(private readonly _context: vscode.ExtensionContext) {}
 
     private get owner(): string {
@@ -76,6 +77,14 @@ export class GitHubClient implements IGitProviderClient {
         return m ? { workspace: m[1], repoSlug: m[2] } : null;
     }
 
+    /** Builds the "view this branch" URL for the browser. */
+    buildBranchUrl(branch: string, repoOverride?: { workspace: string; repoSlug: string }): string {
+        const owner = repoOverride?.workspace || this.owner;
+        const repo  = repoOverride?.repoSlug  || this.repo;
+        if (!owner || !repo) { return ""; }
+        return `${GH_WEB}/${owner}/${repo}/tree/${encodeURIComponent(branch)}`;
+    }
+
     async getPRState(sourceBranch: string, destinationBranch: string): Promise<"open" | "merged" | "none" | "pipeline_running"> {
         if (!this.owner || !this.repo) { return "none"; }
         try {
@@ -108,6 +117,7 @@ export class GitHubClient implements IGitProviderClient {
                 id:        r.run_number,
                 state:     r.status ?? "unknown",
                 result:    r.conclusion ?? "",
+                succeeded: r.conclusion === "success",
                 branch:    r.head_branch ?? "",
                 commit:    (r.head_sha ?? "").slice(0, 8),
                 url:       r.html_url ?? `${GH_WEB}/${this.owner}/${this.repo}/actions`,

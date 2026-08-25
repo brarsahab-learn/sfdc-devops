@@ -9,10 +9,11 @@ import * as fs            from "fs";
 import * as path          from "path";
 import {
     getBaseBranch, getDevBranch, featureBranchName, isFeatureBranch as isFeatureBranchName,
-    promoBranchName as buildPromoBranchName, getSourceRootFolder,
+    promoBranchName as buildPromoBranchName, getSourceRootFolder, getRepoWorkspace, getRepoSlug,
 } from "./config";
-import { createGitProviderClient } from "./GitProviderClient";
+import { IGitProviderClient } from "./GitProviderClient";
 import { AuditEntry, renderAuditHtml } from "./AuditLog";
+import { log, revealLog } from "./Log";
 
 const execFileAsync = promisify(execFile);
 
@@ -35,6 +36,11 @@ export interface PendingOp {
 export class GitHelper {
     private get workspaceRoot(): string {
         return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+    }
+
+    /** The workspace root every git/CLI command runs from — the single source of truth other modules should use instead of reading `vscode.workspace.workspaceFolders` directly. */
+    getWorkspaceRoot(): string {
+        return this.workspaceRoot;
     }
 
     private async git(args: string[]): Promise<string> {
@@ -117,6 +123,11 @@ export class GitHelper {
         }
     }
 
+    /** All recorded audit entries, oldest first — used by the in-editor Audit Trail panel. */
+    async getAuditEntries(): Promise<AuditEntry[]> {
+        return this.readAuditEntries();
+    }
+
     /** Appends one entry to the audit trail and regenerates the HTML view. Best-effort — never throws. */
     async appendAudit(entry: Omit<AuditEntry, "id" | "timestamp">): Promise<void> {
         try {
@@ -129,13 +140,6 @@ export class GitHelper {
             fs.writeFileSync(await this.auditJsonPath(), JSON.stringify(entries, null, 2));
             fs.writeFileSync(await this.auditHtmlPath(), renderAuditHtml(entries));
         } catch { /* logging must never break the underlying operation */ }
-    }
-
-    /** Re-renders the audit HTML from the current JSON, e.g. before opening it. */
-    async regenerateAuditHtml(): Promise<void> {
-        try {
-            fs.writeFileSync(await this.auditHtmlPath(), renderAuditHtml(await this.readAuditEntries()));
-        } catch { /* best effort */ }
     }
 
     // ── Deployment state (local-only, per clone, in the git dir) ────────────────
@@ -232,6 +236,14 @@ export class GitHelper {
         });
     }
 
+    /** Logs the file list a squashed commit is about to cherry-pick, so it's visible before the pick runs. */
+    private async logChangedFiles(sha: string): Promise<void> {
+        const files = await this.filesInCommit(sha).catch(() => []);
+        if (files.length === 0) { log("No file changes found in this story's commit."); return; }
+        log(`Picking up ${files.length} changed file(s):`);
+        for (const f of files) { log(`  ${f.change === "added" ? "+" : f.change === "deleted" ? "-" : "~"} ${f.path}`); }
+    }
+
     private async cherryPickInProgress(): Promise<boolean> {
         try {
             await this.git(["rev-parse", "--verify", "--quiet", "CHERRY_PICK_HEAD"]);
@@ -288,6 +300,8 @@ export class GitHelper {
         const base      = getBaseBranch();
         const devBranch = getDevBranch();
 
+        revealLog(`Publishing ${storyId} → ${devBranch}`);
+
         await this.git(["fetch", "origin", "--prune"]);
         try {
             await this.git(["rev-parse", "--verify", `origin/${devBranch}`]);
@@ -297,22 +311,27 @@ export class GitHelper {
 
         await this.git(["cherry-pick", "--abort"]).catch(() => {});
         const squashSha = await this.storySquashRef(storyId, base);
+        await this.logChangedFiles(squashSha);
         await this.git(["checkout", "-B", devBranch, `origin/${devBranch}`]);
         await this.writePending({ kind: "dev-publish", storyId });
 
         try {
             await this.git(["-c", "core.editor=true", "cherry-pick", squashSha]);
+            log("Applied cleanly.");
         } catch {
             const conflicts = await this.unmergedFiles();
             if (conflicts.length === 0) {
                 // Story already present in dev → finish the no-op cherry-pick.
                 await this.git(["cherry-pick", "--skip"]).catch(() => {});
+                log("Already up to date in dev — nothing new to apply.");
             } else {
+                log(`Conflicts in ${conflicts.length} file(s) — resolve them, then click Resume.`);
                 return { status: "conflict", branch: devBranch, conflicts };
             }
         }
 
         await this.completeDevPublish(storyId);
+        log(`Published to ${devBranch}.`);
         return { status: "clean", branch: devBranch, conflicts: [] };
     }
 
@@ -330,14 +349,23 @@ export class GitHelper {
      * the target env branch and cherry-picks the story's squashed commit onto it.
      * On conflict the cherry-pick is LEFT in place for resolve-and-resume.
      */
+    /**
+     * `targetEnv` is the environment's logical name (used for labeling/gating/audit);
+     * `targetBranch` is the actual git branch to cut from — pass `findEnvironment(targetEnv)?.branch`,
+     * since an environment's name and branch can now differ (e.g. "prod" → branch "main").
+     */
     async beginPromotion(
-        storyId:   string,
-        targetEnv: string,
-        mode:      "validate" | "promote"
+        storyId:      string,
+        targetEnv:    string,
+        mode:         "validate" | "promote",
+        targetBranch: string = targetEnv
     ): Promise<PromotionOutcome> {
         const featureBranch   = featureBranchName(storyId);
         const promotionBranch = this.promoBranchName(storyId, targetEnv, mode);
         const base   = getBaseBranch();
+
+        const envLabel = targetBranch === targetEnv ? targetEnv : `${targetEnv} (branch: ${targetBranch})`;
+        revealLog(`${mode === "validate" ? "Validating" : "Promoting"} ${storyId} → ${envLabel}`);
 
         await this.git(["fetch", "origin", "--prune"]);
         try {
@@ -346,27 +374,31 @@ export class GitHelper {
             throw new Error(`Source branch not found on remote: ${featureBranch}. Push the feature branch first.`);
         }
         try {
-            await this.git(["rev-parse", "--verify", `origin/${targetEnv}`]);
+            await this.git(["rev-parse", "--verify", `origin/${targetBranch}`]);
         } catch {
-            throw new Error(`Target environment branch not found: origin/${targetEnv}.`);
+            throw new Error(`Target environment branch not found: origin/${targetBranch}.`);
         }
 
         await this.git(["cherry-pick", "--abort"]).catch(() => {});
         const squashSha = await this.storySquashRef(storyId, base);
+        await this.logChangedFiles(squashSha);
         // Copado model: cut every promotion branch from its own target env branch.
-        await this.git(["checkout", "-B", promotionBranch, `origin/${targetEnv}`]);
+        await this.git(["checkout", "-B", promotionBranch, `origin/${targetBranch}`]);
         await this.writePending({ kind: "promotion", storyId, targetEnv, mode });
 
         try {
             await this.git(["-c", "core.editor=true", "cherry-pick", squashSha]);
+            log("Applied cleanly.");
             return { status: "clean", branch: promotionBranch, conflicts: [] };
         } catch {
             const conflicts = await this.unmergedFiles();
             if (conflicts.length === 0) {
                 // Story already present in the target → finish the no-op cherry-pick.
                 await this.git(["cherry-pick", "--skip"]).catch(() => {});
+                log(`Already up to date in ${targetEnv} — nothing new to apply.`);
                 return { status: "clean", branch: promotionBranch, conflicts: [] };
             }
+            log(`Conflicts in ${conflicts.length} file(s) — resolve them, then click Resume.`);
             return { status: "conflict", branch: promotionBranch, conflicts };
         }
     }
@@ -467,6 +499,26 @@ export class GitHelper {
         }
     }
 
+    /** The SHA of the commit on `origin/<branch>` whose message mentions the story id, or null if there isn't one. */
+    async storyCommitShaOnBranch(branch: string, storyId: string): Promise<string | null> {
+        try {
+            const out = await this.git(["log", `origin/${branch}`, "--grep", storyId, "--format=%H", "-1"]);
+            return out.trim() || null;
+        } catch {
+            return null;
+        }
+    }
+
+    /** True if `ancestorSha` is contained in (or equal to) `descendantSha`'s history — i.e. it was already deployed as part of that commit. */
+    async isAncestorSha(ancestorSha: string, descendantSha: string): Promise<boolean> {
+        try {
+            await this.git(["merge-base", "--is-ancestor", ancestorSha, descendantSha]);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
     /**
      * Apex class/trigger names changed in the feature branch vs the base branch,
      * excluding test classes (names containing "Test"). These are the classes whose
@@ -517,6 +569,39 @@ export class GitHelper {
         data[storyId] = { passed: true, ...details, date: new Date().toISOString() };
         try {
             fs.writeFileSync(await this.coverageFilePath(), JSON.stringify(data, null, 2));
+        } catch { /* best effort */ }
+    }
+
+    // ── Manual sign-off gate marker (per story + environment, in the git dir) ───
+    // Generalizes to any environment with sfDevops.environments[].signoffGate set —
+    // e.g. QA sign-off before promoting to UAT, then UAT sign-off before whatever's next.
+
+    private async signoffFilePath(): Promise<string> {
+        return path.join(await this.gitDirPath(), "sf-devops-signoff.json");
+    }
+
+    private async readSignoff(): Promise<Record<string, any>> {
+        try {
+            return JSON.parse(fs.readFileSync(await this.signoffFilePath(), "utf8"));
+        } catch {
+            return {};
+        }
+    }
+
+    private signoffKey(storyId: string, envName: string): string {
+        return `${storyId}:${envName}`;
+    }
+
+    async isSignoffPassed(storyId: string, envName: string): Promise<boolean> {
+        const data = await this.readSignoff();
+        return Boolean(data[this.signoffKey(storyId, envName)]?.passed);
+    }
+
+    async recordSignoff(storyId: string, envName: string, details: object): Promise<void> {
+        const data = await this.readSignoff();
+        data[this.signoffKey(storyId, envName)] = { passed: true, ...details, date: new Date().toISOString() };
+        try {
+            fs.writeFileSync(await this.signoffFilePath(), JSON.stringify(data, null, 2));
         } catch { /* best effort */ }
     }
 
@@ -696,27 +781,16 @@ export class GitHelper {
         }
     }
 
-    /** Derives the repo workspace + slug from the `origin` remote URL, using the configured provider's URL shape. */
-    async getRemoteRepoIdentity(context: vscode.ExtensionContext): Promise<{ workspace: string; repoSlug: string } | null> {
-        let url: string;
-        try {
-            url = await this.git(["remote", "get-url", "origin"]);
-        } catch {
-            return null;
-        }
-        return createGitProviderClient(context).parseRemoteUrl(url);
-    }
-
-    /** @deprecated use getRemoteRepoIdentity — kept for backward compatibility with older callers. */
-    async getBitbucketRepo(): Promise<{ workspace: string; repoSlug: string } | null> {
-        let url: string;
-        try {
-            url = await this.git(["remote", "get-url", "origin"]);
-        } catch {
-            return null;
-        }
-        const m = url.match(/bitbucket\.org[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/i);
-        return m ? { workspace: m[1], repoSlug: m[2] } : null;
+    /**
+     * Resolves the repo identity to pass as a provider client's `repoOverride`. Settings
+     * (sfDevops.repoWorkspace/repoSlug) always win when both are set — this only fills the
+     * gap by deriving from the `origin` remote URL when they're not, so PR/branch links and
+     * PR creation don't silently no-op on a repo that never had those settings configured.
+     */
+    async resolveRepoIdentity(providerClient: IGitProviderClient): Promise<{ workspace: string; repoSlug: string } | undefined> {
+        if (getRepoWorkspace() && getRepoSlug()) { return undefined; }
+        const remoteUrl = await this.getRemoteUrl();
+        return (remoteUrl ? providerClient.parseRemoteUrl(remoteUrl) : null) ?? undefined;
     }
 
     /**
@@ -804,10 +878,31 @@ export class GitHelper {
         });
     }
 
+    /** Every file path at a remote ref, optionally restricted to `pathspec` — used to find candidate test classes without needing a local checkout. */
+    async listFilesAtRef(ref: string, pathspec?: string): Promise<string[]> {
+        try {
+            const args = ["ls-tree", "-r", "--name-only", `origin/${ref}`];
+            if (pathspec) { args.push("--", pathspec); }
+            const out = await this.git(args);
+            return out ? out.split("\n").filter(Boolean) : [];
+        } catch {
+            return [];
+        }
+    }
+
     /** File content at a remote ref, or null if it doesn't exist there. */
     async fileContentAtRef(ref: string, filePath: string): Promise<string | null> {
         try {
             return await this.git(["show", `origin/${ref}:${filePath}`]);
+        } catch {
+            return null;
+        }
+    }
+
+    /** File content at a bare commit SHA (not a branch ref) — used to diff against a recorded last-deployed marker, which is stored as a raw SHA, not a branch name. */
+    async fileContentAtSha(sha: string, filePath: string): Promise<string | null> {
+        try {
+            return await this.git(["show", `${sha}:${filePath}`]);
         } catch {
             return null;
         }
@@ -865,5 +960,22 @@ export class GitHelper {
     /** Pushes a local branch, creating its upstream on `origin`. */
     async pushNewBranch(branchName: string): Promise<void> {
         await this.git(["push", "-u", "origin", branchName]);
+    }
+}
+
+/**
+ * Shows a warning that local changes are blocking an operation, with a "Review Changes"
+ * button that reveals VS Code's own Source Control view — real color-coded diffs, staging,
+ * discard, commit — instead of just telling the user to go figure it out for themselves.
+ */
+export async function warnUncommittedChanges(gitHelper: GitHelper, reason: string): Promise<void> {
+    const files = await gitHelper.workingTreeFiles();
+    const preview = files.slice(0, 5).join(", ") + (files.length > 5 ? `, +${files.length - 5} more` : "");
+    const choice = await vscode.window.showWarningMessage(
+        `${reason}\n\n${files.length} file(s) uncommitted: ${preview}`,
+        "Review Changes"
+    );
+    if (choice === "Review Changes") {
+        await vscode.commands.executeCommand("workbench.view.scm");
     }
 }

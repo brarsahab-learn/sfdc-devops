@@ -3,7 +3,6 @@
 import * as vscode from "vscode";
 import { StoryWebviewProvider }   from "./providers/StoryWebviewProvider";
 import { CoverageWebviewProvider} from "./providers/CoverageWebviewProvider";
-import { PipelineTreeProvider }   from "./providers/PipelineTreeProvider";
 import { EnvironmentTreeProvider} from "./providers/EnvironmentTreeProvider";
 import { startStory }      from "./commands/startStory";
 import { commitAndPush }   from "./commands/submitForReview";
@@ -14,39 +13,44 @@ import { prepare2gpBetaCommand } from "./commands/prepare2gpBeta";
 import { createGitProviderClient } from "./GitProviderClient";
 import { GitHelper }       from "./GitHelper";
 import { DeploymentDashboardPanel } from "./providers/DeploymentDashboardPanel";
+import { AuditTrailPanel } from "./providers/AuditTrailPanel";
 import {
-    getCurrentRole, findEnvironment, canPromote,
+    findEnvironment, canPromote, getRoles,
     isFeatureBranch, getBaseBranch, getStaleBranchThreshold, getPromotableEnvironments,
 } from "./config";
+import { getEffectiveRole, canAccessConfig, promptChangeRole } from "./RoleManager";
+import { initLog } from "./Log";
 
-let pipelinePoller:  NodeJS.Timeout | undefined;
 let deployPoller:    NodeJS.Timeout | undefined;
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
     console.log("Salesforce DevOps extension activated");
+    initLog(context);
 
-    const bbClient  = createGitProviderClient(context);
     const gitHelper = new GitHelper();
+    // sfDevops.gitProvider is optional — when it's left unset, pick the provider from the
+    // origin remote's host instead of silently defaulting to Bitbucket, so a GitHub-origin
+    // repo still resolves PR/pipeline status correctly out of the box.
+    const remoteUrl = await gitHelper.getRemoteUrl();
+    const bbClient  = createGitProviderClient(context, remoteUrl);
 
-    // Role controls which promote buttons are available — see sfDevops.roles and each
-    // environment's requiredRole in sfDevops.environments. Developers leave sfDevops.role
-    // at its default; a lead sets it to whatever role name their environments require.
-    const userRole = getCurrentRole();
+    // Role controls which promote buttons/config-management UI are available — see
+    // sfDevops.roles and each environment's requiredRole in sfDevops.environments.
+    // Resolved fresh via RoleManager on every check, not captured once here, since
+    // "Change Role" can update it at runtime.
 
     // ── Register sidebar providers ───────────────────────────────────────────
     const storyProvider = new StoryWebviewProvider(
-        context.extensionUri, bbClient, gitHelper, context, userRole
+        context.extensionUri, bbClient, gitHelper, context
     );
     const coverageProvider = new CoverageWebviewProvider(
         context.extensionUri, gitHelper, storyProvider
     );
-    const pipelineProvider = new PipelineTreeProvider(bbClient);
-    const envProvider      = new EnvironmentTreeProvider(bbClient);
+    const envProvider      = new EnvironmentTreeProvider(gitHelper);
 
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider("sfDevopsStoryView", storyProvider),
         vscode.window.registerWebviewViewProvider("sfDevopsCoverageView", coverageProvider),
-        vscode.window.registerTreeDataProvider("sfDevopsPipelineView", pipelineProvider),
         vscode.window.registerTreeDataProvider("sfDevopsEnvView", envProvider)
     );
 
@@ -78,7 +82,7 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.showErrorMessage(`Unknown environment "${env}" — check sfDevops.environments.`);
                 return;
             }
-            if (!canPromote(userRole, envCfg)) {
+            if (!canPromote(getEffectiveRole(context), envCfg)) {
                 vscode.window.showWarningMessage(
                     `Promoting to ${envCfg.label} requires the "${envCfg.requiredRole}" role. ` +
                     `Contact someone with that role to promote this story.`
@@ -98,7 +102,6 @@ export function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.commands.registerCommand("sfDevops.viewPipelineStatus", () => {
-            pipelineProvider.refresh();
             envProvider.refresh();
         }),
 
@@ -128,30 +131,32 @@ export function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.commands.registerCommand("sfDevops.openSettings", () => {
+            if (!canAccessConfig(getEffectiveRole(context))) {
+                vscode.window.showWarningMessage("Only Admins can open Salesforce DevOps configuration.");
+                return;
+            }
             vscode.commands.executeCommand("workbench.action.openSettings", "sfDevops");
         }),
 
-        vscode.commands.registerCommand("sfDevops.viewAuditLog", async () => {
-            await gitHelper.regenerateAuditHtml();
-            await vscode.env.openExternal(vscode.Uri.file(await gitHelper.auditHtmlPath()));
+        vscode.commands.registerCommand("sfDevops.viewAuditLog", () => {
+            AuditTrailPanel.createOrShow(gitHelper);
         }),
 
-        vscode.commands.registerCommand("sfDevops.openDeploymentDashboard", () => {
-            DeploymentDashboardPanel.createOrShow(gitHelper, userRole);
+        vscode.commands.registerCommand("sfDevops.openDeploymentDashboard", (focusEnv?: string) => {
+            DeploymentDashboardPanel.createOrShow(gitHelper, context, focusEnv);
+        }),
+
+        vscode.commands.registerCommand("sfDevops.changeRole", async () => {
+            const changed = await promptChangeRole(context, getRoles());
+            if (changed) { storyProvider.refresh(); }
         }),
 
         // Dedicated 2GP Release Gate — occasional, admin-triggered, separate from the
         // day-to-day sprint commands above. See PackagingEngine.ts.
         vscode.commands.registerCommand("sfDevops.prepare2gpBeta", async () => {
-            await prepare2gpBetaCommand(bbClient, gitHelper);
+            await prepare2gpBetaCommand(bbClient, gitHelper, context);
         })
     );
-
-    // ── Poll pipeline status every 30 seconds ───────────────────────────────
-    pipelinePoller = setInterval(() => { pipelineProvider.refresh(); }, 30_000);
-    context.subscriptions.push({
-        dispose: () => { if (pipelinePoller) { clearInterval(pipelinePoller); } }
-    });
 
     // ── Poll for merges pending deployment every 60 seconds ─────────────────
     // No external CI/webhook — this is what notices a merge landed on an env branch and
@@ -164,7 +169,6 @@ export function activate(context: vscode.ExtensionContext) {
     // ── Warn if feature branch is behind prod on startup ────────────────────
     checkBranchStaleness(gitHelper, storyProvider);
 
-    pipelineProvider.refresh();
     envProvider.refresh();
 }
 
@@ -217,6 +221,5 @@ async function checkBranchStaleness(
 }
 
 export function deactivate() {
-    if (pipelinePoller) { clearInterval(pipelinePoller); }
-    if (deployPoller)   { clearInterval(deployPoller); }
+    if (deployPoller) { clearInterval(deployPoller); }
 }

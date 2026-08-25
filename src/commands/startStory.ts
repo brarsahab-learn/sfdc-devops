@@ -3,20 +3,18 @@
 
 import * as vscode from "vscode";
 import { IGitProviderClient } from "../GitProviderClient";
-import { GitHelper }          from "../GitHelper";
+import { GitHelper, warnUncommittedChanges } from "../GitHelper";
 import { StoryWebviewProvider}from "../providers/StoryWebviewProvider";
 import { getTicketSystem, sanitizeStoryId } from "../config";
 
 export async function startStory(
-    _bbClient:     IGitProviderClient,
+    bbClient:      IGitProviderClient,
     gitHelper:     GitHelper,
     storyProvider: StoryWebviewProvider
 ): Promise<void> {
     // Check for uncommitted changes first
     if (await gitHelper.hasUncommittedChanges()) {
-        vscode.window.showWarningMessage(
-            "You have uncommitted changes. Please commit or stash them before starting a new story."
-        );
+        await warnUncommittedChanges(gitHelper, "You have uncommitted changes. Please commit or stash them before starting a new story.");
         return;
     }
 
@@ -54,12 +52,18 @@ export async function startStory(
                     summary:   `Created and pushed ${branchName}`,
                 });
 
+                const repoOverride = await gitHelper.resolveRepoIdentity(bbClient);
+                const branchUrl    = bbClient.buildBranchUrl(branchName, repoOverride);
+
                 vscode.window.showInformationMessage(
                     `✅ Branch created: ${branchName}`,
+                    ...(branchUrl ? ["View Branch in Browser"] : []),
                     "Open Terminal"
                 ).then((choice: string | undefined) => {
                     if (choice === "Open Terminal") {
                         vscode.commands.executeCommand("workbench.action.terminal.new");
+                    } else if (choice === "View Branch in Browser" && branchUrl) {
+                        vscode.env.openExternal(vscode.Uri.parse(branchUrl));
                     }
                 });
 

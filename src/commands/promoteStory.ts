@@ -14,7 +14,8 @@ import { StoryWebviewProvider } from "../providers/StoryWebviewProvider";
 import { coverageSettings } from "./coverageCheck";
 import {
     isFeatureBranch, extractStoryId, getFeatureBranchPrefix,
-    getCoverageGateEnvironment, promoBranchName, getBaseBranch, featureBranchName,
+    getCoverageGateEnvironment, promoBranchName, getBaseBranch, featureBranchName, getEnvironments,
+    findEnvironment,
 } from "../config";
 import { buildPackageXml, AuditChangedFile } from "../AuditLog";
 
@@ -45,6 +46,10 @@ export async function promoteStory(
 
     const storyId  = extractStoryId(branch) || branch!.replace(getFeatureBranchPrefix(), "");
     const envUpper = targetEnv.toUpperCase();
+    // The real git branch this environment deploys — usually equal to its name, but can
+    // differ (e.g. "prod" → branch "main"). Everything below that needs a real git ref
+    // uses this; targetEnv itself stays the logical name for gating/audit/labels.
+    const targetBranch = findEnvironment(targetEnv)?.branch ?? targetEnv;
 
     // One-time coverage gate: block the first promotion into the configured gate
     // environment when the story has Apex classes and coverage hasn't reached the
@@ -67,6 +72,23 @@ export async function promoteStory(
         }
     }
 
+    // Manual sign-off gate: the environment the story is CURRENTLY sitting in (the one
+    // immediately before targetEnv) may require a recorded human sign-off before the
+    // story can be promoted onward — e.g. QA sign-off before UAT, then UAT sign-off
+    // before whatever's next. sfDevops.environments[].signoffGate decides which
+    // environment(s) require this.
+    if (mode === "promote") {
+        const envs = getEnvironments();
+        const targetIdx = envs.findIndex(e => e.name === targetEnv);
+        const currentEnv = targetIdx > 0 ? envs[targetIdx - 1] : undefined;
+        if (currentEnv?.signoffGate && !(await gitHelper.isSignoffPassed(storyId, currentEnv.name))) {
+            vscode.window.showWarningMessage(
+                `${currentEnv.label} sign-off hasn't been recorded for ${storyId} yet. Record it in the Current Story panel before promoting to ${envUpper}.`
+            );
+            return;
+        }
+    }
+
     // Copado reuse: Promote & Deploy on an already-validated promotion branch just opens the PR.
     if (mode === "promote" && await gitHelper.promotionBranchExists(storyId, targetEnv)) {
         const confirm = await vscode.window.showWarningMessage(
@@ -81,8 +103,8 @@ export async function promoteStory(
 
     const promoBranch = promoBranchName(storyId, targetEnv, mode);
     const confirmMsg = mode === "validate"
-        ? `Validate ${storyId} against ${envUpper}?\n\nThis will:\n• Create ${promoBranch} from ${targetEnv}\n• Add your story's changes\n• Run a check-only validation against ${envUpper} (no deploy)`
-        : `Promote & Deploy ${storyId} to ${envUpper}?\n\nThis will:\n• Create ${promoBranch} from ${targetEnv}\n• Add your story's changes\n• Open a PR (promotion → ${targetEnv})\n• Deploy to ${envUpper} once you approve & merge the PR`;
+        ? `Validate ${storyId} against ${envUpper}?\n\nThis will:\n• Create ${promoBranch} from ${targetBranch}\n• Add your story's changes\n• Run a check-only validation against ${envUpper} (no deploy)`
+        : `Promote & Deploy ${storyId} to ${envUpper}?\n\nThis will:\n• Create ${promoBranch} from ${targetBranch}\n• Add your story's changes\n• Open a PR (promotion → ${targetBranch})\n• Deploy to ${envUpper} once you approve & merge the PR`;
     const confirmLabel = mode === "validate" ? `Yes, validate against ${envUpper}` : "Yes, Promote & Deploy";
     const confirm = await vscode.window.showWarningMessage(confirmMsg, { modal: true }, confirmLabel);
     if (!confirm) { return; }
@@ -96,7 +118,7 @@ export async function promoteStory(
         async (progress) => {
             try {
                 progress.report({ message: "Creating promotion branch..." });
-                const outcome = await gitHelper.beginPromotion(storyId, targetEnv, mode);
+                const outcome = await gitHelper.beginPromotion(storyId, targetEnv, mode, targetBranch);
 
                 if (outcome.status === "conflict") {
                     const changedFiles = await storyChangedFiles(gitHelper, storyId);
@@ -106,7 +128,7 @@ export async function promoteStory(
                         summary: `Conflict preparing promotion branch for ${envUpper}`,
                         details: { changedFiles, packageXml, unmappedFiles, conflicts: outcome.conflicts },
                     });
-                    await reportOperationConflict(outcome.conflicts, envUpper);
+                    await reportOperationConflict(gitHelper, outcome.conflicts, envUpper);
                     storyProvider.refresh();
                     return;
                 }
@@ -171,6 +193,7 @@ export async function openPromotionPR(
     progress?:     vscode.Progress<{ message?: string }>
 ): Promise<void> {
     const promotionBranch = promoBranchName(storyId, targetEnv, "promote");
+    const targetBranch    = findEnvironment(targetEnv)?.branch ?? targetEnv;
     progress?.report({ message: "Opening pull request page..." });
 
     await gitHelper.checkoutFeature(storyId);
@@ -178,13 +201,8 @@ export async function openPromotionPR(
     const changedFiles = await storyChangedFiles(gitHelper, storyId);
     const { xml: packageXml, unmapped: unmappedFiles } = buildPackageXml(changedFiles);
 
-    let prUrl = bbClient.buildPrUrl(promotionBranch, targetEnv);
-    if (!prUrl) {
-        // Settings don't have the repo identity — try deriving it from the origin remote.
-        const remoteUrl = await gitHelper.getRemoteUrl();
-        const derived    = remoteUrl ? bbClient.parseRemoteUrl(remoteUrl) : null;
-        if (derived) { prUrl = bbClient.buildPrUrl(promotionBranch, targetEnv, derived); }
-    }
+    const repoOverride = await gitHelper.resolveRepoIdentity(bbClient);
+    const prUrl = bbClient.buildPrUrl(promotionBranch, targetBranch, repoOverride);
     if (!prUrl) {
         await gitHelper.appendAudit({
             operation: "promote", storyId, targetEnv, branch: promotionBranch, outcome: "success",
@@ -216,6 +234,7 @@ export async function openPromotionPR(
 
 /** Shows conflict guidance and offers to open the first conflicted file. */
 export async function reportOperationConflict(
+    gitHelper: GitHelper,
     conflicts: string[],
     label:     string
 ): Promise<void> {
@@ -228,9 +247,8 @@ export async function reportOperationConflict(
     );
 
     if (choice === "Open Conflicts") {
-        const root = vscode.workspace.workspaceFolders?.[0]?.uri;
-        if (root && conflicts[0]) {
-            const fileUri = vscode.Uri.joinPath(root, conflicts[0]);
+        if (conflicts[0]) {
+            const fileUri = vscode.Uri.joinPath(vscode.Uri.file(gitHelper.getWorkspaceRoot()), conflicts[0]);
             await vscode.window.showTextDocument(fileUri).then(undefined, () => {});
         }
         await vscode.commands.executeCommand("workbench.view.scm");

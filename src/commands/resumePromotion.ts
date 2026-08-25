@@ -40,7 +40,7 @@ export async function resumePromotion(
                         summary: `Still conflicting while resuming → ${label}`,
                         details: { conflicts: outcome.conflicts },
                     });
-                    await reportOperationConflict(outcome.conflicts, label);
+                    await reportOperationConflict(gitHelper, outcome.conflicts, label);
                     storyProvider.refresh();
                     return;
                 }

@@ -4,11 +4,12 @@
 // and lets the user deploy ALL / by story / by hand-picked file. No external CI involved.
 
 import * as vscode from "vscode";
-import { GitHelper } from "../GitHelper";
+import { GitHelper, warnUncommittedChanges } from "../GitHelper";
 import { runDeploy, DeployMode } from "../DeploymentEngine";
 import { groupChangesByStory, resolveSelection, DeploySelection, StoryChangeGroup, CommitInfo } from "../DeploymentPlanner";
 import { buildPackageXml, AuditChangedFile } from "../AuditLog";
 import { getPromotableEnvironments, getSourceRootFolder, getDeployTimeoutSeconds, canPromote, ResolvedEnvironment } from "../config";
+import { getEffectiveRole } from "../RoleManager";
 
 function escapeHtml(s: string): string {
     return String(s).replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]!));
@@ -32,10 +33,13 @@ export class DeploymentDashboardPanel {
     private static current: DeploymentDashboardPanel | undefined;
     private readonly _panel: vscode.WebviewPanel;
     private _disposables: vscode.Disposable[] = [];
+    private _focusEnv?: string;
 
-    public static createOrShow(gitHelper: GitHelper, userRole: string) {
+    /** `focusEnv` opens (or brings to front) the dashboard with that environment's tab pre-selected — used by the "🚀 Deploy" link in Story Progress so a merged-but-undeployed story leads straight to the right tab instead of the first one. */
+    public static createOrShow(gitHelper: GitHelper, context: vscode.ExtensionContext, focusEnv?: string) {
         if (DeploymentDashboardPanel.current) {
             DeploymentDashboardPanel.current._panel.reveal(vscode.ViewColumn.One);
+            if (focusEnv) { DeploymentDashboardPanel.current._focusEnv = focusEnv; }
             DeploymentDashboardPanel.current.refresh();
             return;
         }
@@ -45,7 +49,7 @@ export class DeploymentDashboardPanel {
             vscode.ViewColumn.One,
             { enableScripts: true, retainContextWhenHidden: true }
         );
-        DeploymentDashboardPanel.current = new DeploymentDashboardPanel(panel, gitHelper, userRole);
+        DeploymentDashboardPanel.current = new DeploymentDashboardPanel(panel, gitHelper, context, focusEnv);
     }
 
     /** Refreshes the dashboard in place if it's currently open — used by the background poller. */
@@ -56,9 +60,11 @@ export class DeploymentDashboardPanel {
     private constructor(
         panel: vscode.WebviewPanel,
         private readonly _gitHelper: GitHelper,
-        private readonly _userRole: string
+        private readonly _extContext: vscode.ExtensionContext,
+        focusEnv?: string
     ) {
         this._panel = panel;
+        this._focusEnv = focusEnv;
         this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
         this._panel.webview.onDidReceiveMessage(async (msg) => {
             if (msg.command === "refresh") { await this.refresh(); }
@@ -76,6 +82,11 @@ export class DeploymentDashboardPanel {
         while (this._disposables.length) { this._disposables.pop()?.dispose(); }
     }
 
+    /** Resolved fresh on every use — "Change Role" can update this at runtime, so it must never be cached. */
+    private get _userRole(): string {
+        return getEffectiveRole(this._extContext);
+    }
+
     public async refresh() {
         try {
             await this._gitHelper.fetchRemote();
@@ -84,7 +95,8 @@ export class DeploymentDashboardPanel {
             for (let i = 0; i < envs.length; i++) {
                 models.push(await this._buildViewModel(envs[i], envs[i + 1]));
             }
-            this._panel.webview.html = this._renderHtml(models);
+            this._panel.webview.html = this._renderHtml(models, this._focusEnv);
+            this._focusEnv = undefined; // one-shot: don't keep overriding the user's own tab clicks on later refreshes
         } catch (err) {
             this._panel.webview.html = `<body style="padding:16px;color:#f48771;font-family:sans-serif">Error: ${escapeHtml(String(err))}</body>`;
         }
@@ -143,7 +155,7 @@ export class DeploymentDashboardPanel {
         }
 
         if (await this._gitHelper.hasUncommittedChanges()) {
-            vscode.window.showWarningMessage("Commit or stash your local changes before deploying — this checks out a different branch temporarily.");
+            await warnUncommittedChanges(this._gitHelper, "Commit or stash your local changes before deploying — this checks out a different branch temporarily.");
             return;
         }
 
@@ -160,7 +172,7 @@ export class DeploymentDashboardPanel {
                     await this._gitHelper.createLocalBranchFrom(env.branch, env.branch);
 
                     const result = await runDeploy(
-                        vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd(),
+                        this._gitHelper.getWorkspaceRoot(),
                         getSourceRootFolder(),
                         selection.mode === "all" ? [] : files.map(f => f.path),
                         env.orgAlias ?? "",
@@ -207,12 +219,13 @@ export class DeploymentDashboardPanel {
         );
     }
 
-    private async _viewFileDiff(msg: { env: string; nextEnv: string; path: string }) {
+    private async _viewFileDiff(msg: { env: string; envLabel: string; nextEnv: string; nextEnvLabel: string; path: string }) {
         const before = await this._gitHelper.fileContentAtRef(msg.env, msg.path);
         const after  = await this._gitHelper.fileContentAtRef(msg.nextEnv, msg.path);
         this._panel.webview.postMessage({
             command: "fileDiffResult", path: msg.path,
-            before: before ?? "(does not exist)", after: after ?? "(does not exist)",
+            beforeLabel: msg.envLabel, afterLabel: msg.nextEnvLabel,
+            before, after, // null means the file doesn't exist at that ref — the client renders that as a whole-file add/delete, not literal text
         });
     }
 
@@ -220,7 +233,7 @@ export class DeploymentDashboardPanel {
         return `<!DOCTYPE html><html><body style="font-family:sans-serif;padding:24px;color:#888">Loading deployment status…</body></html>`;
     }
 
-    private _renderHtml(models: EnvViewModel[]): string {
+    private _renderHtml(models: EnvViewModel[], focusEnv?: string): string {
         const notificationStrip = models
             .filter(m => m.groups.length > 0 || (m.lastDeploy === null && m.currentSha))
             .map(m => m.groups.length > 0
@@ -228,7 +241,13 @@ export class DeploymentDashboardPanel {
                 : `<div class="notice muted">ℹ <b>${escapeHtml(m.env.label)}</b>: never deployed from this dashboard yet — "Deploy ALL" will pick up everything currently on the branch</div>`
             ).join("");
 
-        const sections = models.map(m => this._renderEnvSection(m)).join("\n");
+        const activeEnv = (focusEnv && models.some(m => m.env.name === focusEnv)) ? focusEnv : (models[0]?.env.name ?? "");
+        const envTabs = models.map((m) =>
+            `<button class="tab env-tab${m.env.name === activeEnv ? " active" : ""}" data-env="${m.env.name}" onclick="setEnvTab('${m.env.name}')">${escapeHtml(m.env.label)}</button>`
+        ).join("");
+
+        const changesPanes = models.map(m => this._renderChangesPane(m)).join("\n");
+        const deploymentsPanes = models.map(m => this._renderDeploymentsPane(m)).join("\n");
 
         return `<!DOCTYPE html>
 <html>
@@ -240,20 +259,31 @@ export class DeploymentDashboardPanel {
     :root { --bg:#ffffff; --fg:#1a1a1a; --card:#f5f5f5; --border:#ddd; --muted:#666; --accent:#0078d4; --err:#c62828; --ok:#1b6b2f; }
   }
   * { box-sizing: border-box; }
-  body { background: var(--bg); color: var(--fg); font-family: -apple-system, Segoe UI, sans-serif; font-size: 13px; margin: 0; padding: 20px 24px 60px; max-width: 1100px; }
-  h1 { font-size: 20px; margin: 0 0 4px; }
+  body { background: var(--bg); color: var(--fg); font-family: -apple-system, Segoe UI, sans-serif; font-size: 13px; margin: 0; padding: 0 24px 60px; max-width: 1100px; }
+  h1 { font-size: 20px; margin: 0; padding: 20px 0 4px; }
   h2 { font-size: 16px; margin: 0 0 8px; display: flex; align-items: center; gap: 8px; }
-  .sub { color: var(--muted); font-size: 12px; margin-bottom: 20px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 16px; }
   .notice { background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; font-size: 13px; }
   .notice.muted { border-left-color: var(--muted); color: var(--muted); }
+
+  .tabbar { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); margin: 8px 0 20px; position: sticky; top: 0; background: var(--bg); z-index: 5; }
+  .tabs-left, .tabs-right { display: flex; gap: 4px; }
+  .tab { font-size: 13px; padding: 8px 14px; border: none; background: none; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; }
+  .tab:hover { color: var(--fg); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+  .tab.env-tab { font-size: 12px; padding: 8px 12px; }
+
+  .pane { display: none; }
+  .pane.visible { display: block; }
   section.env { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin-bottom: 24px; }
   .meta { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
   .group { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; }
   .group-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
   .shared { font-size: 11px; color: var(--err); margin-left: 6px; font-weight: normal; }
   ul.files { list-style: none; margin: 6px 0 0 24px; padding: 0; font-size: 12px; }
-  ul.files li { padding: 2px 0; cursor: pointer; }
-  ul.files li:hover { color: var(--accent); }
+  ul.files li { padding: 2px 0; }
+  ul.files li.clickable { cursor: pointer; }
+  ul.files li.clickable:hover { color: var(--accent); }
   .change { font-size: 10px; text-transform: uppercase; border-radius: 3px; padding: 1px 5px; margin-right: 6px; opacity: 0.8; }
   .change.added { background: #2e7d3222; color: #4caf50; }
   .change.modified { background: #f9a82522; color: #ffa726; }
@@ -271,10 +301,22 @@ export class DeploymentDashboardPanel {
   details.diff summary { cursor: pointer; font-weight: 600; }
   pre.manifest { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; overflow-x: auto; font-size: 11px; max-height: 220px; }
   #diffModal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); align-items: center; justify-content: center; z-index: 10; }
-  #diffModal .box { background: var(--card); border: 1px solid var(--border); border-radius: 8px; width: 90%; max-width: 1000px; max-height: 80vh; overflow: auto; padding: 16px; }
-  #diffModal .cols { display: flex; gap: 12px; }
-  #diffModal pre { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; overflow: auto; font-size: 11px; max-height: 60vh; white-space: pre-wrap; }
+  #diffModal .box { background: var(--card); border: 1px solid var(--border); border-radius: 8px; width: 90%; max-width: 1000px; max-height: 84vh; padding: 16px; display: flex; flex-direction: column; }
   #diffModal .close { float: right; cursor: pointer; }
+  #diffStat { font-size: 12px; margin: 2px 0 10px; }
+  #diffStat .plus { color: var(--ok); }
+  #diffStat .minus { color: var(--err); }
+  #diffBody { flex: 1; overflow: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; font-family: var(--vscode-editor-font-family, "SF Mono", Consolas, monospace); font-size: 12px; }
+  .diffline { display: flex; white-space: pre; }
+  .diffline .gutter { flex: 0 0 88px; text-align: right; padding: 0 10px; color: var(--muted); opacity: 0.7; user-select: none; border-right: 1px solid var(--border); }
+  .diffline .marker { flex: 0 0 18px; text-align: center; opacity: 0.8; user-select: none; }
+  .diffline .txt { flex: 1; padding-right: 12px; overflow-x: visible; }
+  .diffline.diff-add { background: #2e7d3222; }
+  .diffline.diff-add .marker, .diffline.diff-add .txt { color: #4caf50; }
+  .diffline.diff-del { background: #c6282822; }
+  .diffline.diff-del .marker, .diffline.diff-del .txt { color: var(--err); }
+  .diffline.diff-same .txt { color: var(--fg); opacity: 0.85; }
+  .diffline.diff-context { justify-content: center; color: var(--muted); padding: 2px 0; font-size: 11px; }
 </style>
 </head>
 <body>
@@ -283,25 +325,55 @@ export class DeploymentDashboardPanel {
 
 ${notificationStrip}
 
-${sections}
+<div class="tabbar">
+  <div class="tabs-left">
+    <button class="tab main-tab active" data-main="changes" onclick="setMain('changes')">Changes</button>
+    <button class="tab main-tab" data-main="deployments" onclick="setMain('deployments')">Deployments</button>
+  </div>
+  <div class="tabs-right">
+    ${envTabs}
+  </div>
+</div>
+
+${changesPanes}
+${deploymentsPanes}
 
 <div id="diffModal">
   <div class="box">
     <span class="close" onclick="closeDiff()">✕ close</span>
     <h3 id="diffTitle"></h3>
-    <div class="cols">
-      <div><div class="meta" id="beforeLabel"></div><pre id="beforePre"></pre></div>
-      <div><div class="meta" id="afterLabel"></div><pre id="afterPre"></pre></div>
-    </div>
+    <div class="meta" id="diffMeta"></div>
+    <div id="diffStat"></div>
+    <div id="diffBody"></div>
   </div>
 </div>
 
 <script>
   const vscode = acquireVsCodeApi();
   const state = {};
+  let activeMain = 'changes';
+  let activeEnv = ${JSON.stringify(activeEnv)};
 
   function send(command, payload) { vscode.postMessage(Object.assign({ command }, payload)); }
   function refresh() { send('refresh'); }
+
+  function applyTabs() {
+    document.querySelectorAll('.pane').forEach(function (p) {
+      p.classList.toggle('visible', p.dataset.main === activeMain && p.dataset.env === activeEnv);
+    });
+  }
+
+  function setMain(m) {
+    activeMain = m;
+    document.querySelectorAll('.main-tab').forEach(function (b) { b.classList.toggle('active', b.dataset.main === m); });
+    applyTabs();
+  }
+
+  function setEnvTab(e) {
+    activeEnv = e;
+    document.querySelectorAll('.env-tab').forEach(function (b) { b.classList.toggle('active', b.dataset.env === e); });
+    applyTabs();
+  }
 
   function setMode(env, mode) {
     state[env] = state[env] || {};
@@ -330,31 +402,183 @@ ${sections}
     send('runAction', Object.assign({ env, actionMode }, sel));
   }
 
-  function viewFileDiff(env, nextEnv, path) { send('viewFileDiff', { env, nextEnv, path }); }
+  function viewFileDiff(env, envLabel, nextEnv, nextEnvLabel, path) {
+    send('viewFileDiff', { env, envLabel, nextEnv, nextEnvLabel, path });
+  }
 
   function closeDiff() { document.getElementById('diffModal').style.display = 'none'; }
+
+  function escapeHtmlJs(s) {
+    return String(s).replace(/[<>&]/g, function (c) { return { '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]; });
+  }
+
+  // Line-level LCS diff. Guarded by size since it's O(lines_a * lines_b) time and memory —
+  // past that it falls back to a plain whole-file replace view instead of hanging the tab.
+  var DIFF_CELL_LIMIT = 4000000;
+  function computeLineDiff(a, b) {
+    var n = a.length, m = b.length;
+    if (n * m > DIFF_CELL_LIMIT) { return null; }
+    var dp = new Array(n + 1);
+    for (var i = 0; i <= n; i++) { dp[i] = new Uint32Array(m + 1); }
+    for (i = n - 1; i >= 0; i--) {
+      for (var j = m - 1; j >= 0; j--) {
+        dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+    var result = [];
+    i = 0; var j2 = 0;
+    while (i < n && j2 < m) {
+      if (a[i] === b[j2]) { result.push({ type: 'same', line: a[i] }); i++; j2++; }
+      else if (dp[i + 1][j2] >= dp[i][j2 + 1]) { result.push({ type: 'del', line: a[i] }); i++; }
+      else { result.push({ type: 'add', line: b[j2] }); j2++; }
+    }
+    while (i < n) { result.push({ type: 'del', line: a[i] }); i++; }
+    while (j2 < m) { result.push({ type: 'add', line: b[j2] }); j2++; }
+    return result;
+  }
+
+  var CONTEXT_LINES = 3;
+  var COLLAPSE_AFTER = 8;
+
+  function renderDiffLines(entries) {
+    var html = [];
+    var aNo = 0, bNo = 0;
+    var added = 0, deleted = 0;
+    var run = []; // buffered consecutive 'same' entries, so a long unchanged stretch can collapse
+
+    function flushRun() {
+      if (run.length === 0) { return; }
+      if (run.length <= COLLAPSE_AFTER) {
+        run.forEach(function (r) { html.push(r.html); });
+      } else {
+        for (var k = 0; k < CONTEXT_LINES; k++) { html.push(run[k].html); }
+        html.push('<div class="diffline diff-context">⋯ ' + (run.length - 2 * CONTEXT_LINES) + ' unchanged line(s) ⋯</div>');
+        for (var k2 = run.length - CONTEXT_LINES; k2 < run.length; k2++) { html.push(run[k2].html); }
+      }
+      run = [];
+    }
+
+    entries.forEach(function (e) {
+      if (e.type === 'same') {
+        aNo++; bNo++;
+        var gutter = String(aNo).padStart(4, ' ') + ' ' + String(bNo).padStart(4, ' ');
+        run.push({ html: '<div class="diffline diff-same"><span class="gutter">' + gutter + '</span><span class="marker"> </span><span class="txt">' + escapeHtmlJs(e.line) + '</span></div>' });
+        return;
+      }
+      flushRun();
+      if (e.type === 'add') {
+        bNo++; added++;
+        var g = '     ' + String(bNo).padStart(4, ' ');
+        html.push('<div class="diffline diff-add"><span class="gutter">' + g + '</span><span class="marker">+</span><span class="txt">' + escapeHtmlJs(e.line) + '</span></div>');
+      } else {
+        aNo++; deleted++;
+        var g2 = String(aNo).padStart(4, ' ') + '     ';
+        html.push('<div class="diffline diff-del"><span class="gutter">' + g2 + '</span><span class="marker">-</span><span class="txt">' + escapeHtmlJs(e.line) + '</span></div>');
+      }
+    });
+    flushRun();
+
+    return { html: html.join(''), added: added, deleted: deleted };
+  }
+
+  function splitLines(text) { return text.length ? text.split('\\n') : []; }
 
   window.addEventListener('message', function (event) {
     const msg = event.data;
     if (msg.command === 'fileDiffResult') {
       document.getElementById('diffTitle').textContent = msg.path;
-      document.getElementById('beforePre').textContent = msg.before;
-      document.getElementById('afterPre').textContent = msg.after;
+      document.getElementById('diffMeta').textContent = msg.beforeLabel + '  →  ' + msg.afterLabel;
+
+      var body = document.getElementById('diffBody');
+      var stat = document.getElementById('diffStat');
+
+      if (msg.before === msg.after) {
+        body.innerHTML = '<div class="diffline diff-context">No differences.</div>';
+        stat.innerHTML = '';
+      } else if (msg.before === null) {
+        var addLines = splitLines(msg.after || '');
+        body.innerHTML = addLines.map(function (l, idx) {
+          return '<div class="diffline diff-add"><span class="gutter">     ' + String(idx + 1).padStart(4, ' ') + '</span><span class="marker">+</span><span class="txt">' + escapeHtmlJs(l) + '</span></div>';
+        }).join('');
+        stat.innerHTML = '<b>New file</b> — <span class="plus">+' + addLines.length + '</span>';
+      } else if (msg.after === null) {
+        var delLines = splitLines(msg.before || '');
+        body.innerHTML = delLines.map(function (l, idx) {
+          return '<div class="diffline diff-del"><span class="gutter">' + String(idx + 1).padStart(4, ' ') + '     </span><span class="marker">-</span><span class="txt">' + escapeHtmlJs(l) + '</span></div>';
+        }).join('');
+        stat.innerHTML = '<b>Deleted</b> — <span class="minus">-' + delLines.length + '</span>';
+      } else {
+        var diff = computeLineDiff(splitLines(msg.before), splitLines(msg.after));
+        if (diff === null) {
+          body.innerHTML = '<div class="diffline diff-context">File too large to diff line-by-line — showing raw content instead.</div>'
+            + '<pre style="white-space:pre-wrap;padding:8px;margin:0">' + escapeHtmlJs(msg.before) + '\\n---\\n' + escapeHtmlJs(msg.after) + '</pre>';
+          stat.innerHTML = '';
+        } else {
+          var rendered = renderDiffLines(diff);
+          body.innerHTML = rendered.html;
+          stat.innerHTML = '<span class="plus">+' + rendered.added + '</span>&nbsp;&nbsp;<span class="minus">-' + rendered.deleted + '</span>';
+        }
+      }
+
       document.getElementById('diffModal').style.display = 'flex';
     }
   });
+
+  applyTabs();
 </script>
 </body>
 </html>`;
     }
 
-    private _renderEnvSection(m: EnvViewModel): string {
+    /** Read-only "Changes" pane for one environment: story/PR groups, diff-vs-next, package.xml preview. */
+    private _renderChangesPane(m: EnvViewModel): string {
         const env = m.env;
         const shortSha = (s: string | null) => s ? s.slice(0, 7) : "—";
-
         const lastDeployText = m.lastDeploy
             ? `Last deployed <code>${shortSha(m.lastDeploy.sha)}</code> on ${new Date(m.lastDeploy.deployedAt).toLocaleString()}`
             : `Never deployed from this dashboard`;
+
+        const groupsHtml = m.groups.map(g => `
+      <div class="group">
+        <div class="group-head">
+          ${escapeHtml(g.storyId)}
+          ${g.sharedWith.length ? `<span class="shared">shares file(s) with: ${g.sharedWith.map(escapeHtml).join(", ")}</span>` : ""}
+        </div>
+        <ul class="files">
+          ${g.files.map(f => `<li><span class="change ${f.change}">${f.change}</span>${escapeHtml(f.path)}</li>`).join("")}
+        </ul>
+      </div>`).join("");
+
+        const diffBlock = m.nextEnv
+            ? `<details class="diff">
+          <summary>Preview diff: ${escapeHtml(env.label)} vs ${escapeHtml(m.nextEnv.label)} (${m.diffVsNext?.length ?? 0} file(s) different)</summary>
+          <ul class="files">
+            ${(m.diffVsNext ?? []).map(f => `<li class="clickable" onclick="viewFileDiff('${env.branch}','${escapeHtml(env.label)}','${m.nextEnv!.branch}','${escapeHtml(m.nextEnv!.label)}','${escapeHtml(f.path)}')"><span class="change ${f.change}">${f.change}</span>${escapeHtml(f.path)}</li>`).join("")}
+          </ul>
+        </details>`
+            : "";
+
+        const manifestBlock = m.allFiles.length
+            ? `<details class="diff"><summary>package.xml preview (${m.allFiles.length} file(s))</summary><pre class="manifest">${escapeHtml(m.packageXml)}</pre>${m.unmapped.length ? `<div class="warn">Not in manifest: ${m.unmapped.map(escapeHtml).join(", ")}</div>` : ""}</details>`
+            : "";
+
+        return `
+<div class="pane" data-main="changes" data-env="${env.name}">
+<section class="env">
+  <h2>${escapeHtml(env.label)} <span class="meta">(${escapeHtml(env.branch)} → ${escapeHtml(env.orgAlias || "no org alias")})</span></h2>
+  <div class="meta">${lastDeployText}</div>
+
+  ${groupsHtml || '<div class="meta">No pending changes.</div>'}
+
+  ${diffBlock}
+  ${manifestBlock}
+</section>
+</div>`;
+    }
+
+    /** Action "Deployments" pane for one environment: selection mode, pickers, Validate/Deploy. */
+    private _renderDeploymentsPane(m: EnvViewModel): string {
+        const env = m.env;
 
         const groupsHtml = m.groups.map(g => `
       <div class="group">
@@ -376,23 +600,10 @@ ${sections}
         const noticeIfNoRole = m.canDeploy ? "" : `<div class="warn">⚠ Your role can't deploy to ${escapeHtml(env.label)} (requires "${escapeHtml(env.requiredRole ?? "")}").</div>`;
         const disabled = (!m.orgAliasSet || !m.canDeploy) ? "disabled" : "";
 
-        const diffBlock = m.nextEnv
-            ? `<details class="diff">
-          <summary>Preview diff: ${escapeHtml(env.label)} vs ${escapeHtml(m.nextEnv.label)} (${m.diffVsNext?.length ?? 0} file(s) different)</summary>
-          <ul class="files">
-            ${(m.diffVsNext ?? []).map(f => `<li onclick="viewFileDiff('${env.name}','${m.nextEnv!.branch}','${escapeHtml(f.path)}')"><span class="change ${f.change}">${f.change}</span>${escapeHtml(f.path)}</li>`).join("")}
-          </ul>
-        </details>`
-            : "";
-
-        const manifestBlock = m.allFiles.length
-            ? `<details class="diff"><summary>package.xml preview (${m.allFiles.length} file(s))</summary><pre class="manifest">${escapeHtml(m.packageXml)}</pre>${m.unmapped.length ? `<div class="warn">Not in manifest: ${m.unmapped.map(escapeHtml).join(", ")}</div>` : ""}</details>`
-            : "";
-
         return `
+<div class="pane" data-main="deployments" data-env="${env.name}">
 <section class="env">
   <h2>${escapeHtml(env.label)} <span class="meta">(${escapeHtml(env.branch)} → ${escapeHtml(env.orgAlias || "no org alias")})</span></h2>
-  <div class="meta">${lastDeployText}</div>
   ${noticeIfNoOrg}${noticeIfNoRole}
 
   <div class="mode-row">
@@ -408,10 +619,8 @@ ${sections}
     <button class="btn btn-secondary" ${disabled} onclick="runAction('${env.name}','validate')">🔍 Validate selection</button>
     <button class="btn btn-primary" ${disabled} onclick="runAction('${env.name}','deploy')">🚀 Deploy selection</button>
   </div>
-
-  ${diffBlock}
-  ${manifestBlock}
-</section>`;
+</section>
+</div>`;
     }
 }
 

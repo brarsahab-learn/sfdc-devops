@@ -231,11 +231,16 @@ export async function prepare2gpBeta(
 
     report("Opening pull request…");
     let prUrl: string | undefined;
-    const created = await providerClient.createPullRequest(branchName, baseline, `2GP Beta v${semver}`, releaseNotes);
+    // sfDevops.repoWorkspace/repoSlug are optional — resolveRepoIdentity derives the repo
+    // identity from the origin remote when they're unset, so PR creation doesn't silently
+    // no-op on a normal setup (same fallback the day-to-day Promote & Deploy flow uses).
+    const repoOverride = await gitHelper.resolveRepoIdentity(providerClient);
+
+    const created = await providerClient.createPullRequest(branchName, baseline, `2GP Beta v${semver}`, releaseNotes, repoOverride);
     if (created) {
         prUrl = created.url;
     } else {
-        const fallback = providerClient.buildPrUrl(branchName, baseline);
+        const fallback = providerClient.buildPrUrl(branchName, baseline, repoOverride);
         if (fallback) { prUrl = fallback; }
     }
 

@@ -5,7 +5,7 @@
 
 import * as vscode from "vscode";
 import { IGitProviderClient } from "../GitProviderClient";
-import { GitHelper }           from "../GitHelper";
+import { GitHelper, warnUncommittedChanges } from "../GitHelper";
 import { StoryWebviewProvider} from "../providers/StoryWebviewProvider";
 import { reportOperationConflict } from "./promoteStory";
 import { isFeatureBranch, extractStoryId, getFeatureBranchPrefix } from "../config";
@@ -39,9 +39,7 @@ export async function commitAndPush(
     // Nothing staged and nothing to push → guide the user.
     if (staged.length === 0 && unpushed === 0) {
         if (await gitHelper.hasUncommittedChanges()) {
-            vscode.window.showWarningMessage(
-                "Stage your metadata files first (Source Control view), then click Commit & Publish."
-            );
+            await warnUncommittedChanges(gitHelper, "Stage your metadata files first, then click Commit & Publish.");
         } else {
             vscode.window.showWarningMessage("No staged changes to publish.");
         }
@@ -98,7 +96,7 @@ export async function commitAndPush(
                         summary: `Conflict adding ${storyId} to the dev branch`,
                         details: { commitMessage: commitMsg, changedFiles, packageXml, unmappedFiles, conflicts: outcome.conflicts },
                     });
-                    await reportOperationConflict(outcome.conflicts, "dev branch");
+                    await reportOperationConflict(gitHelper, outcome.conflicts, "dev branch");
                     storyProvider.refresh();
                     return;
                 }

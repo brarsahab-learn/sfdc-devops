@@ -14,7 +14,8 @@ export type AuditOperation =
     | "prepare2gpBeta"
     | "runTests"
     | "deploy"
-    | "deployValidate";
+    | "deployValidate"
+    | "signoff";
 
 export type AuditOutcome = "success" | "conflict" | "failure";
 
@@ -35,6 +36,7 @@ export interface AuditDetails {
     version?:           string;
     releaseNotesPath?:  string;
     deployId?:          string;
+    note?:              string;
     selectionMode?:     "all" | "stories" | "files";
     componentFailures?: { type: string; name: string; problem: string }[];
     testResults?: {
@@ -70,11 +72,12 @@ const OPERATION_LABELS: Record<AuditOperation, string> = {
     runTests:         "Run Apex Tests",
     deploy:           "Deploy to Environment",
     deployValidate:   "Validate Deploy (dry-run)",
+    signoff:          "Manual Sign-off Recorded",
 };
 
 // Salesforce source-format folder name (under .../default/) → metadata API type.
 // Covers the common cases; anything else is reported as "unmapped" rather than guessed.
-const METADATA_TYPE_MAP: Record<string, string> = {
+export const METADATA_TYPE_MAP: Record<string, string> = {
     classes:            "ApexClass",
     triggers:           "ApexTrigger",
     pages:              "ApexPage",
@@ -111,10 +114,16 @@ const METADATA_TYPE_MAP: Record<string, string> = {
 const DEFAULT_API_VERSION = "59.0";
 
 /** Extracts the top-level metadata folder name (the segment right after ".../default/") from a source-format path. */
-function metadataFolder(filePath: string): string | null {
+export function metadataFolder(filePath: string): string | null {
     const parts = filePath.split("/");
     const idx = parts.indexOf("default");
     return idx !== -1 && parts.length > idx + 2 ? parts[idx + 1] : null;
+}
+
+/** The Metadata API type for a source-format file path, or null if its folder isn't recognized (see METADATA_TYPE_MAP). */
+export function metadataTypeForPath(filePath: string): string | null {
+    const folder = metadataFolder(filePath);
+    return folder ? (METADATA_TYPE_MAP[folder] ?? null) : null;
 }
 
 function memberNameFromPath(filePath: string, folder: string): string {
@@ -200,6 +209,7 @@ function renderEntry(entry: AuditEntry): string {
     if (d.error)          { rows.push(row("Error", `<span class="err">${escapeHtml(d.error)}</span>`)); }
     if (d.conflicts?.length) { rows.push(row("Conflicts", d.conflicts.map(escapeHtml).join(", "))); }
     if (d.deployId)        { rows.push(row("Deploy ID", d.deployId)); }
+    if (d.note)            { rows.push(row("Note", escapeHtml(d.note))); }
     if (d.selectionMode)   { rows.push(row("Selection", d.selectionMode)); }
     if (d.componentFailures?.length) {
         rows.push(row("Component failures", d.componentFailures.map(f => `${escapeHtml(f.type)}:${escapeHtml(f.name)} — ${escapeHtml(f.problem)}`).join("; ")));

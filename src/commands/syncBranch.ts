@@ -1,7 +1,7 @@
 // syncBranch.ts — "Sync Branch with Dev" command
 
 import * as vscode from "vscode";
-import { GitHelper }          from "../GitHelper";
+import { GitHelper, warnUncommittedChanges } from "../GitHelper";
 import { StoryWebviewProvider}from "../providers/StoryWebviewProvider";
 import { isFeatureBranch, getBaseBranch } from "../config";
 
@@ -17,9 +17,7 @@ export async function syncBranch(
     }
 
     if (await gitHelper.hasUncommittedChanges()) {
-        vscode.window.showWarningMessage(
-            "Commit or stash your changes before syncing."
-        );
+        await warnUncommittedChanges(gitHelper, "Commit or stash your changes before syncing.");
         return;
     }
 

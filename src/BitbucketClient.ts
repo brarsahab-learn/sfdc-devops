@@ -12,6 +12,7 @@ const BB_API = "https://api.bitbucket.org/2.0";
 const BB_WEB = "https://bitbucket.org";
 
 export class BitbucketClient implements IGitProviderClient {
+    readonly providerName = "bitbucket";
     private _authHeader: string | undefined;
 
     constructor(private readonly _context: vscode.ExtensionContext) {}
@@ -95,6 +96,14 @@ export class BitbucketClient implements IGitProviderClient {
         return m ? { workspace: m[1], repoSlug: m[2] } : null;
     }
 
+    /** Builds the "view this branch" URL for the browser. */
+    buildBranchUrl(branch: string, repoOverride?: { workspace: string; repoSlug: string }): string {
+        const workspace = repoOverride?.workspace || this.workspace;
+        const repoSlug  = repoOverride?.repoSlug  || this.repoSlug;
+        if (!workspace || !repoSlug) { return ""; }
+        return `${BB_WEB}/${workspace}/${repoSlug}/branch/${encodeURIComponent(branch)}`;
+    }
+
     private async fetch<T>(
         method: string,
         path: string,
@@ -167,6 +176,7 @@ export class BitbucketClient implements IGitProviderClient {
             id:        p.build_number,
             state:     p.state?.name ?? "UNKNOWN",
             result:    p.state?.result?.name ?? "",
+            succeeded: p.state?.result?.name === "SUCCESSFUL",
             branch:    p.target?.ref_name ?? "",
             commit:    p.target?.commit?.hash?.slice(0, 8) ?? "",
             url:       `${BB_WEB}/${this.workspace}/${this.repoSlug}/pipelines/results/${p.build_number}`,

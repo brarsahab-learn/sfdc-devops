@@ -2,7 +2,7 @@
 	"name": "sf-devops",
 	"displayName": "Salesforce DevOps",
 	"description": "Generic, settings-driven Salesforce CI/CD workflow — 1-click story management, pipeline status, environment promotion, and an org-per-branch 2GP packaging release gate",
-	"version": "3.1.0",
+	"version": "3.5.2",
 	"publisher": "your-company",
 	"engines": {
 		"vscode": "^1.85.0"
@@ -37,11 +37,6 @@
 					"type": "webview"
 				},
 				{
-					"id": "sfDevopsPipelineView",
-					"name": "Pipeline Status",
-					"type": "tree"
-				},
-				{
 					"id": "sfDevopsEnvView",
 					"name": "Environments",
 					"type": "tree"
@@ -69,7 +64,7 @@
 			},
 			{
 				"command": "sfDevops.promoteEnv",
-				"title": "Promote & Deploy to Environment...",
+				"title": "Promote to Environment...",
 				"icon": "$(rocket)",
 				"category": "Salesforce DevOps"
 			},
@@ -93,7 +88,7 @@
 			},
 			{
 				"command": "sfDevops.viewPipelineStatus",
-				"title": "Refresh Pipeline Status",
+				"title": "Refresh Environments",
 				"icon": "$(refresh)",
 				"category": "Salesforce DevOps"
 			},
@@ -125,6 +120,12 @@
 				"command": "sfDevops.openDeploymentDashboard",
 				"title": "Open Deployment Dashboard",
 				"icon": "$(rocket)",
+				"category": "Salesforce DevOps"
+			},
+			{
+				"command": "sfDevops.changeRole",
+				"title": "Change Role",
+				"icon": "$(account)",
 				"category": "Salesforce DevOps"
 			}
 		],
@@ -167,16 +168,17 @@
 					"items": {
 						"type": "string"
 					},
-					"description": "The full set of role names your team uses. Reference these names in sfDevops.environments[].requiredRole.",
+					"description": "The full set of role names your team uses. Reference these names in sfDevops.environments[].requiredRole. Default model: Developer (use the app), Lead (everything except Prod promote), Admin (all access, including config/setup and Prod).",
 					"default": [
-						"developer",
-						"TrackLead"
+						"Developer",
+						"Lead",
+						"Admin"
 					]
 				},
 				"sfDevops.role": {
 					"type": "string",
-					"description": "This user's role — must be one of sfDevops.roles. Controls which \"Promote & Deploy\" buttons are enabled, per environment's requiredRole.",
-					"default": "developer"
+					"description": "Deprecated bootstrap default only — the real, in-effect role is managed via the \"Change Role\" action in the Current Story panel (password-gated for Lead/Admin, stored outside this setting). This value is just the starting role before anyone has ever changed it that way.",
+					"default": "Developer"
 				},
 				"sfDevops.baseBranch": {
 					"type": "string",
@@ -196,7 +198,7 @@
 				},
 				"sfDevops.promotionBranchTemplate": {
 					"type": "string",
-					"description": "Template for \"Promote & Deploy\" branch names. {storyId} and {env} are replaced.",
+					"description": "Template for \"Promote\" branch names. {storyId} and {env} are replaced.",
 					"default": "promotion/{storyId}-to-{env}"
 				},
 				"sfDevops.validateBranchTemplate": {
@@ -206,7 +208,7 @@
 				},
 				"sfDevops.environments": {
 					"type": "array",
-					"description": "The full deployment pipeline, in order. The FIRST entry is published straight from the feature branch (no PR) — e.g. \"dev\". Every later entry is reached via a promotion/validate branch + pull request. Each entry may be a plain environment name (legacy shorthand) or an object: { name, label?, branch? (defaults to name), icon? (a VS Code codicon id), requiredRole? (role name from sfDevops.roles needed to run Promote & Deploy into this environment — Validate Only is always unrestricted), coverageGate? (true = the Apex coverage check must pass before promoting into this environment) }.",
+					"description": "The full deployment pipeline, in order. The FIRST entry is published straight from the feature branch (no PR) — e.g. \"dev\". Every later entry is reached via a promotion/validate branch + pull request. Each entry may be a plain environment name (legacy shorthand) or an object: { name, label?, branch? (defaults to name), icon? (a VS Code codicon id), requiredRole? (role name from sfDevops.roles needed to run Promote into this environment — Validate Only is always unrestricted), coverageGate? (true = the Apex coverage check must pass before promoting into this environment) }.",
 					"items": {
 						"anyOf": [
 							{
@@ -236,7 +238,7 @@
 									},
 									"requiredRole": {
 										"type": "string",
-										"description": "Role (from sfDevops.roles) required to Promote & Deploy into this environment."
+										"description": "Role (from sfDevops.roles) required to Promote into this environment."
 									},
 									"coverageGate": {
 										"type": "boolean",
@@ -252,9 +254,18 @@
 											"NoTestRun",
 											"RunSpecifiedTests",
 											"RunLocalTests",
-											"RunAllTestsInOrg"
+											"RunAllTestsInOrg",
+											"RunRelevantTests"
 										],
-										"description": "Apex test level used by the Deployment Dashboard's Deploy/Validate actions for this environment. Defaults to RunLocalTests."
+										"description": "Apex test level used by the Deployment Dashboard's Deploy/Validate actions for this environment. Defaults to RunRelevantTests (only tests Salesforce determines relevant to the deployed components — pairs naturally with the Dashboard's file-selection-based deploys)."
+									},
+									"signoffGate": {
+										"type": "boolean",
+										"description": "True = a human sign-off must be recorded on THIS environment (via the Current Story panel) before the story can be promoted to whatever comes after it — e.g. QA sign-off before UAT."
+									},
+									"isProd": {
+										"type": "boolean",
+										"description": "Marks this environment as Prod for safety gates (e.g. the Deployment Dashboard's auto-deploy-after-validate never applies here, regardless of the checkbox). Defaults to true when name is \"prod\" — set this explicitly if your production environment uses a different name."
 									}
 								}
 							}
@@ -270,7 +281,12 @@
 						},
 						{
 							"name": "uat",
-							"requiredRole": "TrackLead"
+							"requiredRole": "Lead"
+						},
+						{
+							"name": "prod",
+							"branch": "main",
+							"requiredRole": "Admin"
 						}
 					]
 				},

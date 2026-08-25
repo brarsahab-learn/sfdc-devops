@@ -1,10 +1,8 @@
 // DeploymentEngine.ts — runs `sf project deploy start|validate` against a target org.
 // Mirrors the shape of src/commands/coverageCheck.ts (same CLI-invocation pattern).
 
-import { execFile } from "child_process";
-import { promisify } from "util";
-
-const execFileAsync = promisify(execFile);
+import { execSf } from "./SfCli";
+import { log, revealLog } from "./Log";
 
 export interface ComponentFailure {
     type:    string;
@@ -56,19 +54,24 @@ export async function runDeploy(
     args.push("--target-org", orgAlias, "--test-level", testLevel);
     args.push("--json", "--wait", String(Math.max(1, Math.round(timeoutSeconds / 60))));
 
+    const verb = mode === "deploy" ? "Deploying" : "Validating";
+    const scope = sourceDirs.length > 0 ? `${sourceDirs.length} file(s)` : "all files";
+    revealLog(`${verb} ${scope} to ${orgAlias} (${testLevel})`);
+
     let stdout = "";
     try {
-        const r = await execFileAsync("sf", args, {
+        const r = await execSf(args, {
             cwd: workspaceRoot,
             timeout: timeoutSeconds * 1000,
             maxBuffer: 20 * 1024 * 1024,
-            shell: true,   // resolve sf / sf.cmd via PATH
         });
         stdout = r.stdout;
     } catch (e: any) {
         stdout = e?.stdout ?? "";
         if (!stdout) {
-            return { ...base, error: friendlyCliError(e) };
+            const message = friendlyCliError(e);
+            log(`Failed — ${message}`);
+            return { ...base, error: message };
         }
     }
 
@@ -76,6 +79,7 @@ export async function runDeploy(
     try {
         parsed = JSON.parse(stdout);
     } catch {
+        log("Failed — could not read the Salesforce CLI response.");
         return { ...base, error: "Could not parse the Salesforce CLI response." };
     }
 
@@ -90,14 +94,31 @@ export async function runDeploy(
             problem: String(f?.problem ?? f?.message ?? "Unknown error"),
         }));
 
+    const numberComponentsDeployed = Number(result?.numberComponentsDeployed ?? result?.details?.componentSuccesses?.length ?? 0);
+    const testsFailed = Number(result?.details?.runTestResult?.numberTestsFailed ?? 0);
+    const testsRun = Number(result?.details?.runTestResult?.numTestsRun ?? 0);
+
+    if (success) {
+        const testsPart = testsRun > 0 ? `, ${testsRun - testsFailed}/${testsRun} test(s) passed` : "";
+        log(`${mode === "deploy" ? "Deployed" : "Validated"} — ${numberComponentsDeployed} component(s)${testsPart}.`);
+    } else if (failures.length > 0) {
+        log(`Failed — ${failures.length} component error(s):`);
+        for (const f of failures.slice(0, 10)) { log(`  ${f.name}: ${f.problem}`); }
+        if (failures.length > 10) { log(`  ...and ${failures.length - 10} more.`); }
+    } else if (testsFailed > 0) {
+        log(`Failed — ${testsFailed} test(s) failed.`);
+    } else {
+        log(`Failed — ${result?.errorMessage || "deploy did not succeed."}`);
+    }
+
     return {
         ran: true,
         success,
         deployId: result?.id,
-        numberComponentsDeployed: Number(result?.numberComponentsDeployed ?? result?.details?.componentSuccesses?.length ?? 0),
+        numberComponentsDeployed,
         numberComponentErrors: Number(result?.numberComponentErrors ?? failures.length ?? 0),
         componentFailures: failures,
-        testsFailed: Number(result?.details?.runTestResult?.numberTestsFailed ?? 0),
+        testsFailed,
         error: success ? undefined : (result?.errorMessage || (failures.length ? undefined : "Deploy did not succeed.")),
     };
 }

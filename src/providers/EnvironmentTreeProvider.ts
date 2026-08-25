@@ -1,16 +1,19 @@
 // EnvironmentTreeProvider.ts — Shows which version is deployed in each org.
 // Reads the environment list from sfDevops.environments (the same setting every other
-// part of the extension uses) — no separate config file, no hardcoded fallback list.
+// part of the extension uses), and the last-deployed commit from the local deploy-state
+// file GitHelper tracks whenever a real deploy runs from the Deployment Dashboard — that's
+// the actual source of truth now that every deploy originates from this extension, not an
+// external CI pipeline (there usually isn't one to query any more).
 
 import * as vscode from "vscode";
-import { IGitProviderClient } from "../GitProviderClient";
+import { GitHelper } from "../GitHelper";
 import { getEnvironments, ResolvedEnvironment } from "../config";
 
 export class EnvironmentTreeProvider implements vscode.TreeDataProvider<EnvItem> {
     private _onDidChangeTreeData = new vscode.EventEmitter<EnvItem | undefined>();
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
-    constructor(private readonly _bbClient: IGitProviderClient) {}
+    constructor(private readonly _gitHelper: GitHelper) {}
 
     refresh(): void { this._onDidChangeTreeData.fire(undefined); }
 
@@ -18,30 +21,40 @@ export class EnvironmentTreeProvider implements vscode.TreeDataProvider<EnvItem>
 
     async getChildren(): Promise<EnvItem[]> {
         const envs = getEnvironments();
-        try {
-            const pipelines = await this._bbClient.getLatestPipelines(20);
-
-            return envs.map((env) => {
-                const latest = pipelines.find(
-                    (p) => p.branch === env.branch && p.result === "SUCCESSFUL"
-                );
-                return new EnvItem(env, latest?.commit ?? "unknown", latest?.createdOn);
-            });
-        } catch {
-            return envs.map((env) => new EnvItem(env, "—"));
-        }
+        return Promise.all(envs.map(async (env) => {
+            const [lastDeploy, branchHeadSha] = await Promise.all([
+                this._gitHelper.getDeployState(env.name),
+                this._gitHelper.remoteHeadSha(env.branch),
+            ]);
+            const pending = Boolean(lastDeploy && branchHeadSha && lastDeploy.sha !== branchHeadSha);
+            return new EnvItem(env, lastDeploy, pending);
+        }));
     }
 }
 
 class EnvItem extends vscode.TreeItem {
-    constructor(env: ResolvedEnvironment, commit: string, deployedAt?: string) {
+    constructor(
+        env: ResolvedEnvironment,
+        lastDeploy: { sha: string; deployedAt: string; numberComponentsDeployed?: number } | null,
+        pending: boolean
+    ) {
         super(env.label, vscode.TreeItemCollapsibleState.None);
 
-        this.description = commit !== "unknown" ? `${commit}` : "—";
-        this.tooltip     = deployedAt
-            ? `Last deployed: ${new Date(deployedAt).toLocaleString()}`
-            : "No deployments found";
+        const shortSha = lastDeploy?.sha ? lastDeploy.sha.slice(0, 8) : null;
+        this.description = shortSha ? `${shortSha}${pending ? " (behind)" : ""}` : "not deployed yet";
 
-        this.iconPath = new vscode.ThemeIcon(env.icon);
+        if (!lastDeploy) {
+            this.tooltip = `No deploy recorded for ${env.label} yet — run a Deploy from the Deployment Dashboard.`;
+            this.iconPath = new vscode.ThemeIcon("circle-outline");
+        } else {
+            const deployedAt = new Date(lastDeploy.deployedAt).toLocaleString();
+            const components  = lastDeploy.numberComponentsDeployed !== undefined
+                ? `, ${lastDeploy.numberComponentsDeployed} component(s)`
+                : "";
+            this.tooltip = pending
+                ? `Last deployed: ${deployedAt}${components}\n${env.branch} has newer commits not yet deployed.`
+                : `Last deployed: ${deployedAt}${components}\nUp to date with ${env.branch}.`;
+            this.iconPath = new vscode.ThemeIcon(pending ? "warning" : env.icon);
+        }
     }
 }
