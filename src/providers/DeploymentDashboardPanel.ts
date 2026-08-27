@@ -1,15 +1,17 @@
 // DeploymentDashboardPanel.ts — full-screen "Deployment Dashboard".
 // Shows, per environment, what's merged-but-not-deployed since this extension last ran
 // a real `sf project deploy` there, grouped by the story/PR that introduced each change,
-// and lets the user deploy ALL / by story / by hand-picked file. No external CI involved.
+// as a checkbox tree (left) with a live color-coded diff (right) for whatever's selected.
+// No external CI involved — Validate/Deploy run `sf project deploy` directly from here.
 
 import * as vscode from "vscode";
 import { GitHelper, warnUncommittedChanges } from "../GitHelper";
-import { runDeploy, DeployMode } from "../DeploymentEngine";
+import { runDeploy, DeployMode, DeployResult } from "../DeploymentEngine";
 import { groupChangesByStory, resolveSelection, DeploySelection, StoryChangeGroup, CommitInfo } from "../DeploymentPlanner";
-import { buildPackageXml, AuditChangedFile } from "../AuditLog";
-import { getPromotableEnvironments, getSourceRootFolder, getDeployTimeoutSeconds, canPromote, ResolvedEnvironment } from "../config";
+import { buildPackageXml, AuditChangedFile, metadataTypeForPath } from "../AuditLog";
+import { getPromotableEnvironments, getPublishEnvironment, getSourceRootFolder, getDeployTimeoutSeconds, canPromote, ResolvedEnvironment } from "../config";
 import { getEffectiveRole } from "../RoleManager";
+import { log } from "../Log";
 
 function escapeHtml(s: string): string {
     return String(s).replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]!));
@@ -18,6 +20,7 @@ function escapeHtml(s: string): string {
 interface EnvViewModel {
     env:          ResolvedEnvironment;
     nextEnv?:     ResolvedEnvironment;
+    prevEnv?:     ResolvedEnvironment;
     currentSha:   string | null;
     lastDeploy:   { sha: string; deployedAt: string } | null;
     groups:       StoryChangeGroup[];
@@ -29,11 +32,23 @@ interface EnvViewModel {
     orgAliasSet:  boolean;
 }
 
+/** One-shot result of the last Validate/Deploy action, shown once as a banner then cleared — same idiom as the one-shot `_focusEnv`. */
+interface DeployOutcome {
+    env:     string;
+    kind:    "validatePassed" | "validateFailed" | "deploySucceeded" | "deployFailed";
+    message: string;
+    nextEnv?: { name: string; label: string };
+    storyCount?: number;
+}
+
 export class DeploymentDashboardPanel {
     private static current: DeploymentDashboardPanel | undefined;
     private readonly _panel: vscode.WebviewPanel;
     private _disposables: vscode.Disposable[] = [];
     private _focusEnv?: string;
+    private _lastOutcome?: DeployOutcome;
+    /** Fingerprint (sorted file paths, joined) of the last selection that successfully Validated, per env — Deploy is locked until the CURRENT selection matches it exactly. Sticky across renders (unlike _lastOutcome), so it's not just a one-time click-time check: the button re-locks the moment the checked selection changes. */
+    private _validatedSelections = new Map<string, string>();
 
     /** `focusEnv` opens (or brings to front) the dashboard with that environment's tab pre-selected — used by the "🚀 Deploy" link in Story Progress so a merged-but-undeployed story leads straight to the right tab instead of the first one. */
     public static createOrShow(gitHelper: GitHelper, context: vscode.ExtensionContext, focusEnv?: string) {
@@ -70,6 +85,7 @@ export class DeploymentDashboardPanel {
             if (msg.command === "refresh") { await this.refresh(); }
             if (msg.command === "runAction") { await this._runAction(msg); }
             if (msg.command === "viewFileDiff") { await this._viewFileDiff(msg); }
+            if (msg.command === "viewPendingFileDiff") { await this._viewPendingFileDiff(msg); }
         }, null, this._disposables);
 
         this._panel.webview.html = this._loadingHtml();
@@ -93,7 +109,8 @@ export class DeploymentDashboardPanel {
             const envs = getPromotableEnvironments();
             const models: EnvViewModel[] = [];
             for (let i = 0; i < envs.length; i++) {
-                models.push(await this._buildViewModel(envs[i], envs[i + 1]));
+                const prevEnv = i > 0 ? envs[i - 1] : getPublishEnvironment();
+                models.push(await this._buildViewModel(envs[i], envs[i + 1], prevEnv));
             }
             this._panel.webview.html = this._renderHtml(models, this._focusEnv);
             this._focusEnv = undefined; // one-shot: don't keep overriding the user's own tab clicks on later refreshes
@@ -102,7 +119,7 @@ export class DeploymentDashboardPanel {
         }
     }
 
-    private async _buildViewModel(env: ResolvedEnvironment, nextEnv?: ResolvedEnvironment): Promise<EnvViewModel> {
+    private async _buildViewModel(env: ResolvedEnvironment, nextEnv?: ResolvedEnvironment, prevEnv?: ResolvedEnvironment): Promise<EnvViewModel> {
         const sourceRoot = getSourceRootFolder();
         const currentSha = await this._gitHelper.remoteHeadSha(env.branch);
         const lastDeploy  = await this._gitHelper.getDeployState(env.name);
@@ -132,20 +149,89 @@ export class DeploymentDashboardPanel {
         const { xml: packageXml, unmapped } = buildPackageXml(allFiles);
 
         return {
-            env, nextEnv, currentSha, lastDeploy, groups, allFiles, diffVsNext, packageXml, unmapped,
+            env, nextEnv, prevEnv, currentSha, lastDeploy, groups, allFiles, diffVsNext, packageXml, unmapped,
             canDeploy:   canPromote(this._userRole, env),
             orgAliasSet: Boolean(env.orgAlias),
         };
     }
 
+    /** Runs one Validate or Deploy step against an already-resolved file selection, and records the outcome (deploy-state + audit log) — shared by a single manual action and each half of an auto-deploy chain. */
+    private async _executeStep(
+        env: ResolvedEnvironment,
+        mode: DeployMode,
+        selection: DeploySelection,
+        files: AuditChangedFile[],
+        summary: string
+    ): Promise<DeployResult> {
+        const { xml: packageXml, unmapped } = buildPackageXml(files);
+
+        const result = await runDeploy(
+            this._gitHelper.getWorkspaceRoot(),
+            getSourceRootFolder(),
+            selection.mode === "all" ? [] : files.map(f => f.path),
+            env.orgAlias ?? "",
+            env.deployTestLevel,
+            getDeployTimeoutSeconds(),
+            mode
+        );
+
+        if (result.success && mode === "deploy") {
+            const sha = await this._gitHelper.remoteHeadSha(env.branch);
+            if (sha) { await this._gitHelper.recordDeployed(env.name, sha, { numberComponentsDeployed: result.numberComponentsDeployed }); }
+        }
+
+        await this._gitHelper.appendAudit({
+            operation:  mode === "deploy" ? "deploy" : "deployValidate",
+            targetEnv:  env.name,
+            outcome:    result.success ? "success" : "failure",
+            summary:    `${summary} — ${result.success ? "succeeded" : (result.error ?? "failed")}`,
+            details:    {
+                changedFiles: files, packageXml, unmappedFiles: unmapped,
+                deployId: result.deployId, componentFailures: result.componentFailures,
+                selectionMode: selection.mode, error: result.error,
+            },
+        });
+
+        return result;
+    }
+
     private async _runAction(msg: any) {
-        const envs = getPromotableEnvironments();
-        const env = envs.find(e => e.name === msg.env);
+        const promotable = getPromotableEnvironments();
+        const idx = promotable.findIndex(e => e.name === msg.env);
+        const env = promotable[idx];
         if (!env) { return; }
-        const mode: DeployMode = msg.actionMode === "deploy" ? "deploy" : "validate";
+
+        const requestedMode: DeployMode = msg.actionMode === "deploy" ? "deploy" : "validate";
         const selection: DeploySelection = { mode: msg.selectionMode, storyIds: msg.storyIds, files: msg.files };
 
-        if (mode === "deploy") {
+        // Hard server-side gate — never trust the client's checkbox for Prod, regardless of
+        // what the (disabled-in-UI) checkbox somehow sends. Prod always needs a manual Deploy click.
+        const autoDeployRequested = Boolean(msg.autoDeployOnSuccess) && !env.isProd;
+
+        const nextEnv = promotable[idx + 1];
+        const prevEnv = idx > 0 ? promotable[idx - 1] : getPublishEnvironment();
+        const model = await this._buildViewModel(env, nextEnv, prevEnv);
+        const { files, summary } = resolveSelection(selection, model.groups, model.allFiles);
+
+        // An empty non-"all" selection must never silently fall through to deploying the
+        // entire source root (DeploymentEngine treats an empty sourceDirs array as "no
+        // restriction") — reject it explicitly instead.
+        if (selection.mode !== "all" && files.length === 0) {
+            vscode.window.showWarningMessage("No files selected — check at least one file, or use Deploy ALL.");
+            return;
+        }
+
+        // Hard server-side gate — a standalone manual Deploy is locked until Validate has
+        // actually passed for EXACTLY this selection (never trust the client button's enabled
+        // state alone). The auto-deploy chain below is exempt: it always runs its own Validate
+        // immediately beforehand in the same request, so it's inherently already satisfied.
+        if (requestedMode === "deploy") {
+            const fp = fingerprintFiles(files);
+            if (this._validatedSelections.get(env.name) !== fp) {
+                vscode.window.showWarningMessage(`Run Validate on this exact selection for ${env.label} first — Deploy stays locked until it passes for what's currently checked.`);
+                return;
+            }
+
             const confirm = await vscode.window.showWarningMessage(
                 `${msg.selectionMode === "all" ? "Deploy ALL pending changes" : "Deploy the selected changes"} to ${env.label} (${env.orgAlias})?\n\nThis runs a real Salesforce deployment.`,
                 { modal: true },
@@ -162,55 +248,69 @@ export class DeploymentDashboardPanel {
         const originalBranch = await this._gitHelper.currentBranch();
 
         await vscode.window.withProgress(
-            { location: vscode.ProgressLocation.Notification, title: `${mode === "deploy" ? "Deploying" : "Validating"} against ${env.label}...`, cancellable: false },
+            { location: vscode.ProgressLocation.Notification, title: `${requestedMode === "deploy" ? "Deploying" : "Validating"} against ${env.label}...`, cancellable: false },
             async () => {
                 try {
-                    const model = await this._buildViewModel(env, undefined);
-                    const { files, summary } = resolveSelection(selection, model.groups, model.allFiles);
-                    const { xml: packageXml, unmapped } = buildPackageXml(files);
-
                     await this._gitHelper.createLocalBranchFrom(env.branch, env.branch);
 
-                    const result = await runDeploy(
-                        this._gitHelper.getWorkspaceRoot(),
-                        getSourceRootFolder(),
-                        selection.mode === "all" ? [] : files.map(f => f.path),
-                        env.orgAlias ?? "",
-                        env.deployTestLevel,
-                        getDeployTimeoutSeconds(),
-                        mode
-                    );
+                    const first = await this._executeStep(env, requestedMode, selection, files, summary);
 
-                    if (result.success && mode === "deploy") {
-                        const sha = await this._gitHelper.remoteHeadSha(env.branch);
-                        if (sha) { await this._gitHelper.recordDeployed(env.name, sha, { numberComponentsDeployed: result.numberComponentsDeployed }); }
+                    if (requestedMode === "validate" && first.success) {
+                        this._validatedSelections.set(env.name, fingerprintFiles(files));
                     }
 
-                    await this._gitHelper.appendAudit({
-                        operation:  mode === "deploy" ? "deploy" : "deployValidate",
-                        targetEnv:  env.name,
-                        outcome:    result.success ? "success" : "failure",
-                        summary:    `${summary} — ${result.success ? "succeeded" : (result.error ?? "failed")}`,
-                        details:    {
-                            changedFiles: files, packageXml, unmappedFiles: unmapped,
-                            deployId: result.deployId, componentFailures: result.componentFailures,
-                            selectionMode: selection.mode, error: result.error,
-                        },
-                    });
-
-                    if (result.success) {
-                        vscode.window.showInformationMessage(`✅ ${mode === "deploy" ? "Deployed" : "Validated"} against ${env.label} — ${summary}.`);
+                    if (requestedMode === "validate" && first.success && autoDeployRequested) {
+                        log(`Validate passed — auto-deploying to ${env.label} (auto-deploy enabled)…`);
+                        const second = await this._executeStep(env, "deploy", selection, files, summary);
+                        if (second.success) { this._validatedSelections.delete(env.name); }
+                        this._lastOutcome = second.success
+                            ? {
+                                env: env.name, kind: "deploySucceeded", message: `Validated and deployed — ${summary}.`,
+                                nextEnv: nextEnv ? { name: nextEnv.name, label: nextEnv.label } : undefined,
+                                storyCount: countTouchedGroups(model.groups, files),
+                              }
+                            : { env: env.name, kind: "deployFailed", message: second.error ?? "Auto-deploy failed after a successful validate." };
+                        if (second.success) {
+                            vscode.window.showInformationMessage(`✅ Validated and auto-deployed to ${env.label} — ${summary}.`);
+                        } else {
+                            vscode.window.showErrorMessage(`❌ Validate passed but auto-deploy to ${env.label} failed: ${second.error ?? "see the audit trail"}.`);
+                        }
+                    } else if (requestedMode === "validate") {
+                        this._lastOutcome = first.success
+                            ? { env: env.name, kind: "validatePassed", message: "Validate passed — Deploy is now unlocked for this selection." }
+                            : { env: env.name, kind: "validateFailed", message: first.error ?? "Validation failed." };
+                        if (first.success) {
+                            vscode.window.showInformationMessage(`✅ Validated against ${env.label} — ${summary}.`);
+                        } else {
+                            vscode.window.showErrorMessage(`❌ Validation against ${env.label} failed: ${first.error ?? "see component failures in the audit trail"}.`);
+                        }
                     } else {
-                        vscode.window.showErrorMessage(`❌ ${mode === "deploy" ? "Deploy" : "Validation"} against ${env.label} failed: ${result.error ?? "see component failures in the audit trail"}.`);
+                        if (first.success) { this._validatedSelections.delete(env.name); }
+                        this._lastOutcome = first.success
+                            ? {
+                                env: env.name, kind: "deploySucceeded", message: `Deployed — ${summary}.`,
+                                nextEnv: nextEnv ? { name: nextEnv.name, label: nextEnv.label } : undefined,
+                                storyCount: countTouchedGroups(model.groups, files),
+                              }
+                            : { env: env.name, kind: "deployFailed", message: first.error ?? "Deploy failed." };
+                        if (first.success) {
+                            vscode.window.showInformationMessage(`✅ Deployed against ${env.label} — ${summary}.`);
+                        } else {
+                            vscode.window.showErrorMessage(`❌ Deploy against ${env.label} failed: ${first.error ?? "see component failures in the audit trail"}.`);
+                        }
                     }
                 } catch (err) {
                     await this._gitHelper.appendAudit({
-                        operation: mode === "deploy" ? "deploy" : "deployValidate",
+                        operation: requestedMode === "deploy" ? "deploy" : "deployValidate",
                         targetEnv: env.name, outcome: "failure",
-                        summary: `${mode === "deploy" ? "Deploy" : "Validation"} failed`,
+                        summary: `${requestedMode === "deploy" ? "Deploy" : "Validation"} failed`,
                         details: { error: String(err) },
                     });
-                    vscode.window.showErrorMessage(`${mode === "deploy" ? "Deploy" : "Validation"} failed: ${err}`);
+                    this._lastOutcome = {
+                        env: env.name, kind: requestedMode === "deploy" ? "deployFailed" : "validateFailed",
+                        message: String(err),
+                    };
+                    vscode.window.showErrorMessage(`${requestedMode === "deploy" ? "Deploy" : "Validation"} failed: ${err}`);
                 } finally {
                     if (originalBranch) { await this._gitHelper.checkoutBranch(originalBranch).catch(() => {}); }
                     await this.refresh();
@@ -219,13 +319,36 @@ export class DeploymentDashboardPanel {
         );
     }
 
-    private async _viewFileDiff(msg: { env: string; envLabel: string; nextEnv: string; nextEnvLabel: string; path: string }) {
-        const before = await this._gitHelper.fileContentAtRef(msg.env, msg.path);
-        const after  = await this._gitHelper.fileContentAtRef(msg.nextEnv, msg.path);
+    /** Diff between two environment branches — used by the "diff vs next env" preview list. */
+    private async _viewFileDiff(msg: { targetEnv: string; beforeRef: string; beforeLabel: string; afterRef: string; afterLabel: string; path: string }) {
+        const before = await this._gitHelper.fileContentAtRef(msg.beforeRef, msg.path);
+        const after  = await this._gitHelper.fileContentAtRef(msg.afterRef, msg.path);
         this._panel.webview.postMessage({
-            command: "fileDiffResult", path: msg.path,
-            beforeLabel: msg.envLabel, afterLabel: msg.nextEnvLabel,
+            command: "fileDiffResult", targetEnv: msg.targetEnv, path: msg.path,
+            beforeLabel: msg.beforeLabel, afterLabel: msg.afterLabel,
             before, after, // null means the file doesn't exist at that ref — the client renders that as a whole-file add/delete, not literal text
+        });
+    }
+
+    /** Diff between what's actually deployed (or the previous stage, if never deployed) and this environment's pending branch content — used by clicking a file row in the left tree. A small targeted lookup, not a full _buildViewModel() rebuild. */
+    private async _viewPendingFileDiff(msg: { env: string; path: string }) {
+        const promotable = getPromotableEnvironments();
+        const idx = promotable.findIndex(e => e.name === msg.env);
+        const env = promotable[idx];
+        if (!env) { return; }
+        const prevEnv = idx > 0 ? promotable[idx - 1] : getPublishEnvironment();
+        const lastDeploy = await this._gitHelper.getDeployState(env.name);
+
+        const before = lastDeploy
+            ? await this._gitHelper.fileContentAtSha(lastDeploy.sha, msg.path)
+            : await this._gitHelper.fileContentAtRef(prevEnv.branch, msg.path);
+        const after = await this._gitHelper.fileContentAtRef(env.branch, msg.path);
+
+        this._panel.webview.postMessage({
+            command: "fileDiffResult", targetEnv: env.name, path: msg.path,
+            beforeLabel: lastDeploy ? `Last deployed to ${env.label} (${lastDeploy.sha.slice(0, 7)})` : `${prevEnv.label} (current)`,
+            afterLabel: `${env.label} (pending)`,
+            before, after,
         });
     }
 
@@ -246,8 +369,8 @@ export class DeploymentDashboardPanel {
             `<button class="tab env-tab${m.env.name === activeEnv ? " active" : ""}" data-env="${m.env.name}" onclick="setEnvTab('${m.env.name}')">${escapeHtml(m.env.label)}</button>`
         ).join("");
 
-        const changesPanes = models.map(m => this._renderChangesPane(m)).join("\n");
-        const deploymentsPanes = models.map(m => this._renderDeploymentsPane(m)).join("\n");
+        const envPanes = models.map(m => this._renderEnvPane(m)).join("\n");
+        this._lastOutcome = undefined; // one-shot: shown once, then cleared
 
         return `<!DOCTYPE html>
 <html>
@@ -259,54 +382,80 @@ export class DeploymentDashboardPanel {
     :root { --bg:#ffffff; --fg:#1a1a1a; --card:#f5f5f5; --border:#ddd; --muted:#666; --accent:#0078d4; --err:#c62828; --ok:#1b6b2f; }
   }
   * { box-sizing: border-box; }
-  body { background: var(--bg); color: var(--fg); font-family: -apple-system, Segoe UI, sans-serif; font-size: 13px; margin: 0; padding: 0 24px 60px; max-width: 1100px; }
+  body { background: var(--bg); color: var(--fg); font-family: -apple-system, Segoe UI, sans-serif; font-size: 13px; margin: 0; padding: 0 24px 60px; max-width: 1500px; }
   h1 { font-size: 20px; margin: 0; padding: 20px 0 4px; }
   h2 { font-size: 16px; margin: 0 0 8px; display: flex; align-items: center; gap: 8px; }
   .sub { color: var(--muted); font-size: 12px; margin-bottom: 16px; }
   .notice { background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; font-size: 13px; }
   .notice.muted { border-left-color: var(--muted); color: var(--muted); }
 
-  .tabbar { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); margin: 8px 0 20px; position: sticky; top: 0; background: var(--bg); z-index: 5; }
-  .tabs-left, .tabs-right { display: flex; gap: 4px; }
+  .tabbar { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 8px 0 20px; position: sticky; top: 0; background: var(--bg); z-index: 5; padding-top: 4px; }
   .tab { font-size: 13px; padding: 8px 14px; border: none; background: none; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; }
   .tab:hover { color: var(--fg); }
   .tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
-  .tab.env-tab { font-size: 12px; padding: 8px 12px; }
 
   .pane { display: none; }
   .pane.visible { display: block; }
   section.env { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin-bottom: 24px; }
   .meta { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
-  .group { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; }
-  .group-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
-  .shared { font-size: 11px; color: var(--err); margin-left: 6px; font-weight: normal; }
-  ul.files { list-style: none; margin: 6px 0 0 24px; padding: 0; font-size: 12px; }
-  ul.files li { padding: 2px 0; }
+
+  .outcome { border-radius: 6px; padding: 8px 12px; margin: 8px 0; font-size: 13px; border: 1px solid var(--border); }
+  .outcome a { color: inherit; font-weight: 600; text-decoration: underline; margin-left: 4px; cursor: pointer; }
+  .outcome-validatePassed, .outcome-deploySucceeded { background: #2e7d3222; border-color: var(--ok); color: var(--ok); }
+  .outcome-validateFailed, .outcome-deployFailed { background: #c6282822; border-color: var(--err); color: var(--err); }
+
+  .split { display: flex; gap: 16px; margin-top: 12px; }
+  .split-left { flex: 0 0 35%; min-width: 260px; max-height: 62vh; overflow-y: auto; padding-right: 4px; }
+  .split-right { flex: 1 1 65%; min-width: 320px; max-height: 62vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+
+  .story-filter { width: 100%; font-size: 12px; padding: 5px 6px; margin-bottom: 8px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; }
+  .select-row { font-size: 11px; margin-bottom: 6px; }
+  .select-row a { color: var(--accent); cursor: pointer; text-decoration: none; }
+  .select-row a:hover { text-decoration: underline; }
+  .selection-summary { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+
+  .type-group { margin-bottom: 6px; }
+  .type-group summary { cursor: pointer; font-weight: 600; font-size: 12px; padding: 3px 0; }
+  ul.files { list-style: none; margin: 4px 0 4px 8px; padding: 0; font-size: 12px; }
+  ul.files li { padding: 2px 0; display: flex; align-items: center; gap: 6px; }
   ul.files li.clickable { cursor: pointer; }
   ul.files li.clickable:hover { color: var(--accent); }
-  .change { font-size: 10px; text-transform: uppercase; border-radius: 3px; padding: 1px 5px; margin-right: 6px; opacity: 0.8; }
+  .tree-row input[type=checkbox] { flex-shrink: 0; }
+  .file-path { flex: 1; word-break: break-all; }
+  .file-path.clickable { cursor: pointer; }
+  .file-path.clickable:hover { color: var(--accent); text-decoration: underline; }
+  .story-badge { font-size: 10px; color: var(--muted); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; flex-shrink: 0; }
+
+  .change { font-size: 10px; text-transform: uppercase; border-radius: 3px; padding: 1px 5px; flex-shrink: 0; opacity: 0.8; }
   .change.added { background: #2e7d3222; color: #4caf50; }
   .change.modified { background: #f9a82522; color: #ffa726; }
   .change.deleted { background: #c6282822; color: var(--err); }
-  .mode-row { display: flex; gap: 6px; margin: 10px 0; }
-  .mode-row button { font-size: 11px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer; }
-  .mode-row button.active { border-color: var(--accent); color: var(--accent); }
+
+  .group { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; }
+  .group-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+  .shared { font-size: 11px; color: var(--err); margin-left: 6px; font-weight: normal; }
+
+  .deploy-row { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  .auto-deploy-label { font-size: 12px; display: flex; align-items: center; gap: 6px; }
+  .auto-deploy-label .meta { margin: 0; }
+
   .actions { display: flex; gap: 8px; margin-top: 12px; }
   .btn { font-size: 12px; padding: 7px 14px; border-radius: 6px; border: none; cursor: pointer; }
   .btn-primary { background: #0078d4; color: white; }
+  .btn-primary.btn-highlight { box-shadow: 0 0 0 2px var(--ok); }
   .btn-secondary { background: transparent; border: 1px solid var(--border); color: var(--fg); }
   .btn:disabled { opacity: 0.4; cursor: default; }
   .warn { color: #ffab70; font-size: 12px; margin-top: 8px; }
   details.diff { margin-top: 14px; }
   details.diff summary { cursor: pointer; font-weight: 600; }
   pre.manifest { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; overflow-x: auto; font-size: 11px; max-height: 220px; }
-  #diffModal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); align-items: center; justify-content: center; z-index: 10; }
-  #diffModal .box { background: var(--card); border: 1px solid var(--border); border-radius: 8px; width: 90%; max-width: 1000px; max-height: 84vh; padding: 16px; display: flex; flex-direction: column; }
-  #diffModal .close { float: right; cursor: pointer; }
-  #diffStat { font-size: 12px; margin: 2px 0 10px; }
-  #diffStat .plus { color: var(--ok); }
-  #diffStat .minus { color: var(--err); }
-  #diffBody { flex: 1; overflow: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; font-family: var(--vscode-editor-font-family, "SF Mono", Consolas, monospace); font-size: 12px; }
+
+  .diffTitle { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
+  .diffMeta { margin-bottom: 6px; }
+  .diffStat { font-size: 12px; margin: 2px 0 10px; }
+  .diffStat .plus { color: var(--ok); }
+  .diffStat .minus { color: var(--err); }
+  .diffBody { font-family: var(--vscode-editor-font-family, "SF Mono", Consolas, monospace); font-size: 12px; }
   .diffline { display: flex; white-space: pre; }
   .diffline .gutter { flex: 0 0 88px; text-align: right; padding: 0 10px; color: var(--muted); opacity: 0.7; user-select: none; border-right: 1px solid var(--border); }
   .diffline .marker { flex: 0 0 18px; text-align: center; opacity: 0.8; user-select: none; }
@@ -326,32 +475,13 @@ export class DeploymentDashboardPanel {
 ${notificationStrip}
 
 <div class="tabbar">
-  <div class="tabs-left">
-    <button class="tab main-tab active" data-main="changes" onclick="setMain('changes')">Changes</button>
-    <button class="tab main-tab" data-main="deployments" onclick="setMain('deployments')">Deployments</button>
-  </div>
-  <div class="tabs-right">
-    ${envTabs}
-  </div>
+  ${envTabs}
 </div>
 
-${changesPanes}
-${deploymentsPanes}
-
-<div id="diffModal">
-  <div class="box">
-    <span class="close" onclick="closeDiff()">✕ close</span>
-    <h3 id="diffTitle"></h3>
-    <div class="meta" id="diffMeta"></div>
-    <div id="diffStat"></div>
-    <div id="diffBody"></div>
-  </div>
-</div>
+${envPanes}
 
 <script>
   const vscode = acquireVsCodeApi();
-  const state = {};
-  let activeMain = 'changes';
   let activeEnv = ${JSON.stringify(activeEnv)};
 
   function send(command, payload) { vscode.postMessage(Object.assign({ command }, payload)); }
@@ -359,54 +489,99 @@ ${deploymentsPanes}
 
   function applyTabs() {
     document.querySelectorAll('.pane').forEach(function (p) {
-      p.classList.toggle('visible', p.dataset.main === activeMain && p.dataset.env === activeEnv);
+      p.classList.toggle('visible', p.dataset.env === activeEnv);
     });
-  }
-
-  function setMain(m) {
-    activeMain = m;
-    document.querySelectorAll('.main-tab').forEach(function (b) { b.classList.toggle('active', b.dataset.main === m); });
-    applyTabs();
   }
 
   function setEnvTab(e) {
     activeEnv = e;
-    document.querySelectorAll('.env-tab').forEach(function (b) { b.classList.toggle('active', b.dataset.env === e); });
+    document.querySelectorAll('.tab.env-tab').forEach(function (b) { b.classList.toggle('active', b.dataset.env === e); });
     applyTabs();
   }
 
-  function setMode(env, mode) {
-    state[env] = state[env] || {};
-    state[env].mode = mode;
-    document.querySelectorAll('[data-env="' + env + '"].mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
-    document.querySelectorAll('[data-env="' + env + '"].group-check, [data-env="' + env + '"].file-check').forEach(el => {
-      el.closest('.picker').style.display = el.closest('.picker').dataset.for === mode ? 'block' : 'none';
+  function toggleFile(env) { recomputeSelection(env); }
+
+  function currentFingerprint(env) {
+    var boxes = Array.prototype.slice.call(document.querySelectorAll('.file-check[data-env="' + env + '"]:checked'));
+    return boxes.map(function (b) { return b.value; }).sort().join('|');
+  }
+
+  // Deploy stays locked (regardless of org/role) until the CURRENTLY checked selection is
+  // byte-for-byte what Validate last passed for that env — re-evaluated on every checkbox
+  // change, so unchecking even one file re-locks it immediately. The server enforces this too
+  // (never trust a client-side disabled attribute alone) — this is what keeps the UI honest.
+  function updateDeployButtonState(env) {
+    var pane = document.querySelector('.pane[data-env="' + env + '"]');
+    var btn = document.getElementById('deployBtn-' + env);
+    if (!pane || !btn) { return; }
+    var hasValidated = pane.dataset.hasValidated === '1';
+    var matches = hasValidated && currentFingerprint(env) === (pane.dataset.validatedFp || '');
+    btn.disabled = btn.dataset.hardDisabled === '1' || !matches;
+    btn.title = matches ? '' : 'Run Validate on this exact selection first';
+    btn.classList.toggle('btn-highlight', matches && btn.dataset.hardDisabled !== '1');
+  }
+
+  function recomputeSelection(env) {
+    var boxes = Array.prototype.slice.call(document.querySelectorAll('.file-check[data-env="' + env + '"]:checked'));
+    var stories = {};
+    boxes.forEach(function (b) {
+      var row = b.closest('.tree-row');
+      var s = row ? row.dataset.stories : '';
+      (s ? s.split(',') : []).forEach(function (id) { if (id) { stories[id] = true; } });
+    });
+    var summaryEl = document.getElementById('selSummary-' + env);
+    if (summaryEl) {
+      summaryEl.textContent = boxes.length === 0
+        ? 'No files selected.'
+        : boxes.length + ' file(s) selected across ' + Object.keys(stories).length + ' story/PR group(s).';
+    }
+    updateDeployButtonState(env);
+  }
+
+  // Respects the current story/PR filter — only (de)selects rows that are currently visible.
+  function selectAll(env, checked) {
+    document.querySelectorAll('.file-check[data-env="' + env + '"]').forEach(function (cb) {
+      var row = cb.closest('.tree-row');
+      if (!row || row.style.display !== 'none') { cb.checked = checked; }
+    });
+    recomputeSelection(env);
+  }
+
+  function filterTree(env) {
+    var sel = document.querySelector('.story-filter[data-env="' + env + '"]');
+    var val = sel ? sel.value : '';
+    document.querySelectorAll('.tree-row[data-env="' + env + '"]').forEach(function (row) {
+      var stories = (row.dataset.stories || '').split(',');
+      row.style.display = (!val || stories.indexOf(val) !== -1) ? '' : 'none';
+    });
+    document.querySelectorAll('.type-group[data-env="' + env + '"]').forEach(function (grp) {
+      var anyVisible = Array.prototype.some.call(grp.querySelectorAll('.tree-row'), function (r) { return r.style.display !== 'none'; });
+      grp.style.display = anyVisible ? '' : 'none';
     });
   }
 
-  function collectSelection(env) {
-    const mode = (state[env] && state[env].mode) || 'all';
-    if (mode === 'stories') {
-      const storyIds = Array.prototype.slice.call(document.querySelectorAll('[data-env="' + env + '"].group-check:checked')).map(el => el.value);
-      return { selectionMode: 'stories', storyIds };
-    }
-    if (mode === 'files') {
-      const files = Array.prototype.slice.call(document.querySelectorAll('[data-env="' + env + '"].file-check:checked')).map(el => el.value);
-      return { selectionMode: 'files', files };
-    }
-    return { selectionMode: 'all' };
-  }
-
   function runAction(env, actionMode) {
-    const sel = collectSelection(env);
-    send('runAction', Object.assign({ env, actionMode }, sel));
+    var boxes = Array.prototype.slice.call(document.querySelectorAll('.file-check[data-env="' + env + '"]:checked'));
+    var files = boxes.map(function (b) { return b.value; });
+    var autoCb = document.getElementById('autoDeploy-' + env);
+    var autoDeployOnSuccess = Boolean(autoCb && autoCb.checked);
+    send('runAction', { env: env, actionMode: actionMode, selectionMode: 'files', files: files, autoDeployOnSuccess: autoDeployOnSuccess });
   }
 
-  function viewFileDiff(env, envLabel, nextEnv, nextEnvLabel, path) {
-    send('viewFileDiff', { env, envLabel, nextEnv, nextEnvLabel, path });
+  // Used only when the tree is empty (never deployed before) — nothing to individually check.
+  function bootstrapAction(env, actionMode) {
+    var autoCb = document.getElementById('autoDeploy-' + env);
+    var autoDeployOnSuccess = Boolean(autoCb && autoCb.checked);
+    send('runAction', { env: env, actionMode: actionMode, selectionMode: 'all', autoDeployOnSuccess: autoDeployOnSuccess });
   }
 
-  function closeDiff() { document.getElementById('diffModal').style.display = 'none'; }
+  function viewFileDiff(targetEnv, beforeRef, beforeLabel, afterRef, afterLabel, path) {
+    send('viewFileDiff', { targetEnv: targetEnv, beforeRef: beforeRef, beforeLabel: beforeLabel, afterRef: afterRef, afterLabel: afterLabel, path: path });
+  }
+
+  function viewPendingFileDiff(env, path) {
+    send('viewPendingFileDiff', { env: env, path: path });
+  }
 
   function escapeHtmlJs(s) {
     return String(s).replace(/[<>&]/g, function (c) { return { '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]; });
@@ -486,74 +661,151 @@ ${deploymentsPanes}
   window.addEventListener('message', function (event) {
     const msg = event.data;
     if (msg.command === 'fileDiffResult') {
-      document.getElementById('diffTitle').textContent = msg.path;
-      document.getElementById('diffMeta').textContent = msg.beforeLabel + '  →  ' + msg.afterLabel;
-
-      var body = document.getElementById('diffBody');
-      var stat = document.getElementById('diffStat');
+      var titleEl = document.getElementById('diffTitle-' + msg.targetEnv);
+      var metaEl  = document.getElementById('diffMeta-' + msg.targetEnv);
+      var bodyEl  = document.getElementById('diffBody-' + msg.targetEnv);
+      var statEl  = document.getElementById('diffStat-' + msg.targetEnv);
+      if (!titleEl || !bodyEl) { return; }
+      titleEl.textContent = msg.path;
+      metaEl.textContent = msg.beforeLabel + '  →  ' + msg.afterLabel;
 
       if (msg.before === msg.after) {
-        body.innerHTML = '<div class="diffline diff-context">No differences.</div>';
-        stat.innerHTML = '';
+        bodyEl.innerHTML = '<div class="diffline diff-context">No differences.</div>';
+        statEl.innerHTML = '';
       } else if (msg.before === null) {
         var addLines = splitLines(msg.after || '');
-        body.innerHTML = addLines.map(function (l, idx) {
+        bodyEl.innerHTML = addLines.map(function (l, idx) {
           return '<div class="diffline diff-add"><span class="gutter">     ' + String(idx + 1).padStart(4, ' ') + '</span><span class="marker">+</span><span class="txt">' + escapeHtmlJs(l) + '</span></div>';
         }).join('');
-        stat.innerHTML = '<b>New file</b> — <span class="plus">+' + addLines.length + '</span>';
+        statEl.innerHTML = '<b>New file</b> — <span class="plus">+' + addLines.length + '</span>';
       } else if (msg.after === null) {
         var delLines = splitLines(msg.before || '');
-        body.innerHTML = delLines.map(function (l, idx) {
+        bodyEl.innerHTML = delLines.map(function (l, idx) {
           return '<div class="diffline diff-del"><span class="gutter">' + String(idx + 1).padStart(4, ' ') + '     </span><span class="marker">-</span><span class="txt">' + escapeHtmlJs(l) + '</span></div>';
         }).join('');
-        stat.innerHTML = '<b>Deleted</b> — <span class="minus">-' + delLines.length + '</span>';
+        statEl.innerHTML = '<b>Deleted</b> — <span class="minus">-' + delLines.length + '</span>';
       } else {
         var diff = computeLineDiff(splitLines(msg.before), splitLines(msg.after));
         if (diff === null) {
-          body.innerHTML = '<div class="diffline diff-context">File too large to diff line-by-line — showing raw content instead.</div>'
+          bodyEl.innerHTML = '<div class="diffline diff-context">File too large to diff line-by-line — showing raw content instead.</div>'
             + '<pre style="white-space:pre-wrap;padding:8px;margin:0">' + escapeHtmlJs(msg.before) + '\\n---\\n' + escapeHtmlJs(msg.after) + '</pre>';
-          stat.innerHTML = '';
+          statEl.innerHTML = '';
         } else {
           var rendered = renderDiffLines(diff);
-          body.innerHTML = rendered.html;
-          stat.innerHTML = '<span class="plus">+' + rendered.added + '</span>&nbsp;&nbsp;<span class="minus">-' + rendered.deleted + '</span>';
+          bodyEl.innerHTML = rendered.html;
+          statEl.innerHTML = '<span class="plus">+' + rendered.added + '</span>&nbsp;&nbsp;<span class="minus">-' + rendered.deleted + '</span>';
         }
       }
-
-      document.getElementById('diffModal').style.display = 'flex';
     }
   });
 
   applyTabs();
+  document.querySelectorAll('.pane').forEach(function (p) {
+    recomputeSelection(p.dataset.env); // also sets the initial Deploy-button lock state per env
+  });
 </script>
 </body>
 </html>`;
     }
 
-    /** Read-only "Changes" pane for one environment: story/PR groups, diff-vs-next, package.xml preview. */
-    private _renderChangesPane(m: EnvViewModel): string {
+    /** Unified per-environment pane: header, outcome banner, 35/65 split (checkbox tree + live diff), Validate/Deploy actions. */
+    private _renderEnvPane(m: EnvViewModel): string {
         const env = m.env;
         const shortSha = (s: string | null) => s ? s.slice(0, 7) : "—";
         const lastDeployText = m.lastDeploy
             ? `Last deployed <code>${shortSha(m.lastDeploy.sha)}</code> on ${new Date(m.lastDeploy.deployedAt).toLocaleString()}`
             : `Never deployed from this dashboard`;
 
-        const groupsHtml = m.groups.map(g => `
-      <div class="group">
-        <div class="group-head">
-          ${escapeHtml(g.storyId)}
-          ${g.sharedWith.length ? `<span class="shared">shares file(s) with: ${g.sharedWith.map(escapeHtml).join(", ")}</span>` : ""}
-        </div>
-        <ul class="files">
-          ${g.files.map(f => `<li><span class="change ${f.change}">${f.change}</span>${escapeHtml(f.path)}</li>`).join("")}
-        </ul>
-      </div>`).join("");
+        const noticeIfNoOrg = m.orgAliasSet ? "" : `<div class="warn">⚠ No org alias set for ${escapeHtml(env.label)} — set sfDevops.environments[].orgAlias to enable deploy/validate here.</div>`;
+        const noticeIfNoRole = m.canDeploy ? "" : `<div class="warn">⚠ Your role can't deploy to ${escapeHtml(env.label)} (requires "${escapeHtml(env.requiredRole ?? "")}").</div>`;
+        const disabled = (!m.orgAliasSet || !m.canDeploy) ? "disabled" : "";
 
-        const diffBlock = m.nextEnv
+        const outcome = this._lastOutcome && this._lastOutcome.env === env.name ? this._lastOutcome : undefined;
+        const outcomeHtml = outcome
+            ? `<div class="outcome outcome-${outcome.kind}">${escapeHtml(outcome.message)}${
+                outcome.nextEnv
+                    ? ` <a onclick="setEnvTab('${outcome.nextEnv.name}')">→ ${escapeHtml(outcome.nextEnv.label)} (${outcome.storyCount ?? 0} story/PR group(s) ready)</a>`
+                    : ""
+              }</div>`
+            : "";
+        // Deploy's actual enabled/disabled state is driven live by client-side JS (see
+        // updateDeployButtonState) so it reacts the instant checkboxes change — this is only
+        // the "hard" reasons that never change without a fresh render (no org alias, no role).
+        const validatedFingerprint = this._validatedSelections.get(env.name) ?? null;
+        // A successful Validate triggers a full refresh(), which re-renders the tree with every
+        // checkbox back to unchecked — without restoring the validated selection here, Deploy
+        // would immediately re-lock itself right after Validate passed, forcing the user to
+        // re-check the exact same files for no reason. Pre-checking them keeps it unlocked.
+        const validatedPaths = validatedFingerprint !== null
+            ? new Set(validatedFingerprint.split("|").filter(Boolean))
+            : null;
+
+        // Group pending files by Salesforce metadata type for the tree, and note which story/PR
+        // group(s) touch each file (a file can be shared — see StoryChangeGroup.sharedWith).
+        const storiesByPath = new Map<string, string[]>();
+        for (const g of m.groups) {
+            for (const f of g.files) {
+                const arr = storiesByPath.get(f.path) ?? [];
+                arr.push(g.storyId);
+                storiesByPath.set(f.path, arr);
+            }
+        }
+        const byType = new Map<string, AuditChangedFile[]>();
+        const unmappedFiles: AuditChangedFile[] = [];
+        for (const f of m.allFiles) {
+            const type = metadataTypeForPath(f.path);
+            if (type) {
+                if (!byType.has(type)) { byType.set(type, []); }
+                byType.get(type)!.push(f);
+            } else {
+                unmappedFiles.push(f);
+            }
+        }
+        const renderFileRow = (f: AuditChangedFile) => {
+            const stories = storiesByPath.get(f.path) ?? [];
+            const checked = validatedPaths?.has(f.path) ? " checked" : "";
+            return `<li class="tree-row" data-env="${env.name}" data-stories="${stories.map(escapeHtml).join(",")}">
+          <input type="checkbox" class="file-check" data-env="${env.name}" value="${escapeHtml(f.path)}"${checked} onchange="toggleFile('${env.name}')">
+          <span class="change ${f.change}">${f.change}</span>
+          <span class="file-path clickable" onclick="viewPendingFileDiff('${env.name}','${escapeHtml(f.path)}')" title="Preview diff">${escapeHtml(f.path)}</span>
+          ${stories.length ? `<span class="story-badge" title="story/PR">${stories.map(escapeHtml).join(", ")}</span>` : ""}
+        </li>`;
+        };
+        const typeGroupsHtml = Array.from(byType.keys()).sort().map(type => `
+      <details class="type-group" data-env="${env.name}" open>
+        <summary>${escapeHtml(type)} (${byType.get(type)!.length})</summary>
+        <ul class="files">${byType.get(type)!.map(renderFileRow).join("")}</ul>
+      </details>`).join("");
+        const unmappedHtml = unmappedFiles.length
+            ? `<details class="type-group" data-env="${env.name}" open>
+             <summary>Other (${unmappedFiles.length})</summary>
+             <ul class="files">${unmappedFiles.map(renderFileRow).join("")}</ul>
+           </details>`
+            : "";
+
+        const neverDeployed = m.allFiles.length === 0 && !m.lastDeploy && m.currentSha;
+        // Bootstrap mode has no checkboxes to react to, so (unlike the main Deploy button)
+        // this one's gate is computed once, server-side, per render — "" is the fingerprint
+        // of an empty selection, i.e. what "Validate ALL" records when there's nothing tracked.
+        const bootstrapDeployDisabled = Boolean(disabled) || validatedFingerprint !== "";
+        const bootstrapHtml = neverDeployed
+            ? `<div class="meta">Never deployed from this dashboard yet — nothing to individually select.</div>
+           <div class="actions">
+             <button class="btn btn-secondary" ${disabled} onclick="bootstrapAction('${env.name}','validate')">🔍 Validate ALL</button>
+             <button class="btn btn-primary" ${bootstrapDeployDisabled ? "disabled" : ""} onclick="bootstrapAction('${env.name}','deploy')" title="${validatedFingerprint === "" ? "" : "Run Validate ALL first"}">🚀 Deploy ALL (nothing tracked yet)</button>
+           </div>`
+            : "";
+        const upToDateHtml = (m.allFiles.length === 0 && !neverDeployed)
+            ? `<div class="meta">No pending changes — ${escapeHtml(env.label)} is up to date.</div>`
+            : "";
+
+        const filterOptions = m.groups.map(g => `<option value="${escapeHtml(g.storyId)}">${escapeHtml(g.storyId)} (${g.files.length})</option>`).join("");
+
+        const diffVsNextBlock = m.nextEnv
             ? `<details class="diff">
           <summary>Preview diff: ${escapeHtml(env.label)} vs ${escapeHtml(m.nextEnv.label)} (${m.diffVsNext?.length ?? 0} file(s) different)</summary>
           <ul class="files">
-            ${(m.diffVsNext ?? []).map(f => `<li class="clickable" onclick="viewFileDiff('${env.branch}','${escapeHtml(env.label)}','${m.nextEnv!.branch}','${escapeHtml(m.nextEnv!.label)}','${escapeHtml(f.path)}')"><span class="change ${f.change}">${f.change}</span>${escapeHtml(f.path)}</li>`).join("")}
+            ${(m.diffVsNext ?? []).map(f => `<li class="clickable" onclick="viewFileDiff('${env.name}','${env.branch}','${escapeHtml(env.label)}','${m.nextEnv!.branch}','${escapeHtml(m.nextEnv!.label)}','${escapeHtml(f.path)}')"><span class="change ${f.change}">${f.change}</span>${escapeHtml(f.path)}</li>`).join("")}
           </ul>
         </details>`
             : "";
@@ -563,61 +815,52 @@ ${deploymentsPanes}
             : "";
 
         return `
-<div class="pane" data-main="changes" data-env="${env.name}">
+<div class="pane" data-env="${env.name}" data-has-validated="${validatedFingerprint !== null ? "1" : "0"}" data-validated-fp="${escapeHtml(validatedFingerprint ?? "")}">
 <section class="env">
   <h2>${escapeHtml(env.label)} <span class="meta">(${escapeHtml(env.branch)} → ${escapeHtml(env.orgAlias || "no org alias")})</span></h2>
   <div class="meta">${lastDeployText}</div>
-
-  ${groupsHtml || '<div class="meta">No pending changes.</div>'}
-
-  ${diffBlock}
-  ${manifestBlock}
-</section>
-</div>`;
-    }
-
-    /** Action "Deployments" pane for one environment: selection mode, pickers, Validate/Deploy. */
-    private _renderDeploymentsPane(m: EnvViewModel): string {
-        const env = m.env;
-
-        const groupsHtml = m.groups.map(g => `
-      <div class="group">
-        <label class="group-head">
-          <input type="checkbox" class="group-check" data-env="${env.name}" value="${escapeHtml(g.storyId)}">
-          ${escapeHtml(g.storyId)}
-          ${g.sharedWith.length ? `<span class="shared">shares file(s) with: ${g.sharedWith.map(escapeHtml).join(", ")}</span>` : ""}
-        </label>
-        <ul class="files">
-          ${g.files.map(f => `<li><span class="change ${f.change}">${f.change}</span>${escapeHtml(f.path)}</li>`).join("")}
-        </ul>
-      </div>`).join("");
-
-        const flatFilesHtml = `<ul class="files">${m.allFiles.map(f => `
-      <li><label><input type="checkbox" class="file-check" data-env="${env.name}" value="${escapeHtml(f.path)}"> <span class="change ${f.change}">${f.change}</span>${escapeHtml(f.path)}</label></li>
-    `).join("")}</ul>`;
-
-        const noticeIfNoOrg = m.orgAliasSet ? "" : `<div class="warn">⚠ No org alias set for ${escapeHtml(env.label)} — set sfDevops.environments[].orgAlias to enable deploy/validate here.</div>`;
-        const noticeIfNoRole = m.canDeploy ? "" : `<div class="warn">⚠ Your role can't deploy to ${escapeHtml(env.label)} (requires "${escapeHtml(env.requiredRole ?? "")}").</div>`;
-        const disabled = (!m.orgAliasSet || !m.canDeploy) ? "disabled" : "";
-
-        return `
-<div class="pane" data-main="deployments" data-env="${env.name}">
-<section class="env">
-  <h2>${escapeHtml(env.label)} <span class="meta">(${escapeHtml(env.branch)} → ${escapeHtml(env.orgAlias || "no org alias")})</span></h2>
   ${noticeIfNoOrg}${noticeIfNoRole}
+  ${outcomeHtml}
 
-  <div class="mode-row">
-    <button class="mode-btn active" data-env="${env.name}" data-mode="all" onclick="setMode('${env.name}','all')">ALL (${m.allFiles.length})</button>
-    <button class="mode-btn" data-env="${env.name}" data-mode="stories" onclick="setMode('${env.name}','stories')">By story/PR (${m.groups.length})</button>
-    <button class="mode-btn" data-env="${env.name}" data-mode="files" onclick="setMode('${env.name}','files')">By file</button>
+  <div class="split">
+    <div class="split-left">
+      ${m.groups.length ? `<select class="story-filter" data-env="${env.name}" onchange="filterTree('${env.name}')">
+        <option value="">All stories/PRs (${m.groups.length})</option>
+        ${filterOptions}
+      </select>` : ""}
+
+      ${m.allFiles.length ? `<div class="select-row">
+        <a onclick="selectAll('${env.name}', true)">Select all</a> ·
+        <a onclick="selectAll('${env.name}', false)">Select none</a>
+      </div>` : ""}
+
+      <div class="selection-summary" id="selSummary-${env.name}">No files selected.</div>
+
+      <div class="tree" id="tree-${env.name}">
+        ${typeGroupsHtml}${unmappedHtml}
+        ${bootstrapHtml}${upToDateHtml}
+      </div>
+
+      ${diffVsNextBlock}
+      ${manifestBlock}
+    </div>
+
+    <div class="split-right">
+      <div class="diffTitle" id="diffTitle-${env.name}">Select a file on the left to preview its diff.</div>
+      <div class="meta diffMeta" id="diffMeta-${env.name}"></div>
+      <div class="diffStat" id="diffStat-${env.name}"></div>
+      <div class="diffBody" id="diffBody-${env.name}"></div>
+    </div>
   </div>
 
-  <div class="picker" data-for="stories" style="display:none">${groupsHtml || '<div class="meta">No pending changes.</div>'}</div>
-  <div class="picker" data-for="files" style="display:none">${flatFilesHtml}</div>
-
-  <div class="actions">
-    <button class="btn btn-secondary" ${disabled} onclick="runAction('${env.name}','validate')">🔍 Validate selection</button>
-    <button class="btn btn-primary" ${disabled} onclick="runAction('${env.name}','deploy')">🚀 Deploy selection</button>
+  <div class="deploy-row">
+    <label class="auto-deploy-label" title="${env.isProd ? "Prod always requires a manual Deploy click, regardless of this checkbox." : "If Validate succeeds, immediately run a real Deploy with the same selection."}">
+      <input type="checkbox" id="autoDeploy-${env.name}" ${env.isProd ? "disabled" : ""}>
+      Auto-deploy on success
+      ${env.isProd ? `<span class="meta">(Prod always requires a manual Deploy click)</span>` : ""}
+    </label>
+    <button class="btn btn-secondary" ${disabled} onclick="runAction('${env.name}','validate')">🔍 Validate</button>
+    <button class="btn btn-primary" id="deployBtn-${env.name}" data-hard-disabled="${disabled ? "1" : "0"}" disabled title="Run Validate on this exact selection first">🚀 Deploy</button>
   </div>
 </section>
 </div>`;
@@ -628,4 +871,15 @@ function dedupe(files: AuditChangedFile[]): AuditChangedFile[] {
     const seen = new Map<string, AuditChangedFile>();
     for (const f of files) { seen.set(f.path, f); }
     return Array.from(seen.values());
+}
+
+/** How many story/PR groups the given files touch — used for the "N story/PR(s) ready" banner text. Exact for "all"/"stories" selections; an honest approximation for a partial file-mode selection. */
+function countTouchedGroups(groups: StoryChangeGroup[], files: AuditChangedFile[]): number {
+    const paths = new Set(files.map(f => f.path));
+    return groups.filter(g => g.files.some(f => paths.has(f.path))).length;
+}
+
+/** Identifies a file selection by its exact contents (order-independent) — used to check whether Deploy's current selection is exactly what Validate last passed for. */
+function fingerprintFiles(files: AuditChangedFile[]): string {
+    return files.map(f => f.path).sort().join("|");
 }

@@ -199,9 +199,11 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
             const branch    = await this._gitHelper.currentBranch();
             const storyId   = extractStoryId(branch);
             const progress  = await this._getStoryProgress(storyId);
-            const behind    = isFeatureBranch(branch)
+            const onFeature = isFeatureBranch(branch);
+            const behind    = onFeature
                 ? await this._gitHelper.commitsBehind(branch!, `origin/${getBaseBranch()}`)
                 : 0;
+            const localChanges = onFeature ? await this._getLocalChangesSummary() : null;
             const coverageBlockedEnv = await this._getCoverageBlockedEnv(storyId);
             const repoOverride = await this._gitHelper.resolveRepoIdentity(this._bbClient);
 
@@ -213,7 +215,7 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
             }
 
             this._view.webview.html = this._getWebviewHtml(
-                branch ?? "No branch", storyId, progress, behind, coverageBlockedEnv, repoOverride, signoffPassed
+                branch ?? "No branch", storyId, progress, behind, coverageBlockedEnv, repoOverride, signoffPassed, localChanges
             );
         } catch (err) {
             this._view.webview.html = this._getErrorHtml(String(err));
@@ -299,6 +301,20 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         return passed ? null : gateEnv.name;
     }
 
+    /**
+     * Local working-tree changes not yet published to dev — surfaced so "DEV: Published"
+     * doesn't silently go stale the moment you make another edit. `other` covers anything
+     * uncommitted that isn't staged (unstaged edits, new untracked files); it's auto-preserved
+     * via stash (not lost or silently swept in) if "Commit to Dev" is used while it's present.
+     */
+    private async _getLocalChangesSummary(): Promise<{ staged: number; other: number } | null> {
+        const stagedList = await this._gitHelper.stagedFiles();
+        const allChanged = await this._gitHelper.workingTreeFiles();
+        const stagedSet  = new Set(stagedList);
+        const other = allChanged.filter(f => !stagedSet.has(f)).length;
+        return (stagedList.length === 0 && other === 0) ? null : { staged: stagedList.length, other };
+    }
+
     /** Prompts for an optional sign-off note, records it, and logs it to the audit trail. */
     private async _recordSignoff(envName: string): Promise<void> {
         const branch  = await this._gitHelper.currentBranch();
@@ -335,7 +351,8 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         behindCount: number,
         coverageBlockedEnv: string | null,
         repoOverride: { workspace: string; repoSlug: string } | undefined,
-        signoffPassed: Record<string, boolean>
+        signoffPassed: Record<string, boolean>,
+        localChanges: { staged: number; other: number } | null
     ): string {
         const onFeatureBranch = isFeatureBranch(branch);
         const baseBranch      = getBaseBranch();
@@ -350,6 +367,19 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
             else if (state === "deployed") { icon = "✅"; label = "Deployed";            color = "var(--vscode-charts-green)"; }
             else if (state === "merged")   { icon = "⚡"; label = "Merged — ready to deploy"; color = "var(--vscode-charts-yellow)"; }
             else if (state === "open")  { icon = "🔄"; label = "Validated / In PR";       color = "var(--vscode-charts-blue)"; }
+
+            // DEV already shows "Published", but there's more local work since then —
+            // flag it explicitly instead of letting the badge quietly go stale.
+            let newChangesNote = "";
+            if (envCfg.name === publishEnv.name && state === "published" && localChanges) {
+                icon = "⚠️"; color = "var(--vscode-charts-yellow)";
+                const total = localChanges.staged + localChanges.other;
+                label = `Published — ${total} new change(s) pending`;
+                const parts: string[] = [];
+                if (localChanges.staged > 0) { parts.push(`${localChanges.staged} staged`); }
+                if (localChanges.other > 0)  { parts.push(`${localChanges.other} in progress (preserved automatically)`); }
+                newChangesNote = `<div class="env-note">${parts.join(", ")} — <a href="#" onclick="send('commitAndPush')">commit to dev</a></div>`;
+            }
 
             let actionLink = "";
             if (state === "open" && storyId) {
@@ -367,7 +397,7 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                 ${actionLink}
                 <span class="env-name">${envCfg.label}</span>
                 <span class="env-status" style="color:${color}">${label}</span>
-            </div>`;
+            </div>${newChangesNote}`;
         }).join("");
 
         const devPublished = progress[publishEnv.name] === "published";
@@ -442,6 +472,8 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
   .env-icon  { width: 16px; }
   .env-name  { font-weight: 600; width: 48px; }
   .env-status{ font-size: 11px; }
+  .env-note  { font-size: 10px; color: var(--vscode-descriptionForeground); margin: -2px 0 4px 22px; }
+  .env-note a{ color: var(--vscode-textLink-foreground); }
   .btn       { display: block; width: 100%; padding: 7px; margin: 4px 0; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
   .btn-primary   { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
   .btn-primary:hover { background: var(--vscode-button-hoverBackground); }
@@ -457,6 +489,7 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
   .tbtn      { flex: 1; display: flex; align-items: center; justify-content: center; gap: 3px; padding: 4px 2px; font-size: 10.5px; border: 1px solid var(--vscode-panel-border); border-radius: 4px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); cursor: pointer; text-decoration: none; white-space: nowrap; overflow: hidden; }
   .tbtn:hover{ background: var(--vscode-button-secondaryHoverBackground); }
   .countdown { opacity: 0.65; font-size: 9.5px; }
+  .version-footer { text-align: center; font-size: 10px; opacity: 0.5; margin-top: 10px; color: var(--vscode-descriptionForeground); }
 </style>
 </head>
 <body>
@@ -494,6 +527,8 @@ ${onFeatureBranch ? `
   <button class="btn btn-secondary" onclick="send('syncBranch')">&#x1F504; Sync with ${baseBranch}</button>
 </div>
 ` : ""}
+
+<div class="version-footer">v${escapeHtml(this._extContext.extension.packageJSON.version)}</div>
 
 <script>
   const vscode = acquireVsCodeApi();

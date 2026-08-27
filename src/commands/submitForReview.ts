@@ -10,6 +10,7 @@ import { StoryWebviewProvider} from "../providers/StoryWebviewProvider";
 import { reportOperationConflict } from "./promoteStory";
 import { isFeatureBranch, extractStoryId, getFeatureBranchPrefix } from "../config";
 import { buildPackageXml } from "../AuditLog";
+import { log } from "../Log";
 
 export async function commitAndPush(
     _bbClient:     IGitProviderClient,
@@ -81,10 +82,19 @@ export async function commitAndPush(
         async (progress) => {
             const changedFiles = staged.map(path => ({ path, change: "modified" as const }));
             const { xml: packageXml, unmapped: unmappedFiles } = buildPackageXml(changedFiles);
+            const stashLabel = `sf-devops-autostash-${storyId}-${Date.now()}`;
+            let stashed = false;
 
             try {
                 progress.report({ message: "Committing & pushing feature branch..." });
                 await gitHelper.commitStagedAndPushFeature(commitMsg || `feat(${storyId}): update`);
+
+                // Anything still uncommitted at this point is separate, in-progress work that
+                // wasn't staged for this publish — set it aside so the dev-branch checkout
+                // below can't be blocked (or fail outright) by it, then restore it afterward.
+                progress.report({ message: "Setting aside other in-progress edits..." });
+                stashed = await gitHelper.stashUnstagedChanges(stashLabel);
+                if (stashed) { log(`Stashed other in-progress edits on ${branch} — will restore them once dev is updated.`); }
 
                 progress.report({ message: "Adding changes to dev branch..." });
                 const outcome = await gitHelper.publishToDevBranch(storyId);
@@ -97,7 +107,6 @@ export async function commitAndPush(
                         details: { commitMessage: commitMsg, changedFiles, packageXml, unmappedFiles, conflicts: outcome.conflicts },
                     });
                     await reportOperationConflict(gitHelper, outcome.conflicts, "dev branch");
-                    storyProvider.refresh();
                     return;
                 }
 
@@ -110,9 +119,8 @@ export async function commitAndPush(
 
                 vscode.window.showInformationMessage(
                     `✅ ${storyId} published — feature branch pushed and changes added to the dev branch. ` +
-                    `Use "Promote & Deploy" or "Validate Only" for the next environment.`
+                    `Use "Promote" or "Validate Only" for the next environment.`
                 );
-                storyProvider.refresh();
             } catch (err) {
                 await gitHelper.appendAudit({
                     operation: "commitAndPublish",
@@ -121,6 +129,18 @@ export async function commitAndPush(
                     details: { commitMessage: commitMsg, changedFiles, packageXml, unmappedFiles, error: String(err) },
                 });
                 vscode.window.showErrorMessage(`Commit & Publish failed: ${err}`);
+            } finally {
+                if (stashed) {
+                    const restore = await gitHelper.restoreStash(stashLabel);
+                    if (restore.status === "restored") {
+                        log("Restored your other in-progress edits.");
+                    } else if (restore.status === "conflict") {
+                        vscode.window.showWarningMessage(
+                            `Your in-progress edits are safe but conflicted while restoring — resolve the conflict markers now showing in your files (Source Control view), then run "git stash drop" to finish (stash: ${restore.ref}).`
+                        );
+                    }
+                }
+                storyProvider.refresh();
             }
         }
     );

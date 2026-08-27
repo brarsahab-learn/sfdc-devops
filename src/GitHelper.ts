@@ -733,6 +733,44 @@ export class GitHelper {
         return out.length > 0;
     }
 
+    /**
+     * Stashes whatever's currently uncommitted (including untracked files), labeled so it
+     * can be found and restored later by `restoreStash`. Returns false (no-op) if there was
+     * nothing to stash. Callers are expected to have already committed anything they DO want
+     * published first — by the time this runs, everything remaining in the working tree is
+     * assumed to be "not part of this operation" and gets set aside, not swept in.
+     */
+    async stashUnstagedChanges(label: string): Promise<boolean> {
+        const out = await this.git(["stash", "push", "--include-untracked", "-m", label]);
+        return !/No local changes to save/i.test(out);
+    }
+
+    /** The stash entry (e.g. "stash@{0}") most recently pushed under the given label, or null if none exists. */
+    private async findStashByLabel(label: string): Promise<string | null> {
+        const out = await this.git(["stash", "list", "--format=%gd %s"]).catch(() => "");
+        for (const line of out ? out.split("\n") : []) {
+            if (line.includes(label)) { return line.split(" ")[0] || null; }
+        }
+        return null;
+    }
+
+    /**
+     * Restores a stash previously created by `stashUnstagedChanges`. Never silently drops
+     * work: if the pop hits a conflict, git itself leaves the stash entry in place (it only
+     * removes a stash on a clean pop) — this just reports that back so the caller can tell
+     * the user exactly what to do, instead of pretending the restore succeeded.
+     */
+    async restoreStash(label: string): Promise<{ status: "restored" | "conflict" | "not-found"; ref?: string }> {
+        const ref = await this.findStashByLabel(label);
+        if (!ref) { return { status: "not-found" }; }
+        try {
+            await this.git(["stash", "pop", ref]);
+            return { status: "restored" };
+        } catch {
+            return { status: "conflict", ref };
+        }
+    }
+
     async changedFiles(): Promise<string[]> {
         const base = getBaseBranch();
         const out = await this.git(["diff", "--name-only", `origin/${base}...HEAD`, "--diff-filter=ACMRD"]);
@@ -967,15 +1005,28 @@ export class GitHelper {
  * Shows a warning that local changes are blocking an operation, with a "Review Changes"
  * button that reveals VS Code's own Source Control view — real color-coded diffs, staging,
  * discard, commit — instead of just telling the user to go figure it out for themselves.
+ * If some of those changes are already staged on a feature branch, also offers a one-click
+ * "Commit to Dev" that runs the same Commit & Publish flow the toolbar button does — no
+ * need to switch to Source Control just to finish something already staged.
  */
 export async function warnUncommittedChanges(gitHelper: GitHelper, reason: string): Promise<void> {
-    const files = await gitHelper.workingTreeFiles();
+    const files  = await gitHelper.workingTreeFiles();
     const preview = files.slice(0, 5).join(", ") + (files.length > 5 ? `, +${files.length - 5} more` : "");
+
+    const staged = await gitHelper.stagedFiles();
+    const branch = await gitHelper.currentBranch();
+    const canCommitToDev = staged.length > 0 && isFeatureBranchName(branch);
+
+    const stagedNote = canCommitToDev ? ` (${staged.length} already staged)` : "";
+    const actions = canCommitToDev ? ["Commit to Dev", "Review Changes"] : ["Review Changes"];
+
     const choice = await vscode.window.showWarningMessage(
-        `${reason}\n\n${files.length} file(s) uncommitted: ${preview}`,
-        "Review Changes"
+        `${reason}\n\n${files.length} file(s) uncommitted: ${preview}${stagedNote}`,
+        ...actions
     );
     if (choice === "Review Changes") {
         await vscode.commands.executeCommand("workbench.view.scm");
+    } else if (choice === "Commit to Dev") {
+        await vscode.commands.executeCommand("sfDevops.commitAndPush");
     }
 }
