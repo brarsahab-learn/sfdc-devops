@@ -12,6 +12,39 @@ function cfg() {
     return vscode.workspace.getConfiguration("sfDevops");
 }
 
+// ── Org aliases (machine-local, NOT stored in settings) ──────────────────────
+// Org aliases used to live in sfDevops.environments[].orgAlias / devOrgAlias / prodOrgAlias
+// — regular VS Code settings, which for a workspace folder means .vscode/settings.json
+// INSIDE the repo. That file is git-tracked, so its content differs per branch — and since
+// this extension checks out different branches constantly as part of normal operation
+// (promote, validate, deploy all temporarily switch branches), an alias saved while on one
+// branch would appear to "vanish" the moment a different branch (whose committed
+// settings.json never had it) got checked out. Org aliases are a "which orgs I've
+// authenticated on this machine" fact, not something that should vary with git history —
+// so they're now stored in globalState instead: machine-local, untouched by branch
+// switches, and untouched by reinstalling/updating the extension. Settings values are kept
+// as a one-time fallback below so existing configs keep working until the next Save.
+
+let _extContext: vscode.ExtensionContext | undefined;
+
+/** Must be called once from activate() before any org-alias function is used. */
+export function initOrgAliasStore(context: vscode.ExtensionContext): void {
+    _extContext = context;
+}
+
+const ORG_ALIASES_KEY = "sfDevops.orgAliases";
+
+function readOrgAliases(): Record<string, string> {
+    return _extContext?.globalState.get<Record<string, string>>(ORG_ALIASES_KEY) ?? {};
+}
+
+async function writeOrgAlias(key: string, alias: string): Promise<void> {
+    if (!_extContext) { return; }
+    const data = readOrgAliases();
+    data[key] = alias;
+    await _extContext.globalState.update(ORG_ALIASES_KEY, data);
+}
+
 // ── Branch naming ────────────────────────────────────────────────────────────
 
 export function getBaseBranch(): string {
@@ -232,7 +265,7 @@ export function getEnvironments(): ResolvedEnvironment[] {
                 requiredRole: e.requiredRole,
                 coverageGate: e.coverageGate ?? false,
                 signoffGate:  e.signoffGate ?? false,
-                orgAlias:     e.orgAlias,
+                orgAlias:     readOrgAliases()[e.name] || e.orgAlias,
                 deployTestLevel: e.deployTestLevel || "RunRelevantTests",
                 isProd:       e.isProd ?? (e.name === "prod"),
             };
@@ -326,12 +359,12 @@ export function getCoverageTimeoutSeconds(): number {
 }
 
 export function getDevOrgAlias(): string {
-    return cfg().get<string>("devOrgAlias") || "";
+    return readOrgAliases().dev || cfg().get<string>("devOrgAlias") || "";
 }
 
-/** Reference/informational only — prod is deployed by a separate DevOps team, not this extension. */
+/** Fallback only for when "prod" hasn't been added to sfDevops.environments as a real pipeline stage. */
 export function getProdOrgAlias(): string {
-    return cfg().get<string>("prodOrgAlias") || "";
+    return readOrgAliases().prod || cfg().get<string>("prodOrgAlias") || "";
 }
 
 // ── Org alias management (dev / qa / uat / prod) ─────────────────────────────
@@ -364,37 +397,14 @@ export function getOrgAliasSlots(): OrgAliasSlot[] {
     ];
 }
 
-/** Materializes the resolved environments array (defaults included) into an explicit setting, so a single-field edit doesn't wipe out the rest. */
-async function updateEnvironmentOrgAlias(envName: string, alias: string): Promise<void> {
-    const raw = cfg().get<Array<EnvironmentSetting | string>>("environments");
-    const base: EnvironmentSetting[] = (raw && raw.length > 0)
-        ? raw.map(e => (typeof e === "string" ? { name: e } : { ...e }))
-        : DEFAULT_ENVIRONMENTS.map(e => ({ ...e }));
-
-    const existing = base.find(e => e.name === envName);
-    if (existing) { existing.orgAlias = alias; } else { base.push({ name: envName, orgAlias: alias }); }
-
-    await cfg().update("environments", base, vscode.ConfigurationTarget.Workspace);
-}
-
 /**
- * Saves an org alias for one of the 4 canonical slots. "prod" is deliberately never
- * added to sfDevops.environments here — that would silently turn Prod into a real,
- * everyone-visible promotion stage. It only updates the reference-only prodOrgAlias
- * setting, syncing environments[].orgAlias too if (and only if) a "prod" entry has
- * already been deliberately added there.
+ * Saves an org alias for one of the 4 canonical slots to the machine-local store (see
+ * the "Org aliases" section above) — never to settings.json, so it can't get lost to a
+ * branch switch or reset by reinstalling the extension. getEnvironments()/getDevOrgAlias()/
+ * getProdOrgAlias() all read this store first, so the change takes effect immediately.
  */
 export async function setOrgAliasSlot(key: OrgAliasSlotKey, alias: string): Promise<void> {
-    if (key === "dev") {
-        await cfg().update("devOrgAlias", alias, vscode.ConfigurationTarget.Workspace);
-        return;
-    }
-    if (key === "prod") {
-        await cfg().update("prodOrgAlias", alias, vscode.ConfigurationTarget.Workspace);
-        if (getEnvironments().some(e => e.name === "prod")) { await updateEnvironmentOrgAlias("prod", alias); }
-        return;
-    }
-    await updateEnvironmentOrgAlias(key, alias);
+    await writeOrgAlias(key, alias);
 }
 
 export function getSourceRootFolder(): string {

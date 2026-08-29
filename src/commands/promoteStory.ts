@@ -15,7 +15,7 @@ import { coverageSettings } from "./coverageCheck";
 import {
     isFeatureBranch, extractStoryId, getFeatureBranchPrefix,
     getCoverageGateEnvironment, promoBranchName, getBaseBranch, featureBranchName, getEnvironments,
-    findEnvironment,
+    findEnvironment, getPromotableEnvironments,
 } from "../config";
 import { buildPackageXml, AuditChangedFile } from "../AuditLog";
 
@@ -30,6 +30,12 @@ async function storyChangedFiles(gitHelper: GitHelper, storyId: string): Promise
     }
 }
 
+/**
+ * Branch-scoped wrapper: derives the story from whatever's currently checked out, then
+ * runs the shared promotion flow. Used by "Validate Only," which stays tied to the
+ * current branch. "Promote" itself goes through the multi-story picker (promotePicker.ts)
+ * → runPromotion directly, since promoting shouldn't require checking out a branch first.
+ */
 export async function promoteStory(
     bbClient:      IGitProviderClient,
     gitHelper:     GitHelper,
@@ -44,12 +50,38 @@ export async function promoteStory(
         return;
     }
 
-    const storyId  = extractStoryId(branch) || branch!.replace(getFeatureBranchPrefix(), "");
+    const storyId = extractStoryId(branch) || branch!.replace(getFeatureBranchPrefix(), "");
+    await runPromotion(bbClient, gitHelper, storyId, targetEnv, mode, storyProvider);
+}
+
+export async function runPromotion(
+    bbClient:      IGitProviderClient,
+    gitHelper:     GitHelper,
+    storyId:       string,
+    targetEnv:     string,
+    mode:          PromoteMode,
+    storyProvider: StoryWebviewProvider
+): Promise<void> {
     const envUpper = targetEnv.toUpperCase();
     // The real git branch this environment deploys — usually equal to its name, but can
     // differ (e.g. "prod" → branch "main"). Everything below that needs a real git ref
     // uses this; targetEnv itself stays the logical name for gating/audit/labels.
     const targetBranch = findEnvironment(targetEnv)?.branch ?? targetEnv;
+
+    // Hard gate: the stage immediately before targetEnv must actually be deployed (not
+    // just merged) — skipped for the first promotable env, whose "previous stage" is the
+    // publish env (e.g. dev), which has no deploy step to check. Enforced here so it can't
+    // be bypassed by any caller (Command Palette, the picker, a future entry point) —
+    // never just a hidden/disabled button.
+    const promotable = getPromotableEnvironments();
+    const targetIdx = promotable.findIndex(e => e.name === targetEnv);
+    if (targetIdx > 0) {
+        const gap = await gitHelper.checkPrevEnvDeployed(promotable[targetIdx - 1], envUpper);
+        if (gap.blocked) {
+            vscode.window.showWarningMessage(gap.reason!);
+            return;
+        }
+    }
 
     // One-time coverage gate: block the first promotion into the configured gate
     // environment when the story has Apex classes and coverage hasn't reached the

@@ -20,7 +20,33 @@ export async function commitAndPush(
     const branch = await gitHelper.currentBranch();
 
     if (!isFeatureBranch(branch)) {
-        vscode.window.showWarningMessage("You must be on a feature branch to commit and publish.");
+        // A dead-end "you must be on a feature branch" message is unhelpful when there's
+        // real staged/uncommitted work sitting right here (e.g. the Deployment Dashboard
+        // correctly returned you to wherever you started, which happened to not be a
+        // feature branch) — say what's actually here and offer a way to get to a feature
+        // branch instead of just stopping.
+        const staged = await gitHelper.stagedFiles();
+        const other  = await gitHelper.workingTreeFiles();
+        if (staged.length > 0 || other.length > 0) {
+            const otherCount = other.length - staged.length;
+            const parts: string[] = [];
+            if (staged.length > 0) { parts.push(`${staged.length} staged`); }
+            if (otherCount > 0)    { parts.push(`${otherCount} other uncommitted`); }
+            const choice = await vscode.window.showWarningMessage(
+                `You're on "${branch}", not a feature branch — Commit & Publish only works from one. ` +
+                `You have ${parts.join(" and ")} file(s) here that won't be touched.`,
+                "Review Changes", "Start New Story", "Continue with Existing Story"
+            );
+            if (choice === "Review Changes") {
+                await vscode.commands.executeCommand("workbench.view.scm");
+            } else if (choice === "Start New Story") {
+                await vscode.commands.executeCommand("sfDevops.startStory");
+            } else if (choice === "Continue with Existing Story") {
+                await vscode.commands.executeCommand("sfDevops.resumeStory");
+            }
+        } else {
+            vscode.window.showWarningMessage("You must be on a feature branch to commit and publish.");
+        }
         return;
     }
 

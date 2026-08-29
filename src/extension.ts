@@ -7,16 +7,18 @@ import { EnvironmentTreeProvider} from "./providers/EnvironmentTreeProvider";
 import { startStory }      from "./commands/startStory";
 import { commitAndPush }   from "./commands/submitForReview";
 import { promoteStory }    from "./commands/promoteStory";
+import { promoteViaPicker } from "./commands/promotePicker";
 import { resumePromotion, cancelPromotion } from "./commands/resumePromotion";
 import { syncBranch }      from "./commands/syncBranch";
 import { prepare2gpBetaCommand } from "./commands/prepare2gpBeta";
 import { createGitProviderClient } from "./GitProviderClient";
-import { GitHelper }       from "./GitHelper";
+import { GitHelper, warnUncommittedChanges } from "./GitHelper";
 import { DeploymentDashboardPanel } from "./providers/DeploymentDashboardPanel";
 import { AuditTrailPanel } from "./providers/AuditTrailPanel";
 import {
     findEnvironment, canPromote, getRoles,
     isFeatureBranch, getBaseBranch, getStaleBranchThreshold, getPromotableEnvironments,
+    initOrgAliasStore,
 } from "./config";
 import { getEffectiveRole, canAccessConfig, promptChangeRole } from "./RoleManager";
 import { initLog } from "./Log";
@@ -26,6 +28,7 @@ let deployPoller:    NodeJS.Timeout | undefined;
 export async function activate(context: vscode.ExtensionContext) {
     console.log("Salesforce DevOps extension activated");
     initLog(context);
+    initOrgAliasStore(context);
 
     const gitHelper = new GitHelper();
     // sfDevops.gitProvider is optional — when it's left unset, pick the provider from the
@@ -89,7 +92,7 @@ export async function activate(context: vscode.ExtensionContext) {
                 );
                 return;
             }
-            await promoteStory(bbClient, gitHelper, env, "promote", storyProvider);
+            await promoteViaPicker(bbClient, gitHelper, env, storyProvider);
         }),
 
         // Resume / cancel a paused cherry-pick (dev-publish or promotion) after conflicts.
@@ -121,7 +124,18 @@ export async function activate(context: vscode.ExtensionContext) {
                 title: "Resume Story"
             });
             if (!picked) { return; }
-            await gitHelper.checkoutBranch(picked);
+
+            if (await gitHelper.hasUncommittedChanges()) {
+                await warnUncommittedChanges(gitHelper, `Commit or stash your local changes before switching to ${picked} — checking out a different branch needs a clean working tree.`);
+                return;
+            }
+
+            try {
+                await gitHelper.checkoutBranch(picked);
+            } catch (err) {
+                vscode.window.showErrorMessage(`Could not switch to ${picked}: ${err}`);
+                return;
+            }
             await gitHelper.appendAudit({
                 operation: "resumeStory", branch: picked, outcome: "success",
                 summary: `Switched to ${picked}`,
@@ -193,7 +207,7 @@ async function checkPendingDeployments(gitHelper: GitHelper): Promise<void> {
                 "Open Dashboard"
             );
             if (choice === "Open Dashboard") {
-                await vscode.commands.executeCommand("sfDevops.openDeploymentDashboard");
+                await vscode.commands.executeCommand("sfDevops.openDeploymentDashboard", env.name);
             }
             DeploymentDashboardPanel.refreshIfOpen();
         }

@@ -13,6 +13,7 @@ import {
 import { runSetupChecks, SetupCheckItem } from "../SetupCheck";
 import { getEffectiveRole, canAccessConfig } from "../RoleManager";
 import { isOrgConnected } from "../SfCli";
+import { getStoryProgress } from "../StoryProgress";
 
 const SETUP_CONFIRMED_KEY = "sfDevops.setupConfirmed";
 const AUTO_REFRESH_SECONDS = 60;
@@ -225,65 +226,7 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
     }
 
     private async _getStoryProgress(storyId: string): Promise<Record<string, string>> {
-        const progress: Record<string, string> = {};
-
-        // Refresh remote refs so detection sees the latest pushes/merges.
-        await this._gitHelper.fetchRemote();
-
-        for (const env of getEnvironments()) {
-            progress[env.name] = await this._getEnvState(storyId, env.name);
-        }
-        return progress;
-    }
-
-    /**
-     * Resolves a story's state per environment (git-based, no token required).
-     *   • the first configured environment (e.g. "dev") — "published" once the story's
-     *     commit is on that environment's branch (published straight from the feature branch).
-     *   • every later environment — "open" once its promotion/validate branch exists,
-     *     "merged" once the PR has landed on the env's branch but this extension hasn't
-     *     actually deployed that far yet, "deployed" once a real deploy through the
-     *     Deployment Dashboard has caught up to (or passed) the story's commit, else "none".
-     *     "merged" and "deployed" used to be the same state ("PR merged" was shown as
-     *     "Deployed" outright) — that was wrong: merging a PR doesn't run `sf project
-     *     deploy`, and conflating the two let the UI claim something was live in an org
-     *     when nobody had actually deployed it there yet.
-     */
-    private async _getEnvState(storyId: string, env: string): Promise<string> {
-        if (!storyId) { return "none"; }
-        try {
-            const publishEnv = getPublishEnvironment();
-            if (env === publishEnv.name) {
-                return (await this._gitHelper.branchContainsStory(publishEnv.branch, storyId)) ? "published" : "none";
-            }
-
-            const envCfg           = getEnvironments().find(e => e.name === env);
-            const envBranch        = envCfg?.branch ?? env;
-            const promotionBranch  = promoBranchName(storyId, env, "promote");
-            const validateBranch   = promoBranchName(storyId, env, "validate");
-
-            const storyCommitSha = await this._gitHelper.storyCommitShaOnBranch(envBranch, storyId);
-            if (storyCommitSha) {
-                const lastDeploy = await this._gitHelper.getDeployState(env);
-                if (lastDeploy && await this._gitHelper.isAncestorSha(storyCommitSha, lastDeploy.sha)) {
-                    return "deployed";
-                }
-                return "merged";
-            }
-
-            // A configured Bitbucket token can distinguish an open PR; otherwise use git.
-            try {
-                const api = await this._bbClient.getPRState(promotionBranch, envBranch);
-                if (api === "merged") { return "merged"; }
-                if (api === "open")   { return "open"; }
-            } catch { /* no token — fall through */ }
-
-            if (await this._gitHelper.remoteBranchExists(promotionBranch)
-                || await this._gitHelper.remoteBranchExists(validateBranch)) { return "open"; }
-            return "none";
-        } catch {
-            return "unknown";
-        }
+        return getStoryProgress(this._gitHelper, this._bbClient, storyId);
     }
 
     /**

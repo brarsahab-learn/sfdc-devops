@@ -210,6 +210,19 @@ export class DeploymentDashboardPanel {
 
         const nextEnv = promotable[idx + 1];
         const prevEnv = idx > 0 ? promotable[idx - 1] : getPublishEnvironment();
+
+        // Hard gate: env N-1 must actually be deployed before env N can be Validated/Deployed
+        // — skipped for the first promotable env (its "previous stage" is the publish env,
+        // which has no deploy step). Same enforcement as the Promote picker's gate, so acting
+        // out of order isn't possible from either entry point.
+        if (idx > 0) {
+            const gap = await this._gitHelper.checkPrevEnvDeployed(prevEnv);
+            if (gap.blocked) {
+                vscode.window.showWarningMessage(gap.reason!);
+                return;
+            }
+        }
+
         const model = await this._buildViewModel(env, nextEnv, prevEnv);
         const { files, summary } = resolveSelection(selection, model.groups, model.allFiles);
 
@@ -510,15 +523,17 @@ ${envPanes}
   // byte-for-byte what Validate last passed for that env — re-evaluated on every checkbox
   // change, so unchecking even one file re-locks it immediately. The server enforces this too
   // (never trust a client-side disabled attribute alone) — this is what keeps the UI honest.
+  // Returns whether it's unlocked, so recomputeSelection can tell the user what to do next.
   function updateDeployButtonState(env) {
     var pane = document.querySelector('.pane[data-env="' + env + '"]');
     var btn = document.getElementById('deployBtn-' + env);
-    if (!pane || !btn) { return; }
+    if (!pane || !btn) { return false; }
     var hasValidated = pane.dataset.hasValidated === '1';
     var matches = hasValidated && currentFingerprint(env) === (pane.dataset.validatedFp || '');
     btn.disabled = btn.dataset.hardDisabled === '1' || !matches;
     btn.title = matches ? '' : 'Run Validate on this exact selection first';
     btn.classList.toggle('btn-highlight', matches && btn.dataset.hardDisabled !== '1');
+    return matches;
   }
 
   function recomputeSelection(env) {
@@ -529,13 +544,16 @@ ${envPanes}
       var s = row ? row.dataset.stories : '';
       (s ? s.split(',') : []).forEach(function (id) { if (id) { stories[id] = true; } });
     });
+    var ready = updateDeployButtonState(env); // must run before building the summary text below
     var summaryEl = document.getElementById('selSummary-' + env);
     if (summaryEl) {
-      summaryEl.textContent = boxes.length === 0
-        ? 'No files selected.'
-        : boxes.length + ' file(s) selected across ' + Object.keys(stories).length + ' story/PR group(s).';
+      if (boxes.length === 0) {
+        summaryEl.textContent = 'No files selected.';
+      } else {
+        var base = boxes.length + ' file(s) selected across ' + Object.keys(stories).length + ' story/PR group(s).';
+        summaryEl.textContent = base + (ready ? ' Ready — click Deploy.' : ' Next: click Validate.');
+      }
     }
-    updateDeployButtonState(env);
   }
 
   // Respects the current story/PR filter — only (de)selects rows that are currently visible.

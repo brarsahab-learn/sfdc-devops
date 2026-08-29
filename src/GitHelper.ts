@@ -10,10 +10,12 @@ import * as path          from "path";
 import {
     getBaseBranch, getDevBranch, featureBranchName, isFeatureBranch as isFeatureBranchName,
     promoBranchName as buildPromoBranchName, getSourceRootFolder, getRepoWorkspace, getRepoSlug,
+    ResolvedEnvironment, getTicketKeyPattern,
 } from "./config";
 import { IGitProviderClient } from "./GitProviderClient";
 import { AuditEntry, renderAuditHtml } from "./AuditLog";
 import { log, revealLog } from "./Log";
+import { storyIdFromMessage } from "./DeploymentPlanner";
 
 const execFileAsync = promisify(execFile);
 
@@ -169,6 +171,35 @@ export class GitHelper {
         try {
             fs.writeFileSync(await this.deployStateFilePath(), JSON.stringify(data, null, 2));
         } catch { /* best effort */ }
+    }
+
+    /**
+     * Whether `prevEnv` has anything merged onto its branch that hasn't actually been
+     * deployed through the Deployment Dashboard yet — the same lastDeploy-vs-currentSha
+     * comparison DeploymentDashboardPanel._buildViewModel already does for its own display,
+     * answered as a yes/no gate instead of a file/commit breakdown. Callers are expected to
+     * skip calling this entirely for the first promotable environment (its "previous stage"
+     * is the publish env, which has no deploy concept and would otherwise always report
+     * "never deployed").
+     */
+    async checkPrevEnvDeployed(prevEnv: ResolvedEnvironment, targetLabel?: string): Promise<{ blocked: boolean; reason?: string }> {
+        const currentSha = await this.remoteHeadSha(prevEnv.branch);
+        if (!currentSha) { return { blocked: false }; } // branch doesn't exist yet — nothing to gate on
+
+        const lastDeploy = await this.getDeployState(prevEnv.name);
+        if (!lastDeploy) {
+            return {
+                blocked: true,
+                reason: `${prevEnv.label} has never been deployed from the Deployment Dashboard — deploy it first${targetLabel ? ` before promoting to ${targetLabel}` : ""}.`,
+            };
+        }
+        if (lastDeploy.sha === currentSha) { return { blocked: false }; }
+
+        const commits = await this.commitLogBetweenRaw(lastDeploy.sha, `origin/${prevEnv.branch}`);
+        return {
+            blocked: true,
+            reason: `${prevEnv.label} has ${commits.length} commit(s) merged but not yet deployed — deploy it in the Deployment Dashboard${targetLabel ? ` before promoting to ${targetLabel}` : ""}.`,
+        };
     }
 
     private async notifiedStateFilePath(): Promise<string> {
@@ -489,24 +520,42 @@ export class GitHelper {
         return this.remoteBranchExists(buildPromoBranchName(storyId, targetEnv, "promote"));
     }
 
-    /** True if `origin/<branch>` has a commit whose message mentions the story id. */
-    async branchContainsStory(branch: string, storyId: string): Promise<boolean> {
+    /**
+     * Finds the commit on `origin/<branch>` whose message resolves to EXACTLY `storyId` —
+     * not just any commit whose message happens to contain that text. `git log --grep` on
+     * its own is a substring/regex search: it would treat "." in a free-text story id as a
+     * regex wildcard, and "TEST-1" would false-positive match "TEST-10"'s commit. `--grep
+     * --fixed-strings` fixes the first problem (literal, not regex); to fix the second,
+     * `--grep` here is only used as a fast git-native pre-filter — every candidate line is
+     * then re-checked by extracting its story id the same structured way
+     * `distinctStoryIdsFromCommits` does (`storyIdFromMessage`) and comparing for exact
+     * equality, so a prefix collision can never produce a wrong match.
+     */
+    private async findStoryCommit(branch: string, storyId: string): Promise<string | null> {
         try {
-            const out = await this.git(["log", `origin/${branch}`, "--grep", storyId, "--oneline", "-1"]);
-            return out.trim().length > 0;
-        } catch {
-            return false;
-        }
-    }
-
-    /** The SHA of the commit on `origin/<branch>` whose message mentions the story id, or null if there isn't one. */
-    async storyCommitShaOnBranch(branch: string, storyId: string): Promise<string | null> {
-        try {
-            const out = await this.git(["log", `origin/${branch}`, "--grep", storyId, "--format=%H", "-1"]);
-            return out.trim() || null;
+            const out = await this.git(["log", `origin/${branch}`, "--fixed-strings", "--grep", storyId, "--format=%H%x1f%s"]);
+            const pattern = getTicketKeyPattern();
+            for (const line of out.split("\n")) {
+                if (!line) { continue; }
+                const sepIdx = line.indexOf("\x1f");
+                const hash = line.slice(0, sepIdx);
+                const message = line.slice(sepIdx + 1);
+                if (storyIdFromMessage(message, pattern) === storyId) { return hash; }
+            }
+            return null;
         } catch {
             return null;
         }
+    }
+
+    /** True if `origin/<branch>` has a commit whose message resolves to exactly the story id. */
+    async branchContainsStory(branch: string, storyId: string): Promise<boolean> {
+        return (await this.findStoryCommit(branch, storyId)) !== null;
+    }
+
+    /** The SHA of the commit on `origin/<branch>` whose message resolves to exactly the story id, or null if there isn't one. */
+    async storyCommitShaOnBranch(branch: string, storyId: string): Promise<string | null> {
+        return this.findStoryCommit(branch, storyId);
     }
 
     /** True if `ancestorSha` is contained in (or equal to) `descendantSha`'s history — i.e. it was already deployed as part of that commit. */
@@ -801,11 +850,22 @@ export class GitHelper {
     }
 
     /** Checks out an existing branch */
+    /**
+     * Checks out a branch — creating it from `origin/<branch>` first if it doesn't exist
+     * locally yet. This used to try a plain `checkout` and fall back to `checkout -b` on
+     * ANY failure — but a plain checkout also fails when uncommitted local changes would be
+     * overwritten, and `-b` on a branch name that already exists locally then fails too
+     * (uncaught), silently swallowing the real error. Checking existence explicitly means a
+     * genuine conflict now surfaces as one clear error instead of a confusing second one.
+     */
     async checkoutBranch(branch: string): Promise<void> {
         await this.git(["fetch", "origin"]);
-        try {
+        const existsLocally = await this.git(["branch", "--list", branch])
+            .then(out => out.trim().length > 0)
+            .catch(() => false);
+        if (existsLocally) {
             await this.git(["checkout", branch]);
-        } catch {
+        } else {
             await this.git(["checkout", "-b", branch, `origin/${branch}`]);
         }
     }

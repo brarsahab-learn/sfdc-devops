@@ -5,7 +5,8 @@ import * as vscode from "vscode";
 import { IGitProviderClient } from "../GitProviderClient";
 import { GitHelper, warnUncommittedChanges } from "../GitHelper";
 import { StoryWebviewProvider}from "../providers/StoryWebviewProvider";
-import { getTicketSystem, sanitizeStoryId } from "../config";
+import { getTicketSystem, sanitizeStoryId, isFeatureBranch, extractStoryId, getEnvironments } from "../config";
+import { getStoryProgress } from "../StoryProgress";
 
 export async function startStory(
     bbClient:      IGitProviderClient,
@@ -16,6 +17,28 @@ export async function startStory(
     if (await gitHelper.hasUncommittedChanges()) {
         await warnUncommittedChanges(gitHelper, "You have uncommitted changes. Please commit or stash them before starting a new story.");
         return;
+    }
+
+    // Doesn't block — just catches the "forgot I had something in flight" case. A team
+    // legitimately running multiple stories in parallel can just continue past it.
+    const currentBranch = await gitHelper.currentBranch();
+    if (isFeatureBranch(currentBranch)) {
+        const currentStoryId = extractStoryId(currentBranch);
+        if (currentStoryId) {
+            const progress = await getStoryProgress(gitHelper, bbClient, currentStoryId);
+            const pending = getEnvironments().filter(e => progress[e.name] === "open" || progress[e.name] === "merged");
+            if (pending.length > 0) {
+                const summary = pending
+                    .map(e => `${e.label} (${progress[e.name] === "merged" ? "merged, not deployed" : "open PR"})`)
+                    .join(", ");
+                const choice = await vscode.window.showWarningMessage(
+                    `${currentStoryId} still has unfinished pipeline work: ${summary}. Starting a new story won't stop it — it'll keep waiting for you (or someone else) to finish.`,
+                    { modal: true },
+                    "Continue Anyway"
+                );
+                if (!choice) { return; }
+            }
+        }
     }
 
     // Get the story/ticket ID from whichever ticketing system is configured

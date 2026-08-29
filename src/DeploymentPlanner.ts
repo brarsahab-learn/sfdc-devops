@@ -69,6 +69,47 @@ export function groupChangesByStory(
     return groups;
 }
 
+/**
+ * Extracts a story id from a single commit message, recognizing this extension's own two
+ * commit-message shapes STRUCTURALLY before falling back to the configured ticket-key
+ * pattern: `GitHelper.storySquashRef`'s squash commit ("{storyId}: consolidated story
+ * changes", on dev) and `promoteStory.ts`'s `buildPRTitle` ("[{storyId}] ... → {env}", what
+ * a squash-merged PR's commit message becomes on a later env branch). Checking these first
+ * matters because `sfDevops.ticketKeyPattern` can legitimately be configured very loosely
+ * (e.g. `\S.*`, to allow free-text story ids in branch names) — under a loose pattern, the
+ * SAME story's squash commit and PR-title commit would otherwise match as two different
+ * "story ids" (the whole differently-worded message each time), splitting one story into
+ * two entries. Anything that matches neither shape (e.g. a non-squash merge commit) still
+ * falls back to the configured pattern.
+ */
+export function storyIdFromMessage(message: string, pattern: RegExp): string | null {
+    const bracketed = message.match(/^\[([^\]]+)\]/);
+    if (bracketed) { return bracketed[1]; }
+    const colonIdx = message.indexOf(": ");
+    if (colonIdx > 0) { return message.slice(0, colonIdx); }
+    const m = message.match(pattern);
+    return m ? m[0] : null;
+}
+
+/**
+ * Groups commits by story/ticket id (see `storyIdFromMessage`). Commits that don't match
+ * anything are simply omitted — there's no "other" bucket here, unlike `groupChangesByStory`
+ * — the caller only cares about real story ids to offer for promotion.
+ */
+export function distinctStoryIdsFromCommits(
+    commits: CommitInfo[],
+    pattern: RegExp
+): Map<string, CommitInfo[]> {
+    const byStory = new Map<string, CommitInfo[]>();
+    for (const c of commits) {
+        const id = storyIdFromMessage(c.message, pattern);
+        if (!id) { continue; }
+        if (!byStory.has(id)) { byStory.set(id, []); }
+        byStory.get(id)!.push(c);
+    }
+    return byStory;
+}
+
 export type DeploySelectionMode = "all" | "stories" | "files";
 
 export interface DeploySelection {

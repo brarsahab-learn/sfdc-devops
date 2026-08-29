@@ -12,6 +12,8 @@ It manages your Salesforce story from **feature branch → dev → QA → UAT �
 2. Is **published** to the shared `dev` branch.
 3. Is **promoted** to QA, then UAT, then Prod — a pull request gates each step (human code review), and the **Deployment Dashboard** runs the actual `sf project deploy` against each org once you're ready, using your own authenticated `sf` CLI session.
 
+You can't skip ahead: promoting into an environment, or Validating/Deploying against it, only works once the stage before it has actually been **deployed** — not just merged. See [§7](#7-promoting-to-the-next-environment) and [§7b](#7b-the-deployment-dashboard).
+
 > **Prod** is a real, gated stage inside this extension by default (branch `main`) — restricted to the **Admin** role. See [§2b](#2b-roles-developer--lead--admin) for the role model.
 
 ---
@@ -30,7 +32,7 @@ It manages your Salesforce story from **feature branch → dev → QA → UAT �
 5. **Settings** (`Ctrl+,` → search `sfDevops`). Everything below is configurable per project — nothing in this guide's examples (dev/QA/UAT/Prod, Lead/Admin, Jira) is hardcoded:
    | Setting | What it's for | Default |
    |---|---|---|
-   | `sfDevops.environments` | The full pipeline, in order. First entry publishes straight from the feature branch (no PR); every later entry is a promote/validate stage. Each entry can set its own branch name, icon, `requiredRole`, `coverageGate`, and `signoffGate`. | `dev` → `qa` (coverage-gated) → `uat` (requires `Lead`) → `prod` (branch `main`, requires `Admin`) |
+   | `sfDevops.environments` | The full pipeline, in order. First entry publishes straight from the feature branch (no PR); every later entry is a promote/validate/deploy stage. Each entry can set its own branch name, icon, `requiredRole`, `coverageGate`, `signoffGate`, `deployTestLevel` (default `RunRelevantTests`), and `isProd` (only needed if your prod environment isn't literally named `"prod"` — it decides which stage never allows auto-deploy). | `dev` → `qa` (coverage-gated) → `uat` (requires `Lead`) → `prod` (branch `main`, requires `Admin`) |
    | `sfDevops.roles` | The role names your team uses. | `["Developer", "Lead", "Admin"]` |
    | `sfDevops.role` | **Legacy bootstrap default only.** The role actually in effect is managed via **Change Role** in the toolbar (password-gated for Lead/Admin) — see [§2b](#2b-roles-developer--lead--admin). | `Developer` |
    | `sfDevops.gitProvider` / `sfDevops.repoWorkspace` / `sfDevops.repoSlug` | Git host and repo identity for pull requests and pipeline status. `bitbucket` and `github` are implemented. | `bitbucket` |
@@ -82,22 +84,25 @@ flowchart TD
     D --> E{Story has Apex?}
     E -- Yes --> F[Code Coverage panel:<br/>auto-detected tests, run in the org<br/>this stage's changes are currently in, reach threshold]
     E -- No --> G
-    F --> G[Validate Only  /  Promote → QA]
+    F --> G[Promote to QA<br/>picks your story from a list, opens a PR]
     G --> H[Approve & merge PR → QA]
     H --> H2{QA signoffGate enabled?}
     H2 -- Yes --> H3[Record QA Sign-off<br/>Current Story panel]
     H2 -- No --> I
-    H3 --> I[Promote → UAT<br/>requires Lead role]
-    I --> J[Approve & merge PR → UAT]
-    J --> J2{UAT signoffGate enabled?}
-    J2 -- Yes --> J3[Record UAT Sign-off]
-    J2 -- No --> K
-    J3 --> K[Deployment Dashboard:<br/>pick ALL / by story / by file → Deploy or Validate]
-    K --> L[sf project deploy start/validate<br/>runs directly against the QA/UAT org —<br/>your own sf CLI session, no external CI]
-    L --> M[Promote → Prod<br/>requires Admin role]
+    H3 --> I[Deployment Dashboard — QA tab:<br/>check files, Validate, then Deploy]
+    I --> I2[sf project deploy start<br/>runs directly against the QA org —<br/>your own sf CLI session, no external CI]
+    I2 --> J[Promote to UAT<br/>requires Lead role]
+    J --> K[Approve & merge PR → UAT]
+    K --> K2{UAT signoffGate enabled?}
+    K2 -- Yes --> K3[Record UAT Sign-off]
+    K2 -- No --> L
+    K3 --> L[Deployment Dashboard — UAT tab:<br/>check files, Validate, then Deploy]
+    L --> M[Promote to Prod<br/>requires Admin role]
     M --> N[Approve & merge PR → main]
-    N --> O[Deployment Dashboard:<br/>Deploy or Validate against Prod's org]
+    N --> O[Deployment Dashboard — Prod tab:<br/>check files, Validate, then Deploy]
 ```
+
+You can't skip a step in this diagram — Promote to UAT won't run until QA is actually deployed (not just merged), Deploy won't run until Validate has just passed for the exact files you have checked, and so on all the way to Prod.
 
 Two gates are **opt-in per environment**, off by default:
 - **Coverage gate** (`sfDevops.environments[].coverageGate`) — blocks promotion into that environment until the Code Coverage panel's threshold passes.
@@ -115,6 +120,8 @@ required** — see `CI_CD_SETUP_GUIDE.md` for the one-time org-authentication se
 In the **Current Story** panel:
 
 - **🚀 Start New Story** — enter a story ID or short description (e.g. `SDC-200`, or free text like `unmanaged-package-changes` if your team doesn't use ticket-shaped IDs). It's automatically cleaned up into a safe branch name (spaces/punctuation collapse to `-`, characters git doesn't allow in a ref are stripped) and upper-cased, then creates and checks out `feature/<ID>` from `main`. If your `sfDevops.ticketKeyPattern` expects a ticket-shaped key (e.g. `PROJ-123`) later, prefer entering an ID in that shape — free text still works for creating the branch, but downstream steps that try to recognize the ticket key back out of the branch name will fall back to the whole ID instead.
+
+  If your **current** story still has something unfinished (an open PR, or a stage that's merged but not deployed), you'll get a warning summarizing what's pending with a **"Continue Anyway"** option — it won't stop you, it's just a "did you mean to leave this behind" check.
 - **⏳ Continue with Existing Story** — pick an existing **local** feature branch from a list and switch to it. This is a plain `git checkout`, not a search — the branch must already exist locally (e.g. from a previous `Start New Story`, or `git fetch` + `git checkout` done outside the extension).
 
 Every action you take (start, resume, publish, sync, promote, conflicts) is recorded in a local **audit trail** — see [§13](#13-audit-trail).
@@ -132,6 +139,10 @@ Every action you take (start, resume, publish, sync, promote, conflicts) is reco
    - add your story's changes to the shared **`dev` branch**.
 
    > No deployment happens here — publishing just gets your work onto the branches. You can Commit & Publish as many times as you like.
+
+   Have other, unrelated **unstaged** edits sitting around at the same time (something you're not ready to publish yet)? They're automatically set aside and restored on your feature branch afterward, untouched — only what you staged gets published. You'll see a note in the Output channel when this happens.
+
+**Story Progress keeps you honest about this**: once DEV shows ✅ **Published**, if you make *more* local changes afterward, the badge switches to ⚠️ **"Published — N new change(s) pending"**, showing how many are staged vs. still in progress, with a **commit to dev** link right there — instead of the badge quietly going stale.
 
 ---
 
@@ -156,9 +167,9 @@ In the **Code Coverage** panel:
 Once the story is published to `dev`, two buttons appear for the **next environment** (QA, then UAT, then Prod):
 
 - **✔ Validate Only** — runs a **check-only** Salesforce validation against the target org. **Nothing is deployed.** Available to everyone. Use it to confirm the deployment will succeed before you promote.
-- **🚀 Promote** — creates the promotion branch and opens a **pre-filled Pull Request** page (promotion → target env) in your browser. The PR merge is the **code-review gate** — merging doesn't deploy anything by itself.
+- **🚀 Promote** — opens a picker: **pick which story to promote to that environment** from every story currently sitting on the previous stage, ready to move on. This works no matter which branch you currently have checked out — you don't need to switch to a story's branch just to promote it. Pick one → it creates the promotion branch and opens a **pre-filled Pull Request** page in your browser. The PR merge is the **code-review gate** — merging doesn't deploy anything by itself. If nothing's eligible yet, it tells you that instead of showing an empty list.
 
-Once the PR merges, the panel notices and switches that environment's action button to **🚀 Deploy — {env}**, which takes you straight to that environment's tab in the **Deployment Dashboard** to actually run `sf project deploy` against the org — the two panels stay in lockstep instead of you having to remember to go check. You can't promote *past* an environment until it's actually deployed, not just merged — Story Progress and the Deployment Dashboard always agree on what's really live.
+Once the PR merges, the panel notices and switches that environment's action button to **🚀 Deploy — {env}**, which takes you straight to that environment's tab in the **Deployment Dashboard** — see [§7b](#7b-the-deployment-dashboard) for what to do there. You can't promote *past* an environment until it's actually deployed there, not just merged, and Promote/Validate/Deploy all refuse to run out of order — this is enforced every time, not just a hidden button.
 
 Notes:
 - **QA**: both buttons available to everyone.
@@ -168,13 +179,37 @@ Notes:
 
 ---
 
+## 7b. The Deployment Dashboard
+
+Open it from **🚀 Deploy** in the toolbar, or by clicking the **🚀** link next to an environment in Story Progress once it's "Merged — ready to deploy" (which jumps straight to the right tab). One tab per environment (QA, UAT, Prod).
+
+Each tab is split into two halves:
+
+- **Left — what's pending.** Every file merged into that environment's branch but not yet deployed, grouped by Salesforce metadata type (Apex Classes, Custom Objects, LWC, …) with a checkbox per file. A dropdown above it filters the list down to one story/PR at a time. **Select all** / **Select none** links (respect the current filter) let you grab everything in one click, or narrow to a single story and cherry-pick just that.
+- **Right — the diff.** Click any file's name (not its checkbox) to see a color-coded, line-by-line diff of what's about to change, right there — no need to leave the panel.
+
+**To actually deploy:**
+1. Check the file(s) you want (or use Select all).
+2. Click **🔍 Validate**. This runs a real check-only Salesforce validation — the summary line under the tree tells you what to do next ("Next: click Validate.").
+3. Once it passes, **🚀 Deploy** unlocks for that *exact* selection — the summary line switches to "Ready — click Deploy." **Deploy stays locked/disabled until this happens**, even if you have permission — this is deliberate, not a bug. Uncheck or change even one file afterward and it re-locks; re-validate to unlock again.
+4. Click **🚀 Deploy** to run the real `sf project deploy`.
+
+**Auto-deploy on success**: check this box before clicking Validate, and a passing Validate immediately chains into a real Deploy for you — one click instead of two. **Not available on Prod** — Prod always needs the explicit manual Deploy click, checkbox or not.
+
+If nothing's been deployed through this dashboard for an environment yet, you'll see **Validate ALL** / **Deploy ALL** buttons instead of a tree (there's nothing to individually pick yet) — same Validate-before-Deploy rule applies.
+
+Every Validate/Deploy prints what it's doing to the **"Salesforce DevOps" output channel** (`View → Output`, pick it from the dropdown) — which files it's picking up, and whether it passed or failed — so you're never just watching a spinner.
+
+---
+
 ## 8. Keeping your branch in sync
 
 Long-lived feature branches drift behind `main` (or your configured `sfDevops.baseBranch`) as other stories merge. This extension surfaces that instead of letting it become a surprise conflict during a promotion:
 
 - **On startup**, if your current feature branch is more than `sfDevops.staleBranchThreshold` commits (default `5`) behind the base branch, you're prompted **"Sync Now"** or **"Later."**
 - **🔄 Sync Branch with Dev** (available any time on a feature branch) rebases your branch onto the latest base branch and pushes the result.
-- Requires a clean working tree — commit or stash first. If the rebase hits conflicts, it stops mid-rebase; resolve them and run `git rebase --continue` yourself (this one isn't wired into the panel's Resume/Cancel flow — that flow is for cherry-pick conflicts, see [§9](#9-merge-conflicts)), or `git rebase --abort` to back out.
+- Requires a clean working tree. If you have uncommitted changes when you try Sync (or Deploy, or Start Story, or the 2GP packaging command), you'll get a warning with a **"Review Changes"** button that opens the native Source Control view — real diffs, staging, discard, commit, right there, without leaving the flow. If some of what's uncommitted is already **staged**, you'll also see **"Commit to Dev"**, which runs Commit & Publish for you on the spot.
+- If the rebase hits conflicts, it stops mid-rebase; resolve them and run `git rebase --continue` yourself (this one isn't wired into the panel's Resume/Cancel flow — that flow is for cherry-pick conflicts, see [§9](#9-merge-conflicts)), or `git rebase --abort` to back out.
 
 ---
 
@@ -195,6 +230,7 @@ The operation continues from where it stopped.
 | Badge | Meaning |
 |---|---|
 | **DEV — Published** | Your story's changes are on the `dev` branch. |
+| **DEV — ⚠️ Published — N new change(s) pending** | You've made more local changes since publishing — some staged, some maybe not. Click **commit to dev** right on the badge to publish them. |
 | **QA / UAT / Prod — Validated / In PR** | A validate branch or an open promotion PR exists (not yet merged). |
 | **QA / UAT / Prod — Merged — ready to deploy** | The PR merged into that environment's branch, but no deploy has caught up to it yet — click the 🚀 link (or the action button below) to open the Deployment Dashboard for that environment. |
 | **QA / UAT / Prod — Deployed** | A real `sf project deploy` (run from the Deployment Dashboard) has actually caught up to this story's merged commit. |
@@ -206,13 +242,15 @@ The operation continues from where it stopped.
 
 | Button | What it does | Who |
 |---|---|---|
-| Start New Story | Creates `feature/<ID>` from `main` | Everyone |
+| Start New Story | Creates `feature/<ID>` from `main`; warns (doesn't block) if your current story has unfinished work | Everyone |
 | Continue with Existing Story | Switches to an existing **local** feature branch | Everyone |
-| Commit & Publish Feature Branch | Commits staged files, pushes feature, updates `dev` | Everyone |
+| Commit & Publish Feature Branch | Commits staged files, pushes feature, updates `dev`; auto-preserves other in-progress edits | Everyone |
 | Run Tests & Check Coverage | Runs Apex tests in dev org, enforces ≥75% | Everyone |
 | Validate Only | Check-only validation against target org (no deploy) | Everyone |
-| Promote | Opens PR — merge is the review gate | QA: everyone · UAT: Lead · Prod: Admin |
-| 🚀 Deploy selection (Deployment Dashboard) | Runs the real `sf project deploy` against an environment's org | QA/UAT: everyone · Prod: Admin |
+| Promote | Opens a picker of every story eligible to promote to that environment — locked until the previous stage is deployed | QA: everyone · UAT: Lead · Prod: Admin |
+| 🔍 Validate (Deployment Dashboard) | Check-only validation against the checked selection; unlocks Deploy on success | QA/UAT: everyone · Prod: Admin |
+| 🚀 Deploy (Deployment Dashboard) | Runs the real `sf project deploy` — locked until Validate just passed for the exact same selection | QA/UAT: everyone · Prod: Admin (never auto-deploys) |
+| Auto-deploy on success (Deployment Dashboard) | Chains Deploy right after a passing Validate, one click | QA/UAT: everyone · unavailable on Prod |
 | Sync Branch with Dev | Rebases your feature branch onto the base branch and pushes | Everyone |
 | Resume / Cancel | Continue or abort a paused (conflicted) operation | Everyone |
 | 👤 Change Role | Switches your effective role | Everyone (Lead/Admin need the password) |
@@ -225,9 +263,9 @@ The operation continues from where it stopped.
 1. **Start New Story** → `SDC-200`.
 2. Build in the dev org, **retrieve**, **stage**, **Commit & Publish Feature Branch**.
 3. (Apex?) Open **Code Coverage**, enter test classes, **Run** until ✅ ≥75%.
-4. **Validate Only — QA** (optional sanity check) → **Promote — QA** → approve & merge the PR → open the **Deployment Dashboard** → **Deploy selection** for QA.
-5. **Promote — UAT** (Lead) → approve & merge the PR → Deploy selection for UAT.
-6. **Promote — Prod** (Admin) → approve & merge the PR into `main` → Deploy selection for Prod.
+4. **Validate Only — QA** (optional sanity check) → **Promote — QA** → pick `SDC-200` from the picker → approve & merge the PR → **🚀 Deploy — QA** link appears in Story Progress → in the Dashboard: check the files → **Validate** → **Deploy**.
+5. **Promote — UAT** (Lead) → pick `SDC-200` → approve & merge the PR → Validate → Deploy in the Dashboard's UAT tab.
+6. **Promote — Prod** (Admin) → pick `SDC-200` → approve & merge the PR into `main` → Validate → Deploy in the Dashboard's Prod tab.
 
 That's this extension's full story lifecycle, Dev through Prod, entirely from VS Code. 🎉
 
