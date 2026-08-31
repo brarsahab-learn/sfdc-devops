@@ -147,10 +147,11 @@ export async function runSetupChecks(
 }
 
 /**
- * Required: every one of the 4 canonical org-alias slots (Dev/QA/UAT/Prod — see
- * config.getOrgAliasSlots) must have an alias set AND be currently authenticated.
- * The Setup Check panel lets a user fill in and authenticate each one inline rather
- * than hand-editing settings.json.
+ * Required: every environment actually configured in sfDevops.environments (see
+ * config.getOrgAliasSlots — one slot per configured stage, not a fixed dev/qa/uat/prod
+ * list) must have an org alias set AND be currently authenticated. The Setup Check
+ * panel lets a user fill in and authenticate each one inline rather than hand-editing
+ * settings.json.
  *
  * Checks each slot individually via `sf org display --target-org <alias>` (run in
  * parallel) rather than `sf org list` + set-membership: an org can carry more than one
@@ -161,7 +162,8 @@ export async function runSetupChecks(
  */
 async function checkOrgAuthentication(workspaceRoot: string): Promise<SetupCheckItem> {
     const slots = getOrgAliasSlots();
-    const base = { key: "orgAuthentication", label: "Configured org aliases authenticated (Dev/QA/UAT/Prod)", required: true };
+    const slotNames = slots.map(s => s.label).join("/");
+    const base = { key: "orgAuthentication", label: `Configured org aliases authenticated (${slotNames})`, required: true };
 
     const unset = slots.filter(s => !s.alias);
     const toCheck = slots.filter(s => s.alias);
@@ -182,7 +184,7 @@ async function checkOrgAuthentication(workspaceRoot: string): Promise<SetupCheck
         ...base,
         passed,
         detail: passed
-            ? `All 4 org aliases configured and authenticated: ${slots.map(s => `${s.label}=${s.alias}`).join(", ")}.`
+            ? `All ${slots.length} org alias(es) configured and authenticated: ${slots.map(s => `${s.label}=${s.alias}`).join(", ")}.`
             : problems.join("; "),
         fixSteps: passed ? [] : [
             "Fill in and authenticate each org below (Setup Check panel), or",

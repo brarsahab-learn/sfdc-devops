@@ -1,7 +1,7 @@
 // extension.ts — Main entry point for the Salesforce DevOps VS Code Extension
 
 import * as vscode from "vscode";
-import { StoryWebviewProvider }   from "./providers/StoryWebviewProvider";
+import { StoryWebviewProvider, StoryStatusInfo }   from "./providers/StoryWebviewProvider";
 import { CoverageWebviewProvider} from "./providers/CoverageWebviewProvider";
 import { EnvironmentTreeProvider} from "./providers/EnvironmentTreeProvider";
 import { startStory }      from "./commands/startStory";
@@ -22,6 +22,7 @@ import {
 } from "./config";
 import { getEffectiveRole, canAccessConfig, promptChangeRole } from "./RoleManager";
 import { initLog } from "./Log";
+import { watchGitState } from "./GitWatcher";
 
 let deployPoller:    NodeJS.Timeout | undefined;
 
@@ -42,9 +43,48 @@ export async function activate(context: vscode.ExtensionContext) {
     // Resolved fresh via RoleManager on every check, not captured once here, since
     // "Change Role" can update it at runtime.
 
+    // ── Status bar item — always visible (muted when idle) so "where am I" doesn't depend
+    // on the sidebar being open or scrolled to the right spot. Fed by StoryWebviewProvider's
+    // own refresh() via the onStatusChange callback below, so it can never show something the
+    // sidebar itself disagrees with.
+    const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+    statusBarItem.command = "sfDevopsStoryView.focus";
+    statusBarItem.show();
+    context.subscriptions.push(statusBarItem);
+
+    // Org identity leads the text when it's known — "which org am I about to touch" is meant
+    // as an instant, passive sanity check before every change, so it has to be the first
+    // thing visible, not buried after the story id. 🟢/🚨 prefixes carry the cue on their own
+    // regardless of theme; the Prod case ALSO gets VS Code's own error-toned status bar
+    // background so it's unmissable even to someone not parsing the emoji.
+    const updateStatusBar = (info: StoryStatusInfo | null) => {
+        if (!info) {
+            statusBarItem.text = "$(circle-slash) No active story";
+            statusBarItem.tooltip = "Salesforce DevOps — no feature branch checked out";
+            statusBarItem.backgroundColor = undefined;
+            return;
+        }
+        const stage = info.stage;
+        const stageText = stage ? `${info.storyId} · ${stage.label} next` : `${info.storyId} · complete`;
+        if (stage?.orgAlias) {
+            const cue = stage.isProd ? "🚨" : "🟢";
+            statusBarItem.text = `${cue} ${stage.orgAlias} — ${stageText}`;
+            statusBarItem.backgroundColor = stage.isProd
+                ? new vscode.ThemeColor("statusBarItem.errorBackground")
+                : undefined;
+        } else {
+            statusBarItem.text = stage ? `$(rocket) ${stageText}` : `$(check) ${stageText}`;
+            statusBarItem.backgroundColor = undefined;
+        }
+        statusBarItem.tooltip = stage
+            ? `${info.branch}\nNext stage: ${stage.label}${stage.orgAlias ? ` (${stage.orgAlias})` : " — no org alias configured"}${stage.isProd ? "\n⚠ This is Production." : ""}`
+            : `${info.branch}\nEvery stage deployed`;
+    };
+    updateStatusBar(null);
+
     // ── Register sidebar providers ───────────────────────────────────────────
     const storyProvider = new StoryWebviewProvider(
-        context.extensionUri, bbClient, gitHelper, context
+        context.extensionUri, bbClient, gitHelper, context, updateStatusBar
     );
     const coverageProvider = new CoverageWebviewProvider(
         context.extensionUri, gitHelper, storyProvider
@@ -55,6 +95,18 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.window.registerWebviewViewProvider("sfDevopsStoryView", storyProvider),
         vscode.window.registerWebviewViewProvider("sfDevopsCoverageView", coverageProvider),
         vscode.window.registerTreeDataProvider("sfDevopsEnvView", envProvider)
+    );
+
+    // ── Live git-state awareness — react immediately to a branch switch, commit, or
+    // staged/unstaged change made OUTSIDE this extension's own buttons (Source Control,
+    // terminal, another tool), instead of waiting up to sfDevops.fallbackRefreshSeconds for
+    // the sidebar's own poll to notice. Degrades to a no-op if the built-in git extension
+    // isn't available — the fallback timer keeps working unchanged either way.
+    context.subscriptions.push(
+        watchGitState(gitHelper.getWorkspaceRoot(), () => {
+            storyProvider.refresh();
+            envProvider.refresh();
+        })
     );
 
     // ── Register commands ────────────────────────────────────────────────────
@@ -79,7 +131,29 @@ export async function activate(context: vscode.ExtensionContext) {
 
         // Promote & Deploy — any configured environment. Gated by that environment's
         // requiredRole (sfDevops.environments[].requiredRole), if any.
-        vscode.commands.registerCommand("sfDevops.promoteEnv", async (env: string) => {
+        // `env` is optional — the Story Progress sidebar always passes one (the ONE stage
+        // that story itself needs next), but that button disappears once your current
+        // story is past that stage even though a DIFFERENT story might still need
+        // promoting there. Command Palette / a toolbar button call this with no argument,
+        // so prompt for which environment first instead of failing on "unknown environment
+        // undefined" — the picker after that already handles "which story" independently
+        // of whatever's currently checked out.
+        vscode.commands.registerCommand("sfDevops.promoteEnv", async (env?: string) => {
+            if (!env) {
+                const role = getEffectiveRole(context);
+                const choices = getPromotableEnvironments().filter(e => canPromote(role, e));
+                if (choices.length === 0) {
+                    vscode.window.showWarningMessage("Your role can't promote into any configured environment.");
+                    return;
+                }
+                const picked = await vscode.window.showQuickPick(
+                    choices.map(e => ({ label: e.label, env: e.name })),
+                    { title: "Promote to which environment?", placeHolder: "Select the target environment" }
+                );
+                if (!picked) { return; }
+                env = picked.env;
+            }
+
             const envCfg = findEnvironment(env);
             if (!envCfg) {
                 vscode.window.showErrorMessage(`Unknown environment "${env}" — check sfDevops.environments.`);

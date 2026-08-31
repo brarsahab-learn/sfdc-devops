@@ -3,7 +3,7 @@
 // the one-time ≥ threshold gate before the story can be promoted into the gated environment.
 
 import { execSf } from "../SfCli";
-import { log, revealLog } from "../Log";
+import { log, revealLog, debugLog } from "../Log";
 import { getCoverageThreshold, getCoverageSourceOrg, getCoverageTimeoutSeconds } from "../config";
 
 export interface ClassCoverage {
@@ -80,9 +80,12 @@ export async function runApexCoverage(
         return { ...base, error: "Could not parse the Salesforce CLI response." };
     }
 
+    debugLog(`Raw CLI response:\n${JSON.stringify(parsed, null, 2)}`);
+
     const result   = parsed?.result ?? {};
     const covArr    = result?.coverage?.coverage ?? [];
     const failing   = Number(result?.summary?.failing ?? 0);
+    debugLog(`Test run ${result?.summary?.testRunId ?? "(no id)"} — ${result?.summary?.passing ?? 0} passing, ${failing} failing`);
 
     const covByName = new Map<string, number>();
     for (const c of covArr) {

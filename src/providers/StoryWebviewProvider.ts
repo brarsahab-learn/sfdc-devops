@@ -9,30 +9,73 @@ import {
     extractStoryId, isFeatureBranch, getBaseBranch, getEnvironments, getPublishEnvironment,
     getPromotableEnvironments, canPromote, getTerminalStageMessage, promoBranchName, buildTicketUrl,
     getCoverageGateEnvironment, getOrgAliasSlots, setOrgAliasSlot, OrgAliasSlot,
+    ResolvedEnvironment, getFallbackRefreshSeconds,
 } from "../config";
 import { runSetupChecks, SetupCheckItem } from "../SetupCheck";
 import { getEffectiveRole, canAccessConfig } from "../RoleManager";
-import { isOrgConnected } from "../SfCli";
+import { isOrgConnected, execSf } from "../SfCli";
 import { getStoryProgress } from "../StoryProgress";
 
 const SETUP_CONFIRMED_KEY = "sfDevops.setupConfirmed";
-const AUTO_REFRESH_SECONDS = 60;
+
+/** The stage a story is about to move through next, and which org that actually means — enough for a status bar item to show "which org am I about to touch" without re-deriving the environment itself. */
+export interface CurrentStageInfo {
+    label:     string;
+    orgAlias?: string;
+    isProd:    boolean;
+}
+
+export interface StoryStatusInfo {
+    branch:   string;
+    storyId:  string;
+    stage:    CurrentStageInfo | null;
+}
 
 function escapeHtml(s: string): string {
     return String(s).replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]!));
 }
+
+// Shared busy-state bar for all three panel templates (main, setup gate, conflict) — a click
+// used to have no visible effect until the next full webview.html swap landed, which could
+// look frozen or unresponsive for a moment. A full refresh always replaces this markup
+// wholesale, so "clear the busy state" needs no explicit signal — it's implicit in a new
+// render arriving. The 5s timeout only covers the case where nothing re-renders at all (e.g.
+// a QuickPick the user cancelled), so the UI doesn't stay stuck looking busy forever.
+const BUSY_BAR_CSS = `
+  .busy-bar { display: none; position: sticky; top: 0; z-index: 20; background: var(--vscode-statusBarItem-warningBackground, var(--vscode-badge-background)); color: var(--vscode-statusBarItem-warningForeground, var(--vscode-badge-foreground)); font-size: 11px; text-align: center; padding: 3px 0; margin: -8px -8px 8px; }
+  body.busy .btn, body.busy .tbtn, body.busy button, body.busy .org-btn { pointer-events: none; opacity: 0.55; }
+`;
+const BUSY_BAR_HTML = `<div class="busy-bar" id="busyBar">&#x23F3; Working&hellip;</div>`;
+const BUSY_BAR_JS = `
+  function showBusy() {
+    document.body.classList.add('busy');
+    var bar = document.getElementById('busyBar');
+    if (bar) { bar.style.display = 'block'; }
+    clearTimeout(window.__busyTimeout);
+    window.__busyTimeout = setTimeout(function () {
+      document.body.classList.remove('busy');
+      if (bar) { bar.style.display = 'none'; }
+    }, 5000);
+  }
+`;
 
 export class StoryWebviewProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = "sfDevopsStoryView";
     private _view?: vscode.WebviewView;
     private _forceShowSetup = false;
     private _autoRefreshTimer?: NodeJS.Timeout;
+    /** The branch this panel last rendered — compared on every refresh() to notice a branch change that DIDN'T come from one of this panel's own actions (Source Control, terminal, another tool). Undefined until the first refresh, so no notice fires on startup. */
+    private _lastKnownBranch?: string;
+    /** One-shot, same idiom as DeploymentDashboardPanel's _lastOutcome — shown once, then cleared. */
+    private _externalSwitchNotice?: string;
 
     constructor(
         private readonly _extensionUri: vscode.Uri,
         private readonly _bbClient: IGitProviderClient,
         private readonly _gitHelper: GitHelper,
-        private readonly _extContext: vscode.ExtensionContext
+        private readonly _extContext: vscode.ExtensionContext,
+        /** Fed the same branch/story/stage refresh() already derives, so the status bar item never has to recompute (and risk drifting from) what the sidebar itself is showing. `null` covers "nothing to show right now" states (no view resolved yet, setup gate, paused conflict). */
+        private readonly _onStatusChange?: (info: StoryStatusInfo | null) => void
     ) {}
 
     /** Resolved fresh on every use — "Change Role" can update this at runtime, so it must never be cached. */
@@ -54,7 +97,7 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         webviewView.webview.html = this._getLoadingHtml();
 
         // Handle messages from webview
-        webviewView.webview.onDidReceiveMessage(async (msg: { command: string; env?: string; key?: string; value?: string }) => {
+        webviewView.webview.onDidReceiveMessage(async (msg: { command: string; env?: string; key?: string; value?: string; path?: string }) => {
             switch (msg.command) {
                 case "resumeStory":
                     vscode.commands.executeCommand("sfDevops.resumeStory"); break;
@@ -63,7 +106,11 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                 case "commitAndPush":
                     vscode.commands.executeCommand("sfDevops.commitAndPush"); break;
                 case "promote":
-                    if (msg.env) { vscode.commands.executeCommand("sfDevops.promoteEnv", msg.env); }
+                    // No msg.env (e.g. the toolbar's general "Promote" button, not the
+                    // per-story action button) → the command itself prompts for which
+                    // environment, then opens the picker of eligible stories for it —
+                    // independent of whatever story/branch is currently checked out.
+                    vscode.commands.executeCommand("sfDevops.promoteEnv", msg.env || undefined);
                     break;
                 case "validate":
                     if (msg.env) { vscode.commands.executeCommand("sfDevops.validateEnv", msg.env); }
@@ -84,6 +131,9 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                     vscode.commands.executeCommand("sfDevops.changeRole"); break;
                 case "viewBranchInBrowser":
                     await this._viewBranchInBrowser(); break;
+                case "viewWorkingFileDiff":
+                    if (msg.path) { await this._viewWorkingFileDiff(msg.path); }
+                    break;
                 case "focusCoverage":
                     vscode.commands.executeCommand("sfDevopsCoverageView.focus"); break;
                 case "recheckSetup":
@@ -122,6 +172,9 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                         this.refresh();
                     }
                     break;
+                case "openOrg":
+                    if (msg.value?.trim()) { await this._openOrgInBrowser(msg.value.trim()); }
+                    break;
                 case "recordSignoff":
                     if (msg.env) { await this._recordSignoff(msg.env); }
                     break;
@@ -147,8 +200,29 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
     private _scheduleAutoRefresh(): void {
         this._clearAutoRefresh();
         if (this._view?.visible) {
-            this._autoRefreshTimer = setTimeout(() => this.refresh(), AUTO_REFRESH_SECONDS * 1000);
+            this._autoRefreshTimer = setTimeout(() => this.refresh(), getFallbackRefreshSeconds() * 1000);
         }
+    }
+
+    /** `sf org open` launches the org straight in the default browser itself — no need to parse a URL out of its JSON, just run it and surface a friendly error if the alias isn't actually authenticated. */
+    private async _openOrgInBrowser(alias: string): Promise<void> {
+        try {
+            await execSf(["org", "open", "--target-org", alias], {
+                cwd: this._gitHelper.getWorkspaceRoot(), timeout: 30_000, maxBuffer: 2 * 1024 * 1024,
+            });
+        } catch (err: any) {
+            vscode.window.showErrorMessage(
+                `Could not open "${alias}" — it may not be authenticated yet. Use 🔑 to log in first. (${err?.message ?? err})`
+            );
+        }
+    }
+
+    /** Opens VS Code's own diff editor for a working-tree file against HEAD — reuses the built-in diff view instead of the Dashboard's custom renderer, since this is a quick "what did I actually change" look, not a file-selection UI. */
+    private async _viewWorkingFileDiff(relPath: string): Promise<void> {
+        const root = this._gitHelper.getWorkspaceRoot();
+        const fileUri = vscode.Uri.file(`${root}/${relPath}`);
+        const headUri = fileUri.with({ scheme: "git", query: JSON.stringify({ path: fileUri.fsPath, ref: "HEAD" }) });
+        await vscode.commands.executeCommand("vscode.diff", headUri, fileUri, `${relPath} (Working Tree)`);
     }
 
     private async _viewBranchInBrowser(): Promise<void> {
@@ -165,8 +239,32 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         await vscode.env.openExternal(vscode.Uri.parse(url));
     }
 
+    /**
+     * Compares the branch this refresh() call is about to render against the one the LAST
+     * refresh() rendered — if they differ, and the difference wasn't caused by one of this
+     * extension's own checkouts (GitHelper.isRecentSelfInitiatedSwitch), sets a one-shot
+     * notice so the panel visibly acknowledges "something changed outside your clicks" instead
+     * of just silently redrawing as if nothing happened. Runs on every refresh() regardless of
+     * what triggered it (live GitWatcher event, the fallback timer, or a manual click) — that's
+     * fine, self-initiated switches from our own commands land here too and are filtered out
+     * the same way.
+     */
+    private _noteBranchForExternalSwitchDetection(branch: string | null): void {
+        const previous = this._lastKnownBranch;
+        this._lastKnownBranch = branch ?? undefined;
+        if (!branch || !previous || previous === branch) { return; }
+        if (this._gitHelper.isRecentSelfInitiatedSwitch()) { return; }
+        const storyId = extractStoryId(branch);
+        this._externalSwitchNotice = `🔀 Switched to ${storyId || branch} — branch changed outside the extension.`;
+    }
+
     public async refresh() {
         if (!this._view) { return; }
+
+        // Set from whichever branch below actually runs, then reported once in `finally` —
+        // one call site regardless of which early return fires, so the status bar item can
+        // never end up out of sync with what the sidebar itself just decided to show.
+        let statusInfo: StoryStatusInfo | null = null;
 
         try {
             // Basic setup must be validated (and, the first time, explicitly confirmed)
@@ -198,6 +296,7 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
             }
 
             const branch    = await this._gitHelper.currentBranch();
+            this._noteBranchForExternalSwitchDetection(branch);
             const storyId   = extractStoryId(branch);
             const progress  = await this._getStoryProgress(storyId);
             const onFeature = isFeatureBranch(branch);
@@ -218,11 +317,35 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
             this._view.webview.html = this._getWebviewHtml(
                 branch ?? "No branch", storyId, progress, behind, coverageBlockedEnv, repoOverride, signoffPassed, localChanges
             );
+            this._externalSwitchNotice = undefined; // one-shot: shown once, then cleared
+
+            if (branch && storyId) {
+                statusInfo = { branch, storyId, stage: this._deriveCurrentStage(progress) };
+            }
         } catch (err) {
             this._view.webview.html = this._getErrorHtml(String(err));
         } finally {
             this._scheduleAutoRefresh();
+            this._onStatusChange?.(statusInfo);
         }
+    }
+
+    /**
+     * Same "which stage is next" rule `_getWebviewHtml` uses for its pipeline's current-step
+     * highlight (dev while unpublished, otherwise the first promotable env not yet actually
+     * deployed) — duplicated here in miniature rather than threaded out of that method, since
+     * this only needs a small summary, not the full render. Null once every stage is deployed
+     * (terminal/complete state). Carries orgAlias/isProd too so the status bar item's "which
+     * org am I about to touch" cue never has to re-derive the environment on its own.
+     */
+    private _deriveCurrentStage(progress: Record<string, string>): CurrentStageInfo | null {
+        const publishEnv = getPublishEnvironment();
+        if (progress[publishEnv.name] !== "published") {
+            return { label: publishEnv.label, orgAlias: publishEnv.orgAlias, isProd: publishEnv.isProd };
+        }
+        const nextEnv = getPromotableEnvironments().find(e => progress[e.name] !== "deployed");
+        if (!nextEnv) { return null; }
+        return { label: nextEnv.label, orgAlias: nextEnv.orgAlias, isProd: nextEnv.isProd };
     }
 
     private async _getStoryProgress(storyId: string): Promise<Record<string, string>> {
@@ -250,12 +373,12 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
      * uncommitted that isn't staged (unstaged edits, new untracked files); it's auto-preserved
      * via stash (not lost or silently swept in) if "Commit to Dev" is used while it's present.
      */
-    private async _getLocalChangesSummary(): Promise<{ staged: number; other: number } | null> {
+    private async _getLocalChangesSummary(): Promise<{ staged: string[]; other: string[] } | null> {
         const stagedList = await this._gitHelper.stagedFiles();
         const allChanged = await this._gitHelper.workingTreeFiles();
         const stagedSet  = new Set(stagedList);
-        const other = allChanged.filter(f => !stagedSet.has(f)).length;
-        return (stagedList.length === 0 && other === 0) ? null : { staged: stagedList.length, other };
+        const other = allChanged.filter(f => !stagedSet.has(f));
+        return (stagedList.length === 0 && other.length === 0) ? null : { staged: stagedList, other };
     }
 
     /** Prompts for an optional sign-off note, records it, and logs it to the audit trail. */
@@ -287,6 +410,31 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         this.refresh();
     }
 
+    // Per-stage guidance for the ℹ️ tooltip in the Story Progress pipeline — explains how
+    // that stage's mechanics work and what the next concrete action is, given its current
+    // state. Kept as plain text (goes into an HTML `title` attribute, not markup).
+    private _stageInfoText(envCfg: ResolvedEnvironment, state: string | undefined, isPublishStage: boolean): string {
+        if (isPublishStage) {
+            switch (state) {
+                case "published":
+                    return `Published directly to ${envCfg.label} via Commit & Publish — no PR, no review. Next: promote it to the following stage.`;
+                default:
+                    return `The first stage — click "Commit & Publish" to push your changes straight to ${envCfg.label} (no PR, no review gate).`;
+            }
+        }
+        const roleNote = envCfg.requiredRole ? ` (requires the "${envCfg.requiredRole}" role to promote)` : "";
+        switch (state) {
+            case "open":
+                return `A promotion PR into ${envCfg.label} is open. Get it reviewed and merged — nothing deploys automatically when it merges.`;
+            case "merged":
+                return `The PR merged, but that alone doesn't deploy anything. Click 🚀 to run a real deploy against the ${envCfg.label} org.`;
+            case "deployed":
+                return `Deployed to ${envCfg.label}. This stage is complete for this story.`;
+            default:
+                return `Not started for this story. Click ⬆ to pick a story and promote it to ${envCfg.label} — this opens a PR${roleNote}; merging it is the review gate, deploying is a separate step after that.`;
+        }
+    }
+
     private _getWebviewHtml(
         branch: string,
         storyId: string,
@@ -295,7 +443,7 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         coverageBlockedEnv: string | null,
         repoOverride: { workspace: string; repoSlug: string } | undefined,
         signoffPassed: Record<string, boolean>,
-        localChanges: { staged: number; other: number } | null
+        localChanges: { staged: string[]; other: string[] } | null
     ): string {
         const onFeatureBranch = isFeatureBranch(branch);
         const baseBranch      = getBaseBranch();
@@ -303,51 +451,14 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         const publishEnv      = getPublishEnvironment();
         const promotable      = getPromotableEnvironments();
 
-        const envRows = environments.map((envCfg) => {
-            const state = progress[envCfg.name];
-            let icon = "⏳", label = "Pending", color = "var(--vscode-descriptionForeground)";
-            if (state === "published")  { icon = "✅"; label = "Published";              color = "var(--vscode-charts-green)"; }
-            else if (state === "deployed") { icon = "✅"; label = "Deployed";            color = "var(--vscode-charts-green)"; }
-            else if (state === "merged")   { icon = "⚡"; label = "Merged — ready to deploy"; color = "var(--vscode-charts-yellow)"; }
-            else if (state === "open")  { icon = "🔄"; label = "Validated / In PR";       color = "var(--vscode-charts-blue)"; }
-
-            // DEV already shows "Published", but there's more local work since then —
-            // flag it explicitly instead of letting the badge quietly go stale.
-            let newChangesNote = "";
-            if (envCfg.name === publishEnv.name && state === "published" && localChanges) {
-                icon = "⚠️"; color = "var(--vscode-charts-yellow)";
-                const total = localChanges.staged + localChanges.other;
-                label = `Published — ${total} new change(s) pending`;
-                const parts: string[] = [];
-                if (localChanges.staged > 0) { parts.push(`${localChanges.staged} staged`); }
-                if (localChanges.other > 0)  { parts.push(`${localChanges.other} in progress (preserved automatically)`); }
-                newChangesNote = `<div class="env-note">${parts.join(", ")} — <a href="#" onclick="send('commitAndPush')">commit to dev</a></div>`;
-            }
-
-            let actionLink = "";
-            if (state === "open" && storyId) {
-                const promotionBranch = promoBranchName(storyId, envCfg.name, "promote");
-                const prUrl = this._bbClient.buildPrUrl(promotionBranch, envCfg.branch, repoOverride);
-                if (prUrl) {
-                    actionLink = `<a href="${prUrl}" title="Open PR in browser to review it" style="margin-right:2px">🔗</a>`;
-                }
-            } else if (state === "merged") {
-                actionLink = `<a href="#" title="Deploy this to ${envCfg.label} now" style="margin-right:2px" onclick="send('openDeploymentDashboard', '${envCfg.name}')">🚀</a>`;
-            }
-
-            return `<div class="env-row">
-                <span class="env-icon">${icon}</span>
-                ${actionLink}
-                <span class="env-name">${envCfg.label}</span>
-                <span class="env-status" style="color:${color}">${label}</span>
-            </div>${newChangesNote}`;
-        }).join("");
-
         const devPublished = progress[publishEnv.name] === "published";
         // "merged" (PR landed on the env branch) is deliberately NOT treated as done here —
         // only an actual `sf project deploy` (tracked as "deployed") completes a stage, so
         // promotion to the NEXT env can't get ahead of what's really live in this one.
         const nextEnv       = promotable.find(e => progress[e.name] !== "deployed");
+        // Which single stage the pipeline view highlights as "you are here" — dev itself
+        // while it's still unpublished, otherwise whichever stage isn't deployed yet.
+        const currentEnvName = !devPublished ? publishEnv.name : (nextEnv?.name ?? null);
 
         let actionButton = "";
         if (onFeatureBranch) {
@@ -388,12 +499,125 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
             }
         }
 
-        const commitBtn = onFeatureBranch && devPublished
-            ? `<button class="btn btn-secondary" onclick="send('commitAndPush')">&#x2601; Commit &amp; Publish more changes</button>`
+        // Vertical pipeline: every stage connected in one glance — done stages filled green,
+        // the CURRENT stage highlighted with its action attached directly to it (not a
+        // separate floating card you have to match up yourself), everything after it
+        // visibly still ahead. Replaces the old flat list of rows + a disconnected button.
+        //
+        // Only ONE stage is ever actionable at a time — currentIdx is that stage's position.
+        // A later stage can still carry real git history (e.g. a promotion PR merged into it
+        // before this hard gate existed, or before an earlier stage's deploy), but showing
+        // that raw state with live ⬆/🚀 buttons attached would look like two stages are
+        // simultaneously "ready to go" when the server would actually reject acting on the
+        // later one — see GitHelper.checkPrevEnvDeployed. Every stage after currentIdx is
+        // rendered as locked/waiting instead, regardless of its own underlying state.
+        const currentIdx = currentEnvName ? environments.findIndex(e => e.name === currentEnvName) : -1;
+
+        const envRows = environments.map((envCfg, idx) => {
+            const state = progress[envCfg.name];
+            const isCurrent = envCfg.name === currentEnvName;
+            const isDone = !isCurrent && (state === "published" || state === "deployed");
+            const isFuture = currentIdx !== -1 && idx > currentIdx;
+            const stepClass = isCurrent ? "current" : isFuture ? "future" : isDone ? "done" : "pending";
+            const isPublishStage = envCfg.name === publishEnv.name;
+
+            let icon = "○", label = "Pending";
+            let infoText: string;
+            let stageLinks = "";
+            let newChangesNote = "";
+
+            if (isFuture) {
+                // Deliberately ignores the row's own raw state (progress[envCfg.name]) — see
+                // the comment above envRows. currentIdx is always valid here (>= 0) since
+                // isFuture only true when currentIdx !== -1.
+                icon = "🔒";
+                label = `Waiting for ${environments[currentIdx].label}`;
+                infoText = `${envCfg.label} can't be promoted or deployed until ${environments[currentIdx].label} is actually deployed — one stage at a time keeps the pipeline linear.`;
+            } else {
+                if (state === "published")  { icon = "✅"; label = "Published"; }
+                else if (state === "deployed") { icon = "✅"; label = "Deployed"; }
+                else if (state === "merged")   { icon = "⚡"; label = "Merged — ready to deploy"; }
+                else if (state === "open")  { icon = "🔄"; label = "Validated / In PR"; }
+                if (isDone) { icon = "✓"; }
+
+                // DEV already shows "Published", but there's more local work since then —
+                // flag it explicitly instead of letting the badge quietly go stale. The count
+                // alone used to be the whole story; now it expands to the actual file paths
+                // so you don't have to leave the panel to see what's about to be published.
+                if (isPublishStage && state === "published" && localChanges) {
+                    icon = isCurrent ? icon : "⚠️";
+                    const total = localChanges.staged.length + localChanges.other.length;
+                    label = `Published — ${total} new change(s) pending`;
+                    const parts: string[] = [];
+                    if (localChanges.staged.length > 0) { parts.push(`${localChanges.staged.length} staged`); }
+                    if (localChanges.other.length > 0)  { parts.push(`${localChanges.other.length} in progress (preserved automatically)`); }
+                    const fileRow = (f: string, badge: string) =>
+                        `<li><span class="file-path" onclick="viewWorkingDiff('${escapeHtml(f)}')" title="View diff">${escapeHtml(f)}</span><span class="story-badge">${badge}</span></li>`;
+                    const fileList = [
+                        ...localChanges.staged.map(f => fileRow(f, "staged")),
+                        ...localChanges.other.map(f => fileRow(f, "unstaged")),
+                    ].join("");
+                    newChangesNote = `<div class="env-note">${parts.join(", ")} — <a href="#" onclick="send('commitAndPush')">commit to dev</a>
+                      <details class="changed-files"><summary>Show files</summary><ul class="files">${fileList}</ul></details>
+                    </div>`;
+                }
+
+                // Promote/Deploy are available directly per stage, not just as generic toolbar
+                // buttons — pick a story for THIS stage's picker, or jump to THIS stage's tab
+                // in the Dashboard, without needing your current story to be at that exact
+                // point. Dev has no promotion step, but IS independently deployable (to the
+                // Dev org itself) once something's published — that used to have no visible
+                // trigger at all, which is exactly what made it unclear whether dev had ever
+                // really been deployed vs. just pushed to the branch.
+                if (isPublishStage) {
+                    if (state === "published") {
+                        stageLinks += ` <a href="#" title="Open Dev in the Deployment Dashboard to deploy it to the Dev org" onclick="send('openDeploymentDashboard', '${envCfg.name}')">🚀</a>`;
+                    }
+                } else {
+                    stageLinks += ` <a href="#" title="Promote a story to ${envCfg.label} (pick from a list — opens a PR)" onclick="send('promote', '${envCfg.name}')">⬆</a>`;
+                    stageLinks += ` <a href="#" title="Open ${envCfg.label} in the Deployment Dashboard" onclick="send('openDeploymentDashboard', '${envCfg.name}')">🚀</a>`;
+                }
+                if (state === "open" && storyId) {
+                    const promotionBranch = promoBranchName(storyId, envCfg.name, "promote");
+                    const prUrl = this._bbClient.buildPrUrl(promotionBranch, envCfg.branch, repoOverride);
+                    if (prUrl) { stageLinks += ` <a href="${prUrl}" title="Open this story's PR in browser to review it">🔗</a>`; }
+                }
+
+                infoText = this._stageInfoText(envCfg, state, isPublishStage);
+            }
+
+            const infoIcon = ` <a href="#" class="pinfo" title="${escapeHtml(infoText)}" onclick="return false;">ℹ️</a>`;
+            const cta = isCurrent && actionButton ? `<div class="pcta">${actionButton}</div>` : "";
+            const isLast = idx === environments.length - 1;
+
+            return `<div class="pstep ${stepClass}">
+              <div class="pdot-col"><div class="pdot">${icon}</div>${isLast ? "" : `<div class="pline"></div>`}</div>
+              <div class="pbody">
+                <div class="pname">${envCfg.label}<span class="pstatus">${label}</span>${infoIcon}${stageLinks}</div>
+                ${newChangesNote}
+                ${cta}
+              </div>
+            </div>`;
+        }).join("");
+
+        const moreActions = onFeatureBranch
+            ? `<div class="more-actions">
+                 ${devPublished ? `<a href="#" onclick="send('commitAndPush')">☁ Publish more changes</a> · ` : ""}
+                 <a href="#" onclick="send('syncBranch')">🔄 Sync with ${baseBranch}</a>
+               </div>`
             : "";
 
         const syncWarning = behindCount > 5
             ? `<div class="warning">&#x26A0; ${behindCount} commits behind ${baseBranch} &mdash; <a href="#" onclick="send('syncBranch')">sync now</a></div>`
+            : "";
+
+        // One-shot acknowledgment that something changed HEAD outside this panel's own
+        // buttons (Source Control, terminal, another tool) — see
+        // _noteBranchForExternalSwitchDetection. Read directly off instance state (same
+        // pattern DeploymentDashboardPanel uses for _lastOutcome) rather than threaded through
+        // as a parameter, since it's cleared by refresh() right after this render.
+        const externalSwitchNotice = this._externalSwitchNotice
+            ? `<div class="info">${escapeHtml(this._externalSwitchNotice)}</div>`
             : "";
 
         const ticketUrl = buildTicketUrl(storyId);
@@ -411,12 +635,36 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
   .card      { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 10px; margin-bottom: 8px; }
   .branch    { font-size: 11px; color: var(--vscode-textPreformat-foreground); word-break: break-all; }
   .story-id  { font-size: 18px; font-weight: bold; margin: 4px 0; }
-  .env-row   { display: flex; align-items: center; gap: 6px; padding: 3px 0; border-bottom: 1px solid var(--vscode-panel-border); }
-  .env-icon  { width: 16px; }
-  .env-name  { font-weight: 600; width: 48px; }
-  .env-status{ font-size: 11px; }
-  .env-note  { font-size: 10px; color: var(--vscode-descriptionForeground); margin: -2px 0 4px 22px; }
+  .pipeline  { margin: 2px 0 0; }
+  .pstep     { display: flex; gap: 8px; }
+  .pdot-col  { display: flex; flex-direction: column; align-items: center; width: 18px; flex-shrink: 0; }
+  .pdot      { width: 16px; height: 16px; min-height: 16px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 9px; line-height: 1; border: 2px solid var(--vscode-panel-border); background: var(--vscode-editor-background); color: var(--vscode-descriptionForeground); flex-shrink: 0; box-sizing: border-box; }
+  .pstep.done .pdot    { background: var(--vscode-charts-green); border-color: var(--vscode-charts-green); color: var(--vscode-editor-background); }
+  .pstep.current .pdot { border-color: var(--vscode-charts-blue); box-shadow: 0 0 0 2px var(--vscode-charts-blue); background: var(--vscode-editor-background); }
+  .pline     { width: 2px; flex: 1; min-height: 8px; background: var(--vscode-panel-border); margin: 2px 0; }
+  .pstep.done .pline { background: var(--vscode-charts-green); }
+  .pbody     { flex: 1; min-width: 0; padding-bottom: 12px; }
+  .pname     { font-weight: 600; font-size: 12px; }
+  .pstatus   { font-size: 11px; font-weight: normal; color: var(--vscode-descriptionForeground); margin-left: 6px; }
+  .pstep.current .pstatus { color: var(--vscode-charts-blue); }
+  .pstep.current .pname   { color: var(--vscode-charts-blue); }
+  .pstep.future  { opacity: 0.55; }
+  .pcta      { margin-top: 6px; }
+  .pcta .btn { margin: 3px 0; }
+  .pname a   { text-decoration: none; margin-left: 4px; font-size: 11px; }
+  .pname a.pinfo { cursor: help; }
+  .env-note  { font-size: 10px; color: var(--vscode-descriptionForeground); margin: 2px 0 0; }
   .env-note a{ color: var(--vscode-textLink-foreground); }
+  .changed-files { margin-top: 2px; }
+  .changed-files summary { cursor: pointer; font-size: 10px; color: var(--vscode-textLink-foreground); }
+  .changed-files ul.files { list-style: none; margin: 3px 0 0; padding: 0; font-size: 10px; }
+  .changed-files ul.files li { display: flex; align-items: center; gap: 5px; padding: 1px 0; }
+  .changed-files .file-path { cursor: pointer; word-break: break-all; color: var(--vscode-foreground); }
+  .changed-files .file-path:hover { color: var(--vscode-textLink-foreground); text-decoration: underline; }
+  .changed-files .story-badge { font-size: 9px; color: var(--vscode-descriptionForeground); border: 1px solid var(--vscode-panel-border); border-radius: 3px; padding: 0 4px; flex-shrink: 0; }
+  .more-actions { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--vscode-panel-border); }
+  .more-actions a { color: var(--vscode-textLink-foreground); text-decoration: none; }
+  .more-actions a:hover { text-decoration: underline; }
   .btn       { display: block; width: 100%; padding: 7px; margin: 4px 0; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
   .btn-primary   { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
   .btn-primary:hover { background: var(--vscode-button-hoverBackground); }
@@ -433,10 +681,13 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
   .tbtn:hover{ background: var(--vscode-button-secondaryHoverBackground); }
   .countdown { opacity: 0.65; font-size: 9.5px; }
   .version-footer { text-align: center; font-size: 10px; opacity: 0.5; margin-top: 10px; color: var(--vscode-descriptionForeground); }
+  ${BUSY_BAR_CSS}
 </style>
 </head>
 <body>
+${BUSY_BAR_HTML}
 
+${externalSwitchNotice}
 ${syncWarning}
 
 <div class="card">
@@ -446,7 +697,6 @@ ${syncWarning}
 
 <div class="toolbar">
   <a class="tbtn" href="#" onclick="send('changeRole')" title="Change Role">👤 ${escapeHtml(this._userRole)}</a>
-  <a class="tbtn" href="#" onclick="send('openDeploymentDashboard')" title="Deployment Dashboard">🚀 Deploy</a>
   <a class="tbtn" href="#" onclick="send('viewAuditLog')" title="Audit Trail">📋 Audit</a>
   <a class="tbtn" href="#" onclick="send('openSetupCheck')" title="Setup Check">⚙ Setup</a>
   <a class="tbtn" href="#" onclick="send('refresh')" title="Refresh"><span>↻ Refresh</span> <span id="countdown" class="countdown"></span></a>
@@ -461,13 +711,8 @@ ${onFeatureBranch ? `
 <div class="card">
   <b>Story Progress</b>
   <div class="divider"></div>
-  ${envRows}
-</div>
-
-<div class="card">
-  ${actionButton}
-  ${commitBtn}
-  <button class="btn btn-secondary" onclick="send('syncBranch')">&#x1F504; Sync with ${baseBranch}</button>
+  <div class="pipeline">${envRows}</div>
+  ${moreActions}
 </div>
 ` : ""}
 
@@ -475,10 +720,12 @@ ${onFeatureBranch ? `
 
 <script>
   const vscode = acquireVsCodeApi();
-  function send(cmd, env) { vscode.postMessage({ command: cmd, env: env }); }
+  ${BUSY_BAR_JS}
+  function send(cmd, env) { showBusy(); vscode.postMessage({ command: cmd, env: env }); }
+  function viewWorkingDiff(path) { vscode.postMessage({ command: 'viewWorkingFileDiff', path: path }); }
 
   (function () {
-    let secondsLeft = ${AUTO_REFRESH_SECONDS};
+    let secondsLeft = ${getFallbackRefreshSeconds()};
     const el = document.getElementById('countdown');
     function tick() {
       if (!el) { return; }
@@ -526,7 +773,7 @@ ${onFeatureBranch ? `
 <html>
 <head>
 <style>
-  body     { font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; color: var(--vscode-foreground); }
+  body     { font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; color: var(--vscode-foreground); padding-bottom: 4px; }
   h2       { font-size: 13px; margin: 4px 0 10px; }
   .warning { background: var(--vscode-inputValidation-warningBackground); border: 1px solid var(--vscode-inputValidation-warningBorder); color: var(--vscode-foreground); border-radius: 4px; padding: 6px 8px; font-size: 11px; margin-bottom: 10px; }
   .info    { background: var(--vscode-textBlockQuote-background); border: 1px solid var(--vscode-textBlockQuote-border); color: var(--vscode-foreground); border-radius: 4px; padding: 6px 8px; font-size: 11px; margin-bottom: 10px; }
@@ -549,24 +796,42 @@ ${onFeatureBranch ? `
   .org-btn { font-size: 11px; padding: 3px 6px; border: 1px solid var(--vscode-panel-border); border-radius: 3px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); cursor: pointer; }
   .org-readonly { flex: 1; font-size: 11px; color: var(--vscode-foreground); }
   .muted-note { font-size: 10px; color: var(--vscode-descriptionForeground); margin-top: 2px; }
+  .action-bar { position: sticky; bottom: -8px; margin: 12px -8px -8px; padding: 8px; background: var(--vscode-sideBar-background, var(--vscode-editor-background)); border-top: 1px solid var(--vscode-panel-border); }
+  .action-bar .btn { margin: 4px 0; }
+  ${BUSY_BAR_CSS}
 </style>
 </head>
 <body>
+${BUSY_BAR_HTML}
 <h2>⚙ Setup Check ${forced ? `<a href="#" style="float:right;font-size:11px;font-weight:normal" onclick="send('closeSetupCheck')">✕ Close</a>` : ""}</h2>
 ${statusBanner}
 ${rows}
+<div class="action-bar">
 ${canConfirm ? `<button class="btn btn-primary" onclick="send('confirmSetup')">✅ Confirm Setup &amp; Continue</button>` : ""}
 <button class="btn btn-secondary" onclick="send('recheckSetup')">🔄 Re-check Setup</button>
+${forced ? `<button class="btn btn-secondary" onclick="send('closeSetupCheck')">✕ Close (keep current setup)</button>` : ""}
+</div>
 <script>
   const vscode = acquireVsCodeApi();
-  function send(cmd, env) { vscode.postMessage({ command: cmd, env: env }); }
+  ${BUSY_BAR_JS}
+  function send(cmd, env) { showBusy(); vscode.postMessage({ command: cmd, env: env }); }
   function saveOrgAlias(key) {
+    showBusy();
     const el = document.getElementById('alias-' + key);
     vscode.postMessage({ command: 'saveOrgAlias', key: key, value: el ? el.value : '' });
   }
   function loginOrg(key) {
+    showBusy();
     const el = document.getElementById('alias-' + key);
     vscode.postMessage({ command: 'loginOrg', key: key, value: el ? el.value : '' });
+  }
+  function openOrg(alias) {
+    if (!alias) { return; }
+    vscode.postMessage({ command: 'openOrg', value: alias });
+  }
+  function openOrgFromInput(key) {
+    const el = document.getElementById('alias-' + key);
+    openOrg(el ? el.value : '');
   }
 </script>
 </body>
@@ -587,12 +852,17 @@ ${canConfirm ? `<button class="btn btn-primary" onclick="send('confirmSetup')">�
                 : `<span class="org-status" title="Not authenticated — needs (re)login">❌</span>`;
         };
 
+        const openBtn = (alias: string) => alias
+            ? `<button class="org-btn" title="Open ${escapeHtml(alias)} in the browser" onclick="openOrg('${escapeHtml(alias)}')">🌐</button>`
+            : "";
+
         if (!editable) {
             const rows = slots.map(s => `
   <div class="org-row">
     ${statusGlyph(s)}
     <span class="org-label">${escapeHtml(s.label)}</span>
     <span class="org-readonly">${escapeHtml(s.alias) || "(not set)"}</span>
+    ${openBtn(s.alias)}
   </div>`).join("");
             return `<div class="org-manager">${rows}<div class="muted-note">Ask an Admin to configure org aliases.</div></div>`;
         }
@@ -604,6 +874,7 @@ ${canConfirm ? `<button class="btn btn-primary" onclick="send('confirmSetup')">�
     <input type="text" id="alias-${s.key}" value="${escapeHtml(s.alias)}" placeholder="org alias / username">
     <button class="org-btn" title="Save" onclick="saveOrgAlias('${s.key}')">💾</button>
     <button class="org-btn" title="Authenticate if needed (opens a terminal only when not already connected)" onclick="loginOrg('${s.key}')">🔑</button>
+    <button class="org-btn" title="Open in the browser" onclick="openOrgFromInput('${s.key}')">🌐</button>
   </div>`).join("");
 
         return `<div class="org-manager">${rows}</div>`;
@@ -650,9 +921,11 @@ ${canConfirm ? `<button class="btn btn-primary" onclick="send('confirmSetup')">�
   .btn     { display: block; width: 100%; padding: 7px; margin: 4px 0; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
   .btn-primary   { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
   .btn-secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+  ${BUSY_BAR_CSS}
 </style>
 </head>
 <body>
+${BUSY_BAR_HTML}
 <div class="card">
   <div class="title">⚙ Paused — resolve conflicts</div>
   <div class="branch">${pending.storyId} → ${target}</div>
@@ -667,7 +940,8 @@ ${canConfirm ? `<button class="btn btn-primary" onclick="send('confirmSetup')">�
 </div>
 <script>
   const vscode = acquireVsCodeApi();
-  function send(cmd) { vscode.postMessage({ command: cmd }); }
+  ${BUSY_BAR_JS}
+  function send(cmd) { showBusy(); vscode.postMessage({ command: cmd }); }
 </script>
 </body>
 </html>`;

@@ -2,6 +2,8 @@
 
 A quick, practical guide to using the **Salesforce DevOps** VS Code extension: how to start a story, publish your work, check code coverage, and promote/deploy through the environments.
 
+This is the single doc for **how to use the extension** — everything else that used to be spread across separate setup/CI guides now lives here. Two docs stay separate on purpose, since they're a different kind of reference (categorization rules and history for this project's 2GP packaging decisions, not usage instructions): `2GP_MASTER_DOCUMENTATION.md` and `UNMANAGED_PACKAGE_GUIDE.md`.
+
 ---
 
 ## 1. What this extension does
@@ -22,9 +24,11 @@ You can't skip ahead: promoting into an environment, or Validating/Deploying aga
 
 1. **Install the extension**: Extensions view → `…` menu → **Install from VSIX…** → pick `sf-devops-<version>.vsix`.
 2. **Open the panel**: click the **Salesforce DevOps** icon in the Activity Bar (left side). You'll see:
-   - **Current Story** — your main workspace, action buttons, and the toolbar (👤 role, 🚀 Deploy, 📋 Audit, ⚙ Setup, ↻ Refresh).
+   - **Current Story** — your main workspace: a connected pipeline view (Dev → each promotable environment) with the current stage's action attached directly to it, plus a toolbar (👤 role, 📋 Audit, ⚙ Setup, ↻ Refresh).
    - **Code Coverage** — Apex test coverage gate.
    - **Environments** — read-only status per environment.
+   - A **status bar item** (bottom-left) always shows the active story and its next stage, leading with which **org** that actually means (🟢 non-prod, 🚨 Production with a red background) — an instant sanity check before you touch anything. Click it to jump straight to the Current Story panel.
+   - The panel updates **live**: switching branches, staging a file, or committing anywhere (Source Control, terminal, another tool) refreshes it immediately, not just on the periodic timer or your own clicks. When a branch changes outside the extension's own buttons, a one-time "🔀 Switched to..." note calls it out so it's never a silent surprise. `sfDevops.fallbackRefreshSeconds` (default `180`) is just the safety-net poll for anything live updates can't see (e.g. a PR merging on the remote) — you rarely need to touch it.
 3. **Prerequisites** (already true for most devs):
    - Salesforce CLI (`sf`) installed, and your **dev org authenticated** (you retrieve from it via Org Browser).
    - Git access to the Bitbucket repo (SSH recommended).
@@ -32,19 +36,23 @@ You can't skip ahead: promoting into an environment, or Validating/Deploying aga
 5. **Settings** (`Ctrl+,` → search `sfDevops`). Everything below is configurable per project — nothing in this guide's examples (dev/QA/UAT/Prod, Lead/Admin, Jira) is hardcoded:
    | Setting | What it's for | Default |
    |---|---|---|
-   | `sfDevops.environments` | The full pipeline, in order. First entry publishes straight from the feature branch (no PR); every later entry is a promote/validate/deploy stage. Each entry can set its own branch name, icon, `requiredRole`, `coverageGate`, `signoffGate`, `deployTestLevel` (default `RunRelevantTests`), and `isProd` (only needed if your prod environment isn't literally named `"prod"` — it decides which stage never allows auto-deploy). | `dev` → `qa` (coverage-gated) → `uat` (requires `Lead`) → `prod` (branch `main`, requires `Admin`) |
+   | `sfDevops.environments` | The full pipeline, in order. First entry publishes straight from the feature branch (no PR); every later entry is a promote/validate/deploy stage. Each entry can set its own branch name, icon, `requiredRole`, `coverageGate`, `signoffGate`, `deployTestLevel` (default `RunLocalTests`; the Deployment Dashboard's per-deploy "Tests to run" picker overrides this per action with auto-detected or all tests), and `isProd` (only needed if your prod environment isn't literally named `"prod"` — it decides which stage never allows auto-deploy). | `dev` → `qa` (coverage-gated) → `uat` (requires `Lead`) → `prod` (branch `main`, requires `Admin`) |
    | `sfDevops.roles` | The role names your team uses. | `["Developer", "Lead", "Admin"]` |
    | `sfDevops.role` | **Legacy bootstrap default only.** The role actually in effect is managed via **Change Role** in the toolbar (password-gated for Lead/Admin) — see [§2b](#2b-roles-developer--lead--admin). | `Developer` |
    | `sfDevops.gitProvider` / `sfDevops.repoWorkspace` / `sfDevops.repoSlug` | Git host and repo identity for pull requests and pipeline status. `bitbucket` and `github` are implemented. | `bitbucket` |
    | `sfDevops.ticketSystem` / `sfDevops.ticketKeyPattern` / `sfDevops.ticketBaseUrl` | Which ticketing system story IDs come from, the regex used to recognize one, and an optional link-out. Set `ticketSystem` to `none` to skip format validation entirely. | `jira` |
    | `sfDevops.featureBranchTemplate` / `sfDevops.promotionBranchTemplate` / `sfDevops.validateBranchTemplate` | Branch naming templates (`{storyId}`, `{env}` placeholders). | `feature/{storyId}`, `promotion/{storyId}-to-{env}`, `validate/{storyId}-to-{env}` |
-   | `sfDevops.devOrgAlias` | Dev-org alias for the coverage check. Empty = your default `sf` org. | `""` |
+   | `sfDevops.devOrgAlias` | **Legacy fallback only.** Org aliases (Dev/QA/UAT/Prod) are managed through **⚙ Setup Check**'s inline rows now — stored per-machine, not in this setting, specifically so they survive branch switches and extension updates (see the note at the end of this step). This setting still works as a fallback if the Setup Check value has never been saved. | `""` |
    | `sfDevops.coverageThreshold` / `sfDevops.coverageTimeoutSeconds` | Minimum Apex coverage % and how long to wait for tests, before promoting into a coverage-gated environment. | `75`, `600` |
    | `sfDevops.baseBranch` | Branch new feature branches are cut from. | `main` |
    | `sfDevops.sourceRootFolder` | Salesforce DX package directory name, used to detect Apex/metadata changes. | `force-app` |
    | `sfDevops.staleBranchThreshold` | Commits behind base branch before a sync warning appears. | `5` |
+   | `sfDevops.fallbackRefreshSeconds` | Safety-net poll interval for the Current Story panel — real branch/file changes are already picked up live. | `180` |
+   | `sfDevops.enableVerboseLogs` | When on, the **Salesforce DevOps** output channel also prints every raw `git`/`sf` command this extension runs (full arguments), the raw CLI JSON response, and job/deploy/test-run IDs with their status — on top of the normal plain-language narration. Off by default; noisy, meant for troubleshooting. | `false` |
 
    The rest of this guide uses the **default** dev → QA → UAT → Prod pipeline and the `Developer`/`Lead`/`Admin` roles as a running example — substitute your own configured environment and role names throughout.
+
+   > **Org aliases live per-machine, not in this settings file.** They're saved via the 💾 button next to each row in Setup Check, stored outside `.vscode/settings.json` entirely. That's deliberate: `.vscode/settings.json` is git-tracked, so a value saved there would appear to "vanish" every time a different branch (with a different committed copy of that file) gets checked out — which happens constantly as a normal side effect of Promote/Deploy. Saving through Setup Check avoids that.
 
 ---
 
@@ -111,7 +119,7 @@ Two gates are **opt-in per environment**, off by default:
 The actual org deploy (QA/UAT/Prod) always happens via the **Deployment Dashboard**
 (`🚀 Deploy` in the Current Story panel toolbar) — it runs `sf project deploy` directly
 using your own authenticated `sf` CLI session. **No external CI/CD pipeline is used or
-required** — see `CI_CD_SETUP_GUIDE.md` for the one-time org-authentication setup.
+required** — see [§7c](#7c-why-theres-no-external-cicd-and-what-if-you-want-one-anyway) for the one-time org-authentication setup.
 
 ---
 
@@ -167,7 +175,7 @@ In the **Code Coverage** panel:
 Once the story is published to `dev`, two buttons appear for the **next environment** (QA, then UAT, then Prod):
 
 - **✔ Validate Only** — runs a **check-only** Salesforce validation against the target org. **Nothing is deployed.** Available to everyone. Use it to confirm the deployment will succeed before you promote.
-- **🚀 Promote** — opens a picker: **pick which story to promote to that environment** from every story currently sitting on the previous stage, ready to move on. This works no matter which branch you currently have checked out — you don't need to switch to a story's branch just to promote it. Pick one → it creates the promotion branch and opens a **pre-filled Pull Request** page in your browser. The PR merge is the **code-review gate** — merging doesn't deploy anything by itself. If nothing's eligible yet, it tells you that instead of showing an empty list.
+- **🚀 Promote** — opens a picker: **pick which story to promote to that environment** from every story currently sitting on the previous stage, ready to move on. This works no matter which branch you currently have checked out — you don't need to switch to a story's branch just to promote it. Pick one → a confirmation shows exactly which files are about to be promoted before anything is pushed. Confirm → it creates the promotion branch and opens a **pre-filled Pull Request** page in your browser. The PR merge is the **code-review gate** — merging doesn't deploy anything by itself. If nothing's eligible yet, it tells you that instead of showing an empty list (or an empty picker, if there's genuinely no new work).
 
 Once the PR merges, the panel notices and switches that environment's action button to **🚀 Deploy — {env}**, which takes you straight to that environment's tab in the **Deployment Dashboard** — see [§7b](#7b-the-deployment-dashboard) for what to do there. You can't promote *past* an environment until it's actually deployed there, not just merged, and Promote/Validate/Deploy all refuse to run out of order — this is enforced every time, not just a hidden button.
 
@@ -199,6 +207,20 @@ Each tab is split into two halves:
 If nothing's been deployed through this dashboard for an environment yet, you'll see **Validate ALL** / **Deploy ALL** buttons instead of a tree (there's nothing to individually pick yet) — same Validate-before-Deploy rule applies.
 
 Every Validate/Deploy prints what it's doing to the **"Salesforce DevOps" output channel** (`View → Output`, pick it from the dropdown) — which files it's picking up, and whether it passed or failed — so you're never just watching a spinner.
+
+---
+
+## 7c. Why there's no external CI/CD (and what if you want one anyway)
+
+| Extension action | What actually happens |
+|---|---|
+| **Commit & Publish** | Cherry-picks straight onto `dev` — no PR, no deploy. |
+| **Validate Only / Promote** | Pushes a promotion/validate branch, opens a PR. The PR merge is a **code-review gate**, not a deploy trigger. |
+| **Deployment Dashboard** (any time after a merge) | Runs the real `sf project deploy start`/`validate` against that environment's org, using the org alias you've authenticated in Setup Check. |
+
+No Bitbucket Pipelines, GitHub Actions, Connected App, or JWT service-account auth is used or required anywhere in this flow — every deploy runs from your own machine, using your own already-authenticated `sf` CLI session. Setup is exactly [§2](#2-first-time-setup) plus authenticating each org once via **⚙ Setup Check**'s 🔑 button — no CI secrets to manage.
+
+Nothing stops you from *also* wiring up a real external CI/CD pipeline that watches these branches and deploys independently — the extension just doesn't require or assume one. That would need a Connected App + JWT Bearer Flow per org for the CI runner (a non-interactive auth flow, distinct from the `sf org login web` you use day-to-day) and a pipeline config in your repo watching `qa`/`uat`/`main`. That's a separate undertaking this extension doesn't help with — worth discussing before committing to it.
 
 ---
 
@@ -310,6 +332,8 @@ If **Commit & Publish**, **Promote**, or **Validate Only** fails with a git erro
 ## 15. 2GP Packaging Release Gate (new in v3.0.1)
 
 A **second, occasional track**, separate from the sprint flow above — it's how a batch of UAT-approved work gets turned into a 2GP package beta. It doesn't touch `sfDevops.environments`/`baseBranch` at all; everything it needs lives under `sfDevops.packaging` and two related settings.
+
+For *why* a given file goes to `managedTarget` vs `unmanagedTarget` — the actual categorization rules and the history behind them — see `docs/UNMANAGED_PACKAGE_GUIDE.md` (condensed, rule-by-rule) and `docs/2GP_MASTER_DOCUMENTATION.md` (the full narrative, authoritative if the two ever disagree). This section only covers running the command.
 
 **Command:** `Ctrl+Shift+P` → **SF-Ops: Prepare 2GP Beta from UAT**
 

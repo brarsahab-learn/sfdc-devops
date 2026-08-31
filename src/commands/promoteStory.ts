@@ -134,9 +134,34 @@ export async function runPromotion(
     }
 
     const promoBranch = promoBranchName(storyId, targetEnv, mode);
+
+    // Promote (not Validate — lower-stakes, re-runnable, and this is the same asymmetry
+    // Deploy's own confirm already has) gets an explicit "here's exactly what's about to go
+    // out" file list before anything real happens — previously the only place this list
+    // existed was the Output Channel log, written by beginPromotion AFTER the cherry-pick
+    // had already started. A story with nothing new to promote (already fully promoted) is
+    // caught here too, instead of running the branch-creation dance into a doomed no-op.
+    let filesBlock = "";
+    if (mode === "promote") {
+        let preview: { path: string; change: string }[];
+        try {
+            preview = await gitHelper.previewStoryFiles(storyId);
+        } catch (err) {
+            vscode.window.showErrorMessage(String(err));
+            return;
+        }
+        if (preview.length === 0) {
+            vscode.window.showInformationMessage(`${storyId} has nothing new to promote to ${envUpper} — it's already up to date there.`);
+            return;
+        }
+        const shown = preview.slice(0, 8).map(f => `  ${f.change === "added" ? "+" : f.change === "deleted" ? "-" : "~"} ${f.path}`);
+        const more = preview.length > 8 ? `\n  ...and ${preview.length - 8} more` : "";
+        filesBlock = `\n\n${preview.length} file(s):\n${shown.join("\n")}${more}`;
+    }
+
     const confirmMsg = mode === "validate"
         ? `Validate ${storyId} against ${envUpper}?\n\nThis will:\n• Create ${promoBranch} from ${targetBranch}\n• Add your story's changes\n• Run a check-only validation against ${envUpper} (no deploy)`
-        : `Promote & Deploy ${storyId} to ${envUpper}?\n\nThis will:\n• Create ${promoBranch} from ${targetBranch}\n• Add your story's changes\n• Open a PR (promotion → ${targetBranch})\n• Deploy to ${envUpper} once you approve & merge the PR`;
+        : `Promote & Deploy ${storyId} to ${envUpper}?\n\nThis will:\n• Create ${promoBranch} from ${targetBranch}\n• Add your story's changes\n• Open a PR (promotion → ${targetBranch})\n• Deploy to ${envUpper} once you approve & merge the PR${filesBlock}`;
     const confirmLabel = mode === "validate" ? `Yes, validate against ${envUpper}` : "Yes, Promote & Deploy";
     const confirm = await vscode.window.showWarningMessage(confirmMsg, { modal: true }, confirmLabel);
     if (!confirm) { return; }

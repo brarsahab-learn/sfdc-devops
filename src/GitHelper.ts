@@ -14,7 +14,7 @@ import {
 } from "./config";
 import { IGitProviderClient } from "./GitProviderClient";
 import { AuditEntry, renderAuditHtml } from "./AuditLog";
-import { log, revealLog } from "./Log";
+import { log, revealLog, debugLog } from "./Log";
 import { storyIdFromMessage } from "./DeploymentPlanner";
 
 const execFileAsync = promisify(execFile);
@@ -46,11 +46,21 @@ export class GitHelper {
     }
 
     private async git(args: string[]): Promise<string> {
-        const { stdout } = await execFileAsync("git", args, {
-            cwd:      this.workspaceRoot,
-            timeout:  30_000,
-        });
-        return stdout.trim();
+        debugLog(`$ git ${args.join(" ")}`);
+        // Any git command that can move HEAD marks a short self-initiated window — see
+        // isRecentSelfInitiatedSwitch(). One choke point instead of tagging every call site
+        // individually, so it can never miss a checkout this class adds later.
+        if (args[0] === "checkout" || args[0] === "switch") { this._markSelfInitiatedSwitch(); }
+        try {
+            const { stdout } = await execFileAsync("git", args, {
+                cwd:      this.workspaceRoot,
+                timeout:  30_000,
+            });
+            return stdout.trim();
+        } catch (e: any) {
+            debugLog(`$ git ${args.join(" ")} — failed: ${e?.message ?? e}`);
+            throw e;
+        }
     }
 
     // ── Branch operations ─────────────────────────────────────────────────────
@@ -240,18 +250,33 @@ export class GitHelper {
     /**
      * Like `commitLogBetween`, but takes raw refs with no `origin/` prefixing — needed
      * when `fromRef` is a bare commit SHA (e.g. a recorded last-deployed marker) rather
-     * than a branch name.
+     * than a branch name. `--no-merges` for the same reason as `commitLogBetween`: a
+     * "Merge pull request #N from .../promotion/{storyId}-to-{env}" commit has no file
+     * list of its own (`git show --name-status` on a merge commit returns nothing without
+     * `-m`) and doesn't match the story-id convention either — left in, it shows up as a
+     * spurious zero-file "story" group in the Deployment Dashboard's tree/filter and as an
+     * extra phantom commit in checkPrevEnvDeployed's "N commit(s) pending" count, on top of
+     * the real squashed commit that already carries the actual files for that promotion.
      */
     async commitLogBetweenRaw(
         fromRef: string,
         toRef:   string
     ): Promise<{ hash: string; date: string; author: string; message: string }[]> {
         const format = "%H%x1f%aI%x1f%an%x1f%s";
-        const raw = await this.git(["log", `${fromRef}..${toRef}`, `--pretty=format:${format}`]);
+        const raw = await this.git(["log", "--no-merges", `${fromRef}..${toRef}`, `--pretty=format:${format}`]);
         return raw.split("\n").filter(Boolean).map(line => {
             const [hash, date, author, message] = line.split("\x1f");
             return { hash, date, author, message };
         });
+    }
+
+    /** Merge-base commit of two remote branches — used as the "since it was cut" baseline for an environment that's never been deployed from this dashboard, so its pending tree isn't just "everything, unselectably." */
+    async mergeBase(branchA: string, branchB: string): Promise<string | null> {
+        try {
+            return await this.git(["merge-base", `origin/${branchA}`, `origin/${branchB}`]);
+        } catch {
+            return null;
+        }
     }
 
     /** Files touched by a single commit, in the same shape as `diffNameStatusBetween`. */
@@ -315,6 +340,39 @@ export class GitHelper {
 
     private async deleteSquashRef(storyId: string): Promise<void> {
         await this.git(["branch", "-D", `sf-devops-squash/${storyId}`]).catch(() => {});
+    }
+
+    /**
+     * Read-only preview of exactly what a promotion would carry — the same
+     * merge-base(base, featureBranch)..featureBranch range `storySquashRef` squashes into a
+     * commit, but as a plain diff with no checkout, no commit, no mutation of any kind. Lets
+     * the Promote flow show "here's what's about to go out" and get an explicit confirm
+     * BEFORE `beginPromotion` does anything real, instead of the file list only surfacing in
+     * the log after the cherry-pick has already started.
+     */
+    async previewStoryFiles(storyId: string): Promise<{ path: string; change: "added" | "modified" | "deleted" }[]> {
+        const featureBranch = featureBranchName(storyId);
+        const base = getBaseBranch();
+
+        if (!(await this.remoteBranchExists(featureBranch))) {
+            throw new Error(
+                `Feature branch origin/${featureBranch} not found. Expected it to be pushed under this name ` +
+                `for story "${storyId}" — check that the branch was created via Start New Story and pushed.`
+            );
+        }
+
+        const mb = await this.mergeBase(base, featureBranch);
+        if (!mb) { return []; }
+
+        const raw = await this.git(["diff", "--name-status", mb, `origin/${featureBranch}`]);
+        return raw.split("\n").filter(Boolean).map(line => {
+            const tab = line.indexOf("\t");
+            const code = line.slice(0, tab).trim();
+            const filePath = line.slice(tab + 1).trim();
+            const change: "added" | "modified" | "deleted" =
+                code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : "modified";
+            return { path: filePath, change };
+        });
     }
 
     /** Validate Only pushes the validate-branch template; Promote & Deploy pushes the promotion-branch template (the PR source). */
@@ -608,17 +666,38 @@ export class GitHelper {
         }
     }
 
+    /**
+     * True only if coverage passed AND the feature branch hasn't moved since — updating
+     * either the class under test or the test class itself pushes a new commit, which
+     * changes this SHA and correctly re-locks the gate instead of trusting a stale pass.
+     * Records from before this check existed have no featureBranchSha — treated as still
+     * passed rather than retroactively re-locking every story that already cleared the gate.
+     */
     async isCoveragePassed(storyId: string): Promise<boolean> {
         const data = await this.readCoverage();
-        return Boolean(data[storyId]?.passed);
+        const entry = data[storyId];
+        if (!entry?.passed) { return false; }
+        if (!entry.featureBranchSha) { return true; }
+        const currentSha = await this.remoteHeadSha(featureBranchName(storyId));
+        return currentSha === entry.featureBranchSha;
     }
 
     async recordCoveragePassed(storyId: string, details: object): Promise<void> {
         const data = await this.readCoverage();
-        data[storyId] = { passed: true, ...details, date: new Date().toISOString() };
+        const featureBranchSha = await this.remoteHeadSha(featureBranchName(storyId));
+        data[storyId] = { passed: true, featureBranchSha, ...details, date: new Date().toISOString() };
         try {
             fs.writeFileSync(await this.coverageFilePath(), JSON.stringify(data, null, 2));
         } catch { /* best effort */ }
+    }
+
+    /** True if coverage passed before but the feature branch has since moved (a class or its test class changed) — used only to tell the Coverage panel "you already passed this once" apart from "you've never run it." */
+    async isCoverageStale(storyId: string): Promise<boolean> {
+        const data = await this.readCoverage();
+        const entry = data[storyId];
+        if (!entry?.passed || !entry.featureBranchSha) { return false; }
+        const currentSha = await this.remoteHeadSha(featureBranchName(storyId));
+        return currentSha !== entry.featureBranchSha;
     }
 
     // ── Manual sign-off gate marker (per story + environment, in the git dir) ───
@@ -870,6 +949,24 @@ export class GitHelper {
         }
     }
 
+    /**
+     * Marks the next few seconds as "this extension just moved HEAD itself" — set
+     * automatically by `git()` on every `checkout`/`switch` call (Resume/Start Story, Promote,
+     * Sync, the Dashboard's temporary checkout-and-restore all go through it), so GitWatcher's
+     * "you switched branches externally" banner only fires for a branch change it DIDN'T
+     * cause. A time window rather than a wrapped-callback flag: the built-in git extension's
+     * own state refresh (what actually fires the change event GitWatcher listens to) lags
+     * slightly behind our raw `git` CLI calls, so "still true a moment after the call returns"
+     * is the part that actually matters here.
+     */
+    private _selfInitiatedUntil = 0;
+    private _markSelfInitiatedSwitch(): void {
+        this._selfInitiatedUntil = Date.now() + 3000;
+    }
+    isRecentSelfInitiatedSwitch(): boolean {
+        return Date.now() < this._selfInitiatedUntil;
+    }
+
     /** Raw `origin` remote URL, or null if there isn't one. */
     async getRemoteUrl(): Promise<string | null> {
         try {
@@ -1007,12 +1104,19 @@ export class GitHelper {
     }
 
     /** Commit log between two remote refs — used to build release notes' "work items" section. */
+    /**
+     * Commits on `toRef` not on `fromRef` — used for release notes and the promote
+     * picker's story detection, both of which scan commit MESSAGES for a story/ticket id.
+     * `--no-merges` excludes auto-generated "Merge pull request #N from ..." commits: with
+     * a loose ticketKeyPattern (e.g. "\S.*", matching almost anything), those would
+     * otherwise get scanned too and produce a bogus "story" that's really just git noise.
+     */
     async commitLogBetween(
         fromRef: string,
         toRef:   string
     ): Promise<{ hash: string; date: string; author: string; message: string }[]> {
         const format = "%H%x1f%aI%x1f%an%x1f%s";
-        const raw = await this.git(["log", `origin/${fromRef}..origin/${toRef}`, `--pretty=format:${format}`]);
+        const raw = await this.git(["log", "--no-merges", `origin/${fromRef}..origin/${toRef}`, `--pretty=format:${format}`]);
         return raw.split("\n").filter(Boolean).map(line => {
             const [hash, date, author, message] = line.split("\x1f");
             return { hash: hash.slice(0, 7), date, author, message };

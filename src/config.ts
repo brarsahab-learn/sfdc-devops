@@ -255,8 +255,17 @@ export function getEnvironments(): ResolvedEnvironment[] {
             }
             return true;
         })
-        .map((entry): ResolvedEnvironment => {
+        .map((entry, index): ResolvedEnvironment => {
             const e: EnvironmentSetting = typeof entry === "string" ? { name: entry } : entry;
+            const isProd = e.isProd ?? (e.name === "prod");
+            // The legacy sfDevops.devOrgAlias/prodOrgAlias settings were never part of an
+            // environments[] entry itself — they're separate top-level settings keyed by
+            // ROLE (first/publish stage, or whichever stage is Prod), not by name. Fall
+            // back to them here so someone who configured an alias that way before this
+            // machine-local store existed doesn't see it silently disappear.
+            const legacyAlias = index === 0 ? cfg().get<string>("devOrgAlias")
+                : isProd ? cfg().get<string>("prodOrgAlias")
+                : undefined;
             return {
                 name:         e.name,
                 label:        e.label || e.name.toUpperCase(),
@@ -265,9 +274,16 @@ export function getEnvironments(): ResolvedEnvironment[] {
                 requiredRole: e.requiredRole,
                 coverageGate: e.coverageGate ?? false,
                 signoffGate:  e.signoffGate ?? false,
-                orgAlias:     readOrgAliases()[e.name] || e.orgAlias,
-                deployTestLevel: e.deployTestLevel || "RunRelevantTests",
-                isProd:       e.isProd ?? (e.name === "prod"),
+                orgAlias:     readOrgAliases()[e.name] || e.orgAlias || legacyAlias,
+                // "RunRelevantTests" used to be the undocumented default here, but it isn't
+                // one of the four values `sf project deploy` actually accepts (NoTestRun,
+                // RunSpecifiedTests, RunLocalTests, RunAllTestsInOrg) — any deploy relying on
+                // this default would fail outright. RunLocalTests (the CLI's own default when
+                // no --test-level is passed) is the safe fallback; the Deployment Dashboard's
+                // per-deploy "Tests to run" picker (auto-detected specified tests vs. run all)
+                // is what actually delivers "run just the relevant tests" now.
+                deployTestLevel: e.deployTestLevel || "RunLocalTests",
+                isProd,
             };
         });
 }
@@ -315,8 +331,19 @@ export function getCoverageSourceOrg(): { alias: string; label: string } {
 }
 
 /** True if `role` is allowed to run Promote & Deploy into `env` (Validate Only is always allowed). */
+/**
+ * True if `role` ranks at or above `env.requiredRole` in sfDevops.roles' configured order
+ * (index 0 = lowest) — NOT a strict name match. sfDevops.roles is documented as a ranked
+ * hierarchy ("Lead: everything Developer can, plus... Admin: everything") — a strict
+ * equality check would mean Admin literally can't promote into a "Lead"-gated stage
+ * (only someone whose role is exactly "Lead" could), which contradicts that model.
+ */
 export function canPromote(role: string, env: ResolvedEnvironment): boolean {
-    return !env.requiredRole || role === env.requiredRole;
+    if (!env.requiredRole) { return true; }
+    const roles = getRoles();
+    const requiredRank = roles.indexOf(env.requiredRole);
+    if (requiredRank === -1) { return role === env.requiredRole; } // requiredRole isn't even in sfDevops.roles — fall back to an exact match
+    return roles.indexOf(role) >= requiredRank;
 }
 
 /** Message shown once a story has been merged into the last configured environment. */
@@ -367,13 +394,14 @@ export function getProdOrgAlias(): string {
     return readOrgAliases().prod || cfg().get<string>("prodOrgAlias") || "";
 }
 
-// ── Org alias management (dev / qa / uat / prod) ─────────────────────────────
-// A fixed, canonical set of 4 slots — matches this extension's default pipeline
-// shape (DEFAULT_ENVIRONMENTS below) plus the reference-only prod setting. Used by
-// the Setup Check panel to let a user view/edit/authenticate each one directly,
-// without hand-editing settings.json.
+// ── Org alias management (one slot per configured environment) ──────────────
+// Used by the Setup Check panel to let a user view/edit/authenticate each org alias
+// directly, without hand-editing settings.json. Deliberately NOT a fixed 4-slot
+// dev/qa/uat/prod list — it mirrors whatever sfDevops.environments actually has, so a
+// smaller pipeline (e.g. just dev + qa) gets exactly 2 slots instead of being forced to
+// fill in (and authenticate) UAT/Prod aliases for stages that don't even exist.
 
-export type OrgAliasSlotKey = "dev" | "qa" | "uat" | "prod";
+export type OrgAliasSlotKey = string;
 
 export interface OrgAliasSlot {
     key:   OrgAliasSlotKey;
@@ -382,19 +410,9 @@ export interface OrgAliasSlot {
 }
 
 export function getOrgAliasSlots(): OrgAliasSlot[] {
-    const qa  = findEnvironment("qa");
-    const uat = findEnvironment("uat");
-    const prodEnv = findEnvironment("prod");
-
-    return [
-        { key: "dev",  label: "Dev",              alias: getDevOrgAlias() },
-        { key: "qa",   label: qa?.label  ?? "QA",  alias: qa?.orgAlias  ?? "" },
-        { key: "uat",  label: uat?.label ?? "UAT", alias: uat?.orgAlias ?? "" },
-        // prodEnv only exists if a team has deliberately opted "prod" into the real
-        // promotion pipeline (sfDevops.environments) — otherwise this stays the
-        // reference-only prodOrgAlias setting, same as everywhere else in the extension.
-        { key: "prod", label: prodEnv?.label ?? "Prod", alias: prodEnv?.orgAlias || getProdOrgAlias() },
-    ];
+    // getEnvironments() already resolves each entry's orgAlias (machine-local store,
+    // falling back to whatever's in settings) — just map it straight through.
+    return getEnvironments().map(e => ({ key: e.name, label: e.label, alias: e.orgAlias ?? "" }));
 }
 
 /**
@@ -416,10 +434,20 @@ export function getDeployTimeoutSeconds(): number {
     return cfg().get<number>("deployTimeoutSeconds") ?? 900;
 }
 
+/** When true, the "Salesforce DevOps" output channel also prints every raw git/sf command this extension runs, the full CLI arguments, and job/deploy IDs with their live status — on top of the normal plain-language narration. Off by default: noisy, meant for debugging. */
+export function isVerboseLogsEnabled(): boolean {
+    return cfg().get<boolean>("enableVerboseLogs") ?? false;
+}
+
 // ── Misc ──────────────────────────────────────────────────────────────────────
 
 export function getStaleBranchThreshold(): number {
     return cfg().get<number>("staleBranchThreshold") ?? 5;
+}
+
+/** How often the Story Progress sidebar re-checks state on its own, in seconds — a safety net only: real branch/file changes are picked up live via GitWatcher, this just covers whatever that can't see (e.g. remote-side changes like a merged PR). */
+export function getFallbackRefreshSeconds(): number {
+    return cfg().get<number>("fallbackRefreshSeconds") ?? 180;
 }
 
 // ── 2GP Packaging Release Gate (Dedicated 2GP Release Gate, triggered from the UAT

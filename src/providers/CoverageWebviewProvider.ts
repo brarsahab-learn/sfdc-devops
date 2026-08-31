@@ -46,6 +46,7 @@ export class CoverageWebviewProvider implements vscode.WebviewViewProvider {
             const storyId = isFeatureBranch(branch) ? extractStoryId(branch) : "";
             const apex    = storyId ? await this._gitHelper.featureApexClasses(storyId) : [];
             const passed  = storyId ? await this._gitHelper.isCoveragePassed(storyId) : false;
+            const stale   = storyId && !passed ? await this._gitHelper.isCoverageStale(storyId) : false;
 
             this._missingTests = [];
             if (apex.length > 0 && !this._lastTests && branch) {
@@ -54,7 +55,7 @@ export class CoverageWebviewProvider implements vscode.WebviewViewProvider {
                 this._missingTests = missing;
             }
 
-            this._view.webview.html = this._html(branch ?? "", storyId, apex, passed);
+            this._view.webview.html = this._html(branch ?? "", storyId, apex, passed, stale);
         } catch (err) {
             this._view.webview.html = `<body style="padding:8px;color:var(--vscode-errorForeground)">Error: ${String(err)}</body>`;
         }
@@ -141,7 +142,7 @@ export class CoverageWebviewProvider implements vscode.WebviewViewProvider {
         );
     }
 
-    private _html(branch: string, storyId: string, apex: string[], passed: boolean): string {
+    private _html(branch: string, storyId: string, apex: string[], passed: boolean, stale: boolean = false): string {
         const onFeature = isFeatureBranch(branch);
         const gateEnv   = getCoverageGateEnvironment();
         const gateLabel = gateEnv?.label ?? "the gated environment";
@@ -156,6 +157,8 @@ export class CoverageWebviewProvider implements vscode.WebviewViewProvider {
             const { threshold, sourceOrgLabel, sourceOrgAlias } = coverageSettings();
             const gate = passed
                 ? `<div class="ok">✅ Coverage gate passed — ${gateLabel} promotion unlocked.</div>`
+                : stale
+                ? `<div class="warn">⚠ Coverage passed before, but a class or test class changed since then — re-run before promoting to ${gateLabel}.</div>`
                 : `<div class="warn">⚠ Coverage gate not passed yet. Run the related tests (≥ ${threshold}%) in ${sourceOrgLabel}${sourceOrgAlias ? ` (${sourceOrgAlias})` : ""} — where these changes currently are.</div>`;
 
             const resultBlock = this._lastResult && this._lastResult.ran && !this._lastResult.error

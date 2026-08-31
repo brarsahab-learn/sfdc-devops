@@ -10,6 +10,7 @@
 
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { debugLog } from "./Log";
 
 const execFileAsync = promisify(execFile);
 
@@ -19,12 +20,22 @@ export interface SfExecOptions {
     maxBuffer?: number;
 }
 
-export function execSf(args: string[], options: SfExecOptions) {
-    if (process.platform === "darwin") {
-        const shell = process.env.SHELL || "/bin/zsh";
-        return execFileAsync(shell, ["-lc", 'exec "$@"', "sf-cli", "sf", ...args], options);
+export async function execSf(args: string[], options: SfExecOptions) {
+    debugLog(`$ sf ${args.join(" ")}`);
+    const run = process.platform === "darwin"
+        ? (() => {
+            const shell = process.env.SHELL || "/bin/zsh";
+            return execFileAsync(shell, ["-lc", 'exec "$@"', "sf-cli", "sf", ...args], options);
+        })()
+        : execFileAsync("sf", args, { ...options, shell: true }); // shell:true resolves sf.cmd via PATH on Windows
+    try {
+        const result = await run;
+        debugLog(`$ sf ${args[0] ?? ""}${args[1] ? " " + args[1] : ""} — done (${result.stdout.length} byte(s) stdout)`);
+        return result;
+    } catch (e: any) {
+        debugLog(`$ sf ${args[0] ?? ""}${args[1] ? " " + args[1] : ""} — failed: ${e?.message ?? e}`);
+        throw e;
     }
-    return execFileAsync("sf", args, { ...options, shell: true }); // shell:true resolves sf.cmd via PATH on Windows
 }
 
 /**

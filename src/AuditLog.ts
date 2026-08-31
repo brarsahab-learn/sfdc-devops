@@ -38,7 +38,9 @@ export interface AuditDetails {
     deployId?:          string;
     note?:              string;
     selectionMode?:     "all" | "stories" | "files";
-    componentFailures?: { type: string; name: string; problem: string }[];
+    componentFailures?: { type: string; name: string; problem: string; fileName?: string; lineNumber?: number; columnNumber?: number }[];
+    testLevel?:         string;
+    tests?:             string[];
     testResults?: {
         passed:      boolean;
         threshold:   number;
@@ -212,7 +214,10 @@ function renderEntry(entry: AuditEntry): string {
     if (d.note)            { rows.push(row("Note", escapeHtml(d.note))); }
     if (d.selectionMode)   { rows.push(row("Selection", d.selectionMode)); }
     if (d.componentFailures?.length) {
-        rows.push(row("Component failures", d.componentFailures.map(f => `${escapeHtml(f.type)}:${escapeHtml(f.name)} — ${escapeHtml(f.problem)}`).join("; ")));
+        rows.push(row("Component failures", d.componentFailures.map(f => {
+            const locator = f.fileName ? `${f.fileName}${Number.isFinite(f.lineNumber) ? `:${f.lineNumber}` : ""}` : f.name;
+            return `${escapeHtml(f.type)}:${escapeHtml(locator)} — ${escapeHtml(f.problem)}`;
+        }).join("; ")));
     }
 
     if (d.testResults) {

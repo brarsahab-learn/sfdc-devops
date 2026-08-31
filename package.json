@@ -2,7 +2,7 @@
 	"name": "sf-devops",
 	"displayName": "Salesforce DevOps",
 	"description": "Generic, settings-driven Salesforce CI/CD workflow — 1-click story management, pipeline status, environment promotion, and an org-per-branch 2GP packaging release gate",
-	"version": "3.7.5",
+	"version": "3.15.0",
 	"publisher": "your-company",
 	"engines": {
 		"vscode": "^1.85.0"
@@ -347,6 +347,11 @@
 					"description": "Timeout (in seconds) for a single Deployment Dashboard deploy/validate run.",
 					"default": 900
 				},
+				"sfDevops.enableVerboseLogs": {
+					"type": "boolean",
+					"description": "When enabled, the 'Salesforce DevOps' output channel also prints every raw git/sf command this extension runs (with its full arguments), the raw CLI JSON response, and job/deploy/test-run IDs with their status — on top of the normal plain-language narration. Off by default: much noisier, meant for troubleshooting.",
+					"default": false
+				},
 				"sfDevops.sourceRootFolder": {
 					"type": "string",
 					"description": "Salesforce DX source root folder name (the package directory in sfdx-project.json), used to detect Apex classes and other metadata changes.",
@@ -356,6 +361,11 @@
 					"type": "number",
 					"description": "Number of commits behind the base branch before the extension warns you to sync.",
 					"default": 5
+				},
+				"sfDevops.fallbackRefreshSeconds": {
+					"type": "number",
+					"description": "How often the Story Progress sidebar re-checks state on its own, in seconds. This is only a safety net — real branch switches and file changes are already picked up live, so you rarely need to lower this; raise it (or set it very high) to reduce background work.",
+					"default": 180
 				},
 				"sfDevops.packageBaselineBranch": {
 					"type": "string",
