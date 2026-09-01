@@ -172,26 +172,38 @@ In the **Code Coverage** panel:
 
 ## 7. Promoting to the next environment
 
-Once the story is published to `dev`, two buttons appear for the **next environment** (QA, then UAT, then Prod):
+Promoting into any environment past `dev` always runs the same four-stage sequence, and
+**validation is mandatory** — there's no way to open a PR from a promotion branch that
+hasn't actually passed a real check-only deploy against the target org:
 
-- **✔ Validate Only** — runs a **check-only** Salesforce validation against the target org. **Nothing is deployed.** Available to everyone. Use it to confirm the deployment will succeed before you promote.
-- **🚀 Promote** — opens a picker: **pick which story to promote to that environment** from every story currently sitting on the previous stage, ready to move on. This works no matter which branch you currently have checked out — you don't need to switch to a story's branch just to promote it. Pick one → a confirmation shows exactly which files are about to be promoted before anything is pushed. Confirm → it creates the promotion branch and opens a **pre-filled Pull Request** page in your browser. The PR merge is the **code-review gate** — merging doesn't deploy anything by itself. If nothing's eligible yet, it tells you that instead of showing an empty list (or an empty picker, if there's genuinely no new work).
+1. **Create Promo Branch** — cut from the target environment's branch, your story's changes cherry-picked on top.
+2. **Validate** — a real `sf project deploy --dry-run`-style check against the target org. Nothing deploys; this just proves the promotion branch's content is actually safe to merge.
+3. **Merge to Target Branch** — only unlocked once step 2 has genuinely passed for this exact branch content. Opens a **pre-filled Pull Request** page; merging it in your browser is the **code-review gate**.
+4. **Deploy & Clean Up** — a separate, explicit step once the PR is merged (see [§7b](#7b-the-deployment-dashboard)). After a successful deploy, you're asked once whether to delete the now-finished promotion branch.
 
-Once the PR merges, the panel notices and switches that environment's action button to **🚀 Deploy — {env}**, which takes you straight to that environment's tab in the **Deployment Dashboard** — see [§7b](#7b-the-deployment-dashboard) for what to do there. You can't promote *past* an environment until it's actually deployed there, not just merged, and Promote/Validate/Deploy all refuse to run out of order — this is enforced every time, not just a hidden button.
+Two buttons drive this, both going through the same mandatory sequence underneath:
+
+- **✔ Validate Only** — runs steps 1–2 and stops there. Use it to confirm the deploy will succeed before committing to opening a PR. Available to everyone.
+- **🚀 Promote** — opens a picker of every story currently sitting on the previous stage, ready to move on (works regardless of which branch you have checked out). Pick one → a confirmation shows exactly which files are about to be promoted → runs steps 1–2–3 in one guided sequence, showing live progress at each stage. If validation fails, the promotion branch is left in place for you to fix and re-run — it never opens a PR from a failing branch. If you've already validated this exact branch (via "Validate Only," or a previous "Promote" click), clicking Promote again skips straight to opening the PR instead of re-validating.
+
+Once the PR merges, the panel notices, pulls the merge onto your local copy of the target branch, and switches that environment's action button to **🚀 Deploy — {env}**, which takes you straight to that environment's tab in the **Deployment Dashboard**. You can't promote *past* an environment until it's actually deployed there, not just merged, and every stage refuses to run out of order — this is enforced every time, not just a hidden button.
 
 Notes:
 - **QA**: both buttons available to everyone.
 - **UAT**: **Promote** requires the **Lead** role; **Validate Only** is available to everyone.
 - **Prod**: **Promote** requires the **Admin** role; **Validate Only** is available to everyone. Prod's branch is `main` by default — the same branch feature branches are cut from.
 - Only your **story's changes** are validated/deployed — never anyone else's.
+- Any promotion branch you already have checked out locally is kept in sync automatically (a fast-forward-only background sync) — it won't look stale just because someone else pushed to it.
 
 ---
 
 ## 7b. The Deployment Dashboard
 
-Open it from **🚀 Deploy** in the toolbar, or by clicking the **🚀** link next to an environment in Story Progress once it's "Merged — ready to deploy" (which jumps straight to the right tab). One tab per environment (QA, UAT, Prod).
+Open it by clicking the **🚀** link next to any environment in Story Progress (Dev included). Each click opens the dashboard **bound to exactly that environment** — click 🚀 for QA and you see QA, click 🚀 for Dev and you see Dev, nothing else. If it's already open, it rebinds in place to whichever environment you just clicked, rather than opening a second window; a successful deploy's "→ next stage" link does the same.
 
-Each tab is split into two halves:
+Every environment's pane says explicitly, right at the top: everything shown reflects `origin/{branch}` — the last commit actually **pushed** there. Your local working tree (uncommitted edits, unpushed local commits) is never part of what gets validated or deployed, on any tab — the same is true of Promote/Validate for a story, whose confirmation names the exact `origin/feature/{storyId}` it's using and warns you by name if you're sitting on that branch with uncommitted changes that won't be included.
+
+The bound environment's view is split into two halves:
 
 - **Left — what's pending.** Every file merged into that environment's branch but not yet deployed, grouped by Salesforce metadata type (Apex Classes, Custom Objects, LWC, …) with a checkbox per file. A dropdown above it filters the list down to one story/PR at a time. **Select all** / **Select none** links (respect the current filter) let you grab everything in one click, or narrow to a single story and cherry-pick just that.
 - **Right — the diff.** Click any file's name (not its checkbox) to see a color-coded, line-by-line diff of what's about to change, right there — no need to leave the panel.
@@ -257,6 +269,8 @@ The operation continues from where it stopped.
 | **QA / UAT / Prod — Merged — ready to deploy** | The PR merged into that environment's branch, but no deploy has caught up to it yet — click the 🚀 link (or the action button below) to open the Deployment Dashboard for that environment. |
 | **QA / UAT / Prod — Deployed** | A real `sf project deploy` (run from the Deployment Dashboard) has actually caught up to this story's merged commit. |
 | **Pending** | Not started for that environment yet. |
+
+Under each stage's badge, a row of small icons tracks the sub-stages that actually make it up — 🟢 done, ⚪ pending. Dev shows **Published** / **Deployed**; QA, UAT, and Prod show **Validated** / **Promoted (PR opened)** / **Deployed**. Click **Timeline** underneath to expand the exact date and time each one happened (or "Pending" if it hasn't yet) — pulled from the real validation record and the audit trail, not just the current state.
 
 ---
 

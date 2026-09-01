@@ -18,7 +18,7 @@ import { AuditTrailPanel } from "./providers/AuditTrailPanel";
 import {
     findEnvironment, canPromote, getRoles,
     isFeatureBranch, getBaseBranch, getStaleBranchThreshold, getPromotableEnvironments,
-    initOrgAliasStore,
+    initOrgAliasStore, getPublishEnvironment,
 } from "./config";
 import { getEffectiveRole, canAccessConfig, promptChangeRole } from "./RoleManager";
 import { initLog } from "./Log";
@@ -230,8 +230,21 @@ export async function activate(context: vscode.ExtensionContext) {
             AuditTrailPanel.createOrShow(gitHelper);
         }),
 
-        vscode.commands.registerCommand("sfDevops.openDeploymentDashboard", (focusEnv?: string) => {
-            DeploymentDashboardPanel.createOrShow(gitHelper, context, focusEnv);
+        // The dashboard is always bound to exactly one environment (see
+        // DeploymentDashboardPanel._boundEnv) — every real call site already passes one, but
+        // this command is also Command-Palette-visible, so prompt when it isn't given one
+        // rather than silently guessing, same pattern sfDevops.promoteEnv already uses.
+        vscode.commands.registerCommand("sfDevops.openDeploymentDashboard", async (env?: string) => {
+            if (!env) {
+                const choices = [getPublishEnvironment(), ...getPromotableEnvironments()];
+                const picked = await vscode.window.showQuickPick(
+                    choices.map(e => ({ label: e.label, env: e.name })),
+                    { title: "Open the Deployment Dashboard for which environment?", placeHolder: "Select an environment" }
+                );
+                if (!picked) { return; }
+                env = picked.env;
+            }
+            DeploymentDashboardPanel.createOrShow(gitHelper, context, env);
         }),
 
         vscode.commands.registerCommand("sfDevops.changeRole", async () => {
@@ -263,6 +276,11 @@ export async function activate(context: vscode.ExtensionContext) {
 async function checkPendingDeployments(gitHelper: GitHelper): Promise<void> {
     try {
         await gitHelper.fetchRemote();
+        // Ground rule: a promotion branch you're already tracking locally should never look
+        // stale just because it moved on the remote — keep every one of them current every
+        // tick, independent of whether anything merged this round.
+        await gitHelper.syncLocalPromotionBranches();
+
         for (const env of getPromotableEnvironments()) {
             const currentSha = await gitHelper.remoteHeadSha(env.branch);
             if (!currentSha) { continue; }
@@ -276,6 +294,10 @@ async function checkPendingDeployments(gitHelper: GitHelper): Promise<void> {
             }
 
             await gitHelper.setLastNotifiedSha(env.name, currentSha);
+            // Ground rule: once a promotion merges, pull it on local too — a fast-forward-only
+            // sync of the env branch's own local ref, never touching anything you haven't
+            // committed (see GitHelper.syncLocalRef).
+            await gitHelper.syncLocalRef(env.branch);
             const choice = await vscode.window.showInformationMessage(
                 `📦 New merge on ${env.label} — pending deployment.`,
                 "Open Dashboard"

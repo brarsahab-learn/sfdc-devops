@@ -61,7 +61,10 @@ export async function resumePromotion(
                     return;
                 }
 
-                // promotion
+                // promotion — the just-resolved cherry-pick is local-only until pushed;
+                // finalizeAndFinish itself only validates+PRs whatever's already on origin.
+                progress.report({ message: "① Pushing promotion branch..." });
+                await gitHelper.finalizePromotion(op.storyId, op.targetEnv!, op.mode ?? "promote");
                 await finalizeAndFinish(
                     bbClient, gitHelper, op.storyId, op.targetEnv!, op.mode ?? "promote", storyProvider, progress
                 );

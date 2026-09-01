@@ -14,7 +14,7 @@ import {
 import { runSetupChecks, SetupCheckItem } from "../SetupCheck";
 import { getEffectiveRole, canAccessConfig } from "../RoleManager";
 import { isOrgConnected, execSf } from "../SfCli";
-import { getStoryProgress } from "../StoryProgress";
+import { getStoryProgress, getStoryTimelines, EnvTimeline } from "../StoryProgress";
 
 const SETUP_CONFIRMED_KEY = "sfDevops.setupConfirmed";
 
@@ -313,9 +313,10 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                     signoffPassed[env.name] = env.signoffGate ? await this._gitHelper.isSignoffPassed(storyId, env.name) : true;
                 }
             }
+            const timelines = storyId ? await getStoryTimelines(this._gitHelper, storyId) : {};
 
             this._view.webview.html = this._getWebviewHtml(
-                branch ?? "No branch", storyId, progress, behind, coverageBlockedEnv, repoOverride, signoffPassed, localChanges
+                branch ?? "No branch", storyId, progress, behind, coverageBlockedEnv, repoOverride, signoffPassed, localChanges, timelines
             );
             this._externalSwitchNotice = undefined; // one-shot: shown once, then cleared
 
@@ -424,8 +425,10 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         }
         const roleNote = envCfg.requiredRole ? ` (requires the "${envCfg.requiredRole}" role to promote)` : "";
         switch (state) {
+            case "branch-created":
+                return `Promotion branch created, but validation hasn't passed yet — a PR can't open until it does. Click ✔ Validate or 🚀 Promote (which validates for you) to run a real check-only deploy against ${envCfg.label}.`;
             case "open":
-                return `A promotion PR into ${envCfg.label} is open. Get it reviewed and merged — nothing deploys automatically when it merges.`;
+                return `Validated, and a promotion PR into ${envCfg.label} is open (or ready to be). Get it reviewed and merged — nothing deploys automatically when it merges.`;
             case "merged":
                 return `The PR merged, but that alone doesn't deploy anything. Click 🚀 to run a real deploy against the ${envCfg.label} org.`;
             case "deployed":
@@ -433,6 +436,46 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
             default:
                 return `Not started for this story. Click ⬆ to pick a story and promote it to ${envCfg.label} — this opens a PR${roleNote}; merging it is the review gate, deploying is a separate step after that.`;
         }
+    }
+
+    /**
+     * Per-stage active/inactive badges (🟢 done vs ⚪ pending) plus an expandable accordion
+     * with the real timestamp behind each one — "what actually happened here, and when,"
+     * distinct from the single current/pending pipeline state above (which only ever shows
+     * ONE state per row). Dev/publish only has Publish+Deploy; every other stage has
+     * Validate+Promote+Deploy, matching the mandatory-validation sequence in promoteStory.ts.
+     */
+    private _renderStageTimeline(timeline: EnvTimeline | undefined, isPublishStage: boolean): { badges: string; accordion: string } {
+        const stages: { label: string; entry?: { done: boolean; at?: string } }[] = isPublishStage
+            ? [
+                { label: "Published", entry: timeline?.published },
+                { label: "Deployed",  entry: timeline?.deployment },
+              ]
+            : [
+                { label: "Validated", entry: timeline?.validation },
+                { label: "Promoted (PR opened)", entry: timeline?.promotion },
+                { label: "Deployed",  entry: timeline?.deployment },
+              ];
+
+        const when = (entry?: { done: boolean; at?: string }): string => {
+            if (!entry?.done) { return "Pending"; }
+            if (!entry.at) { return "Done"; }
+            const d = new Date(entry.at);
+            return isNaN(d.getTime()) ? "Done" : d.toLocaleString();
+        };
+
+        const badges = stages.map(s => {
+            const done = Boolean(s.entry?.done);
+            return `<span class="stage-badge ${done ? "done" : "pending"}" title="${escapeHtml(s.label)}: ${escapeHtml(when(s.entry))}">${done ? "🟢" : "⚪"}</span>`;
+        }).join("");
+
+        const rows = stages.map(s => {
+            const done = Boolean(s.entry?.done);
+            return `<li><span class="stage-name">${done ? "🟢" : "⚪"} ${escapeHtml(s.label)}</span><span class="stage-when ${done ? "done" : "pending"}">${escapeHtml(when(s.entry))}</span></li>`;
+        }).join("");
+        const accordion = `<details class="stage-timeline"><summary>Timeline</summary><ul>${rows}</ul></details>`;
+
+        return { badges, accordion };
     }
 
     private _getWebviewHtml(
@@ -443,7 +486,8 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         coverageBlockedEnv: string | null,
         repoOverride: { workspace: string; repoSlug: string } | undefined,
         signoffPassed: Record<string, boolean>,
-        localChanges: { staged: string[]; other: string[] } | null
+        localChanges: { staged: string[]; other: string[] } | null,
+        timelines: Record<string, EnvTimeline>
     ): string {
         const onFeatureBranch = isFeatureBranch(branch);
         const baseBranch      = getBaseBranch();
@@ -538,6 +582,7 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                 else if (state === "deployed") { icon = "✅"; label = "Deployed"; }
                 else if (state === "merged")   { icon = "⚡"; label = "Merged — ready to deploy"; }
                 else if (state === "open")  { icon = "🔄"; label = "Validated / In PR"; }
+                else if (state === "branch-created") { icon = "🧪"; label = "Branch created — validation required"; }
                 if (isDone) { icon = "✓"; }
 
                 // DEV already shows "Published", but there's more local work since then —
@@ -589,13 +634,16 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
             const infoIcon = ` <a href="#" class="pinfo" title="${escapeHtml(infoText)}" onclick="return false;">ℹ️</a>`;
             const cta = isCurrent && actionButton ? `<div class="pcta">${actionButton}</div>` : "";
             const isLast = idx === environments.length - 1;
+            const { badges: stageBadges, accordion: stageAccordion } = this._renderStageTimeline(timelines[envCfg.name], isPublishStage);
 
             return `<div class="pstep ${stepClass}">
               <div class="pdot-col"><div class="pdot">${icon}</div>${isLast ? "" : `<div class="pline"></div>`}</div>
               <div class="pbody">
                 <div class="pname">${envCfg.label}<span class="pstatus">${label}</span>${infoIcon}${stageLinks}</div>
+                <div class="stage-badges">${stageBadges}</div>
                 ${newChangesNote}
                 ${cta}
+                ${stageAccordion}
               </div>
             </div>`;
         }).join("");
@@ -662,6 +710,16 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
   .changed-files .file-path { cursor: pointer; word-break: break-all; color: var(--vscode-foreground); }
   .changed-files .file-path:hover { color: var(--vscode-textLink-foreground); text-decoration: underline; }
   .changed-files .story-badge { font-size: 9px; color: var(--vscode-descriptionForeground); border: 1px solid var(--vscode-panel-border); border-radius: 3px; padding: 0 4px; flex-shrink: 0; }
+  .stage-badges { display: flex; gap: 3px; margin: 2px 0; }
+  .stage-badge  { font-size: 9px; cursor: default; opacity: 0.55; }
+  .stage-badge.done { opacity: 1; }
+  .stage-timeline { margin-top: 2px; }
+  .stage-timeline summary { cursor: pointer; font-size: 10px; color: var(--vscode-textLink-foreground); }
+  .stage-timeline ul { list-style: none; margin: 3px 0 0; padding: 0; font-size: 10px; }
+  .stage-timeline li { display: flex; justify-content: space-between; gap: 8px; padding: 1px 0; }
+  .stage-timeline .stage-name { color: var(--vscode-foreground); }
+  .stage-timeline .stage-when { color: var(--vscode-descriptionForeground); flex-shrink: 0; }
+  .stage-timeline .stage-when.done { color: var(--vscode-charts-green); }
   .more-actions { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--vscode-panel-border); }
   .more-actions a { color: var(--vscode-textLink-foreground); text-decoration: none; }
   .more-actions a:hover { text-decoration: underline; }

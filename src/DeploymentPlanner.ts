@@ -1,7 +1,88 @@
 // DeploymentPlanner.ts — pure grouping/selection logic for the deployment dashboard.
 // No fs/vscode/CLI dependency here; GitHelper.ts supplies the raw commit/file data.
 
-import { AuditChangedFile } from "./AuditLog";
+import { AuditChangedFile, metadataTypeForPath } from "./AuditLog";
+
+// ── Apex test auto-detection — shared by the Deployment Dashboard and the mandatory
+// promotion-validate step, so "run just the relevant tests" means the same thing and runs
+// the same speed everywhere, instead of the Dashboard getting the smart/fast path and
+// promotion validation quietly defaulting to the slow, org-wide RunLocalTests. ────────────
+
+/** A class named like a test doesn't need a test of its own — it IS one. */
+export function isLikelyTestClass(name: string): boolean {
+    return /(_Test|Test|Tests)$/.test(name) || /^Test/.test(name);
+}
+
+export const VALID_TEST_LEVELS = ["NoTestRun", "RunSpecifiedTests", "RunLocalTests", "RunAllTestsInOrg"];
+
+/**
+ * Picks the real `--test-level`/`--tests` to actually send to `sf project deploy`, given
+ * the "Tests to run" choice for THIS action (auto-detected vs. run everything) and exactly
+ * which Apex classes are in the files being deployed/validated right now:
+ *  - "all"  → RunAllTestsInOrg, unconditionally.
+ *  - "auto" with at least one detected test → RunSpecifiedTests naming just those tests
+ *    (deduped) — the whole point of this over a static per-env setting: a story touching 2
+ *    classes shouldn't have to wait on the org's entire local test suite.
+ *  - "auto" with Apex in the selection but nothing detected for any of it → RunSpecifiedTests
+ *    would be sent with an empty list and the CLI would reject it outright, so fall back to
+ *    RunLocalTests instead of silently failing.
+ *  - no Apex in the selection at all → nothing to auto-pick; use the environment's own
+ *    configured level (falling back to RunLocalTests if it's not one of the four real values).
+ */
+export function resolveEffectiveTestLevel(
+    configuredLevel: string,
+    testMode: "auto" | "all",
+    apexClassesInSelection: string[],
+    apexTestMap: Record<string, string | null>
+): { testLevel: string; tests?: string[] } {
+    if (testMode === "all") { return { testLevel: "RunAllTestsInOrg" }; }
+    const detected = Array.from(new Set(
+        apexClassesInSelection.map(name => apexTestMap[name]).filter((t): t is string => Boolean(t))
+    ));
+    if (detected.length > 0) { return { testLevel: "RunSpecifiedTests", tests: detected }; }
+    if (apexClassesInSelection.length > 0) { return { testLevel: "RunLocalTests" }; }
+    return { testLevel: VALID_TEST_LEVELS.includes(configuredLevel) ? configuredLevel : "RunLocalTests" };
+}
+
+/** Apex class basenames (excluding test classes themselves) among the given files — used to figure out which tests to auto-pick for exactly what's being deployed/validated. */
+export function apexClassNamesIn(files: { path: string }[]): string[] {
+    return Array.from(new Set(
+        files.filter(f => f.path.endsWith(".cls") && metadataTypeForPath(f.path) === "ApexClass")
+             .map(f => f.path.split("/").pop()!.replace(/\.cls$/, ""))
+    )).filter(name => !isLikelyTestClass(name));
+}
+
+/**
+ * Builds class→detected-test-name and test-name→file-path(s) maps from a full listing of
+ * `.cls`/`.cls-meta.xml` paths on a branch (e.g. GitHelper.listFilesAtRef) and the set of
+ * candidate (pending) Apex class names — the naming convention match (`<Class>Test`,
+ * `<Class>_Test`, `Test<Class>`, `<Class>Tests`) lives here once. `apexTestFilePaths` is
+ * what lets a caller fold a specified test's own file(s) into the deploy even when they
+ * weren't otherwise selected — RunSpecifiedTests requires the named test class to actually
+ * be part of the deployment package (or already exist in the target org), which a
+ * never-deployed-before env won't have yet.
+ */
+export function buildApexTestMap(
+    allClsFiles: string[],
+    candidateClasses: string[]
+): { apexTestMap: Record<string, string | null>; apexTestFilePaths: Record<string, string[]> } {
+    const basenameToPaths = new Map<string, string[]>();
+    for (const f of allClsFiles) {
+        if (!f.endsWith(".cls") && !f.endsWith(".cls-meta.xml")) { continue; }
+        const base = f.split("/").pop()!.replace(/\.cls(-meta\.xml)?$/, "");
+        if (!basenameToPaths.has(base)) { basenameToPaths.set(base, []); }
+        basenameToPaths.get(base)!.push(f);
+    }
+    const apexTestMap: Record<string, string | null> = {};
+    const apexTestFilePaths: Record<string, string[]> = {};
+    for (const name of candidateClasses) {
+        const candidates = [`${name}Test`, `${name}_Test`, `Test${name}`, `${name}Tests`];
+        const match = candidates.find(c => basenameToPaths.has(c));
+        apexTestMap[name] = match ?? null;
+        if (match) { apexTestFilePaths[match] = basenameToPaths.get(match)!; }
+    }
+    return { apexTestMap, apexTestFilePaths };
+}
 
 export interface CommitInfo {
     hash:    string;

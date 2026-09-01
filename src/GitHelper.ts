@@ -10,7 +10,7 @@ import * as path          from "path";
 import {
     getBaseBranch, getDevBranch, featureBranchName, isFeatureBranch as isFeatureBranchName,
     promoBranchName as buildPromoBranchName, getSourceRootFolder, getRepoWorkspace, getRepoSlug,
-    ResolvedEnvironment, getTicketKeyPattern,
+    ResolvedEnvironment, getTicketKeyPattern, getPromotionBranchTemplate,
 } from "./config";
 import { IGitProviderClient } from "./GitProviderClient";
 import { AuditEntry, renderAuditHtml } from "./AuditLog";
@@ -36,6 +36,26 @@ export interface PendingOp {
 
 
 export class GitHelper {
+    // Guards against two of beginPromotion/publishToDevBranch/continuePendingOperation/
+    // abortPendingOperation actually running at once — e.g. a double-click, or the webview
+    // and Command Palette firing the same command within the same tick. There's only one
+    // working tree, so overlapping calls would interleave `git checkout`/`cherry-pick`
+    // commands against it, which can corrupt it in ways "Resume" can't cleanly recover from.
+    // This is in addition to (not a replacement for) conflictingPendingOperation(), which
+    // handles the sequential case — one story left incomplete, a different one started later.
+    private gitOperationBusy = false;
+
+    private acquireGitLock(): void {
+        if (this.gitOperationBusy) {
+            throw new Error("Another promotion/publish operation is already running — wait for it to finish before starting a new one.");
+        }
+        this.gitOperationBusy = true;
+    }
+
+    private releaseGitLock(): void {
+        this.gitOperationBusy = false;
+    }
+
     private get workspaceRoot(): string {
         return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
     }
@@ -385,43 +405,60 @@ export class GitHelper {
      * branch and pushes it — no PR, no Dev org deploy.
      * On conflict the cherry-pick is LEFT in place for resolve-and-resume.
      */
-    async publishToDevBranch(storyId: string): Promise<PromotionOutcome> {
-        const base      = getBaseBranch();
-        const devBranch = getDevBranch();
-
-        revealLog(`Publishing ${storyId} → ${devBranch}`);
-
-        await this.git(["fetch", "origin", "--prune"]);
+    async publishToDevBranch(storyId: string, force: boolean = false): Promise<PromotionOutcome> {
+        this.acquireGitLock();
         try {
-            await this.git(["rev-parse", "--verify", `origin/${devBranch}`]);
-        } catch {
-            throw new Error(`${devBranch} branch not found on remote (origin/${devBranch}).`);
-        }
+            const base      = getBaseBranch();
+            const devBranch = getDevBranch();
 
-        await this.git(["cherry-pick", "--abort"]).catch(() => {});
-        const squashSha = await this.storySquashRef(storyId, base);
-        await this.logChangedFiles(squashSha);
-        await this.git(["checkout", "-B", devBranch, `origin/${devBranch}`]);
-        await this.writePending({ kind: "dev-publish", storyId });
+            revealLog(`Publishing ${storyId} → ${devBranch}`);
 
-        try {
-            await this.git(["-c", "core.editor=true", "cherry-pick", squashSha]);
-            log("Applied cleanly.");
-        } catch {
-            const conflicts = await this.unmergedFiles();
-            if (conflicts.length === 0) {
-                // Story already present in dev → finish the no-op cherry-pick.
-                await this.git(["cherry-pick", "--skip"]).catch(() => {});
-                log("Already up to date in dev — nothing new to apply.");
-            } else {
-                log(`Conflicts in ${conflicts.length} file(s) — resolve them, then click Resume.`);
-                return { status: "conflict", branch: devBranch, conflicts };
+            await this.git(["fetch", "origin", "--prune"]);
+            try {
+                await this.git(["rev-parse", "--verify", `origin/${devBranch}`]);
+            } catch {
+                throw new Error(`${devBranch} branch not found on remote (origin/${devBranch}).`);
             }
-        }
 
-        await this.completeDevPublish(storyId);
-        log(`Published to ${devBranch}.`);
-        return { status: "clean", branch: devBranch, conflicts: [] };
+            const conflicting = await this.conflictingPendingOperation(storyId);
+            if (conflicting) {
+                if (!force) {
+                    throw new Error(
+                        `Another operation is still pending for ${conflicting.storyId}` +
+                        `${conflicting.targetEnv ? ` → ${conflicting.targetEnv}` : ""} (unresolved conflict). ` +
+                        `Resolve or discard it before starting a new one.`
+                    );
+                }
+                await this.abortPendingOperationImpl(conflicting.storyId);
+            }
+
+            await this.git(["cherry-pick", "--abort"]).catch(() => {});
+            const squashSha = await this.storySquashRef(storyId, base);
+            await this.logChangedFiles(squashSha);
+            await this.git(["checkout", "-B", devBranch, `origin/${devBranch}`]);
+            await this.writePending({ kind: "dev-publish", storyId });
+
+            try {
+                await this.git(["-c", "core.editor=true", "cherry-pick", squashSha]);
+                log("Applied cleanly.");
+            } catch {
+                const conflicts = await this.unmergedFiles();
+                if (conflicts.length === 0) {
+                    // Story already present in dev → finish the no-op cherry-pick.
+                    await this.git(["cherry-pick", "--skip"]).catch(() => {});
+                    log("Already up to date in dev — nothing new to apply.");
+                } else {
+                    log(`Conflicts in ${conflicts.length} file(s) — resolve them, then click Resume.`);
+                    return { status: "conflict", branch: devBranch, conflicts };
+                }
+            }
+
+            await this.completeDevPublish(storyId);
+            log(`Published to ${devBranch}.`);
+            return { status: "clean", branch: devBranch, conflicts: [] };
+        } finally {
+            this.releaseGitLock();
+        }
     }
 
     /** After a clean dev-publish cherry-pick: push the dev branch, clear state, return to feature. */
@@ -447,48 +484,71 @@ export class GitHelper {
         storyId:      string,
         targetEnv:    string,
         mode:         "validate" | "promote",
-        targetBranch: string = targetEnv
+        targetBranch: string = targetEnv,
+        force:        boolean = false
     ): Promise<PromotionOutcome> {
-        const featureBranch   = featureBranchName(storyId);
-        const promotionBranch = this.promoBranchName(storyId, targetEnv, mode);
-        const base   = getBaseBranch();
-
-        const envLabel = targetBranch === targetEnv ? targetEnv : `${targetEnv} (branch: ${targetBranch})`;
-        revealLog(`${mode === "validate" ? "Validating" : "Promoting"} ${storyId} → ${envLabel}`);
-
-        await this.git(["fetch", "origin", "--prune"]);
+        this.acquireGitLock();
         try {
-            await this.git(["rev-parse", "--verify", `origin/${featureBranch}`]);
-        } catch {
-            throw new Error(`Source branch not found on remote: ${featureBranch}. Push the feature branch first.`);
-        }
-        try {
-            await this.git(["rev-parse", "--verify", `origin/${targetBranch}`]);
-        } catch {
-            throw new Error(`Target environment branch not found: origin/${targetBranch}.`);
-        }
+            const featureBranch   = featureBranchName(storyId);
+            // Validate and Promote now share ONE branch ("promotion", never the separate
+            // "validate" template) — mandatory validation means Validate is just an earlier
+            // step in the same sequence Promote finishes, not a parallel path with its own
+            // branch. `mode` still matters below for what gets written to pending state (so
+            // Resume knows the ORIGINAL user intent) and for tag-on-promote in finalizePromotion.
+            const promotionBranch = this.promoBranchName(storyId, targetEnv, "promote");
+            const base   = getBaseBranch();
 
-        await this.git(["cherry-pick", "--abort"]).catch(() => {});
-        const squashSha = await this.storySquashRef(storyId, base);
-        await this.logChangedFiles(squashSha);
-        // Copado model: cut every promotion branch from its own target env branch.
-        await this.git(["checkout", "-B", promotionBranch, `origin/${targetBranch}`]);
-        await this.writePending({ kind: "promotion", storyId, targetEnv, mode });
+            const envLabel = targetBranch === targetEnv ? targetEnv : `${targetEnv} (branch: ${targetBranch})`;
+            revealLog(`${mode === "validate" ? "Validating" : "Promoting"} ${storyId} → ${envLabel}`);
 
-        try {
-            await this.git(["-c", "core.editor=true", "cherry-pick", squashSha]);
-            log("Applied cleanly.");
-            return { status: "clean", branch: promotionBranch, conflicts: [] };
-        } catch {
-            const conflicts = await this.unmergedFiles();
-            if (conflicts.length === 0) {
-                // Story already present in the target → finish the no-op cherry-pick.
-                await this.git(["cherry-pick", "--skip"]).catch(() => {});
-                log(`Already up to date in ${targetEnv} — nothing new to apply.`);
-                return { status: "clean", branch: promotionBranch, conflicts: [] };
+            await this.git(["fetch", "origin", "--prune"]);
+            try {
+                await this.git(["rev-parse", "--verify", `origin/${featureBranch}`]);
+            } catch {
+                throw new Error(`Source branch not found on remote: ${featureBranch}. Push the feature branch first.`);
             }
-            log(`Conflicts in ${conflicts.length} file(s) — resolve them, then click Resume.`);
-            return { status: "conflict", branch: promotionBranch, conflicts };
+            try {
+                await this.git(["rev-parse", "--verify", `origin/${targetBranch}`]);
+            } catch {
+                throw new Error(`Target environment branch not found: origin/${targetBranch}.`);
+            }
+
+            const conflicting = await this.conflictingPendingOperation(storyId, targetEnv);
+            if (conflicting) {
+                if (!force) {
+                    throw new Error(
+                        `Another operation is still pending for ${conflicting.storyId}` +
+                        `${conflicting.targetEnv ? ` → ${conflicting.targetEnv}` : ""} (unresolved conflict). ` +
+                        `Resolve or discard it before starting a new one.`
+                    );
+                }
+                await this.abortPendingOperationImpl(conflicting.storyId);
+            }
+
+            await this.git(["cherry-pick", "--abort"]).catch(() => {});
+            const squashSha = await this.storySquashRef(storyId, base);
+            await this.logChangedFiles(squashSha);
+            // Copado model: cut every promotion branch from its own target env branch.
+            await this.git(["checkout", "-B", promotionBranch, `origin/${targetBranch}`]);
+            await this.writePending({ kind: "promotion", storyId, targetEnv, mode });
+
+            try {
+                await this.git(["-c", "core.editor=true", "cherry-pick", squashSha]);
+                log("Applied cleanly.");
+                return { status: "clean", branch: promotionBranch, conflicts: [] };
+            } catch {
+                const conflicts = await this.unmergedFiles();
+                if (conflicts.length === 0) {
+                    // Story already present in the target → finish the no-op cherry-pick.
+                    await this.git(["cherry-pick", "--skip"]).catch(() => {});
+                    log(`Already up to date in ${targetEnv} — nothing new to apply.`);
+                    return { status: "clean", branch: promotionBranch, conflicts: [] };
+                }
+                log(`Conflicts in ${conflicts.length} file(s) — resolve them, then click Resume.`);
+                return { status: "conflict", branch: promotionBranch, conflicts };
+            }
+        } finally {
+            this.releaseGitLock();
         }
     }
 
@@ -497,28 +557,43 @@ export class GitHelper {
      * Returns "conflict" again if a later commit still conflicts.
      */
     async continuePendingOperation(): Promise<PromotionOutcome> {
-        const branch = (await this.currentBranch()) ?? "";
-
-        const unmerged = await this.unmergedFiles();
-        if (unmerged.length > 0) {
-            return { status: "conflict", branch, conflicts: unmerged };
-        }
-
-        await this.git(["add", "-A"]);
-        const staged = await this.git(["diff", "--cached", "--name-only"]).catch(() => "");
-
+        this.acquireGitLock();
         try {
-            const op = staged ? "--continue" : "--skip";
-            await this.git(["-c", "core.editor=true", "cherry-pick", op]);
-            return { status: "clean", branch, conflicts: [] };
-        } catch {
-            const conflicts = await this.unmergedFiles();
-            return { status: "conflict", branch, conflicts };
+            const branch = (await this.currentBranch()) ?? "";
+
+            const unmerged = await this.unmergedFiles();
+            if (unmerged.length > 0) {
+                return { status: "conflict", branch, conflicts: unmerged };
+            }
+
+            await this.git(["add", "-A"]);
+            const staged = await this.git(["diff", "--cached", "--name-only"]).catch(() => "");
+
+            try {
+                const op = staged ? "--continue" : "--skip";
+                await this.git(["-c", "core.editor=true", "cherry-pick", op]);
+                return { status: "clean", branch, conflicts: [] };
+            } catch {
+                const conflicts = await this.unmergedFiles();
+                return { status: "conflict", branch, conflicts };
+            }
+        } finally {
+            this.releaseGitLock();
         }
     }
 
     /** Aborts the pending cherry-pick and returns to the feature branch. */
     async abortPendingOperation(storyId: string): Promise<void> {
+        this.acquireGitLock();
+        try {
+            await this.abortPendingOperationImpl(storyId);
+        } finally {
+            this.releaseGitLock();
+        }
+    }
+
+    /** Unlocked — only call this from within a method that already holds the git lock. */
+    private async abortPendingOperationImpl(storyId: string): Promise<void> {
         await this.git(["cherry-pick", "--abort"]).catch(() => {});
         await this.deleteSquashRef(storyId);
         await this.clearPending();
@@ -537,6 +612,21 @@ export class GitHelper {
     }
 
     /**
+     * There's only ever one working tree, so only one cherry-pick can truly be "in
+     * progress" at a time — but that pending op can belong to a DIFFERENT story/env than
+     * the one about to start. beginPromotion/publishToDevBranch used to just silently
+     * `cherry-pick --abort` whatever was there, discarding another story's unresolved
+     * conflict with no warning. Callers should check this first and let the user decide
+     * before starting an operation that would blow that away.
+     */
+    async conflictingPendingOperation(storyId: string, targetEnv?: string): Promise<PendingOp | null> {
+        const existing = await this.getPendingOperation();
+        if (!existing) { return null; }
+        const sameOperation = existing.storyId === storyId && existing.targetEnv === targetEnv;
+        return sameOperation ? null : existing;
+    }
+
+    /**
      * Tags (promote only) and pushes the completed branch.
      * Call after `beginPromotion`/`continuePendingOperation` returns "clean".
      */
@@ -545,7 +635,7 @@ export class GitHelper {
         targetEnv: string,
         mode:      "validate" | "promote"
     ): Promise<{ branch: string; tag: string }> {
-        const promotionBranch = this.promoBranchName(storyId, targetEnv, mode);
+        const promotionBranch = this.promoBranchName(storyId, targetEnv, "promote"); // unified branch — see beginPromotion
         const date            = new Date().toISOString().slice(0, 10);
         const tag             = `promo/${storyId}-to-${targetEnv}-${date}`;
 
@@ -576,6 +666,90 @@ export class GitHelper {
     async promotionBranchExists(storyId: string, targetEnv: string): Promise<boolean> {
         await this.fetchRemote();
         return this.remoteBranchExists(buildPromoBranchName(storyId, targetEnv, "promote"));
+    }
+
+    // ── Mandatory promotion-validation gate (per story + environment, in the git dir) ──
+    // "Promote" is never allowed to open a PR without this having actually passed for the
+    // promotion branch's CURRENT content — see runPromotion() in promoteStory.ts. Same
+    // sha-fingerprinted "stale invalidates" shape as the coverage gate above: the record only
+    // counts while the promotion branch is still at the exact sha it was validated at.
+
+    private async promotionValidationFilePath(): Promise<string> {
+        return path.join(await this.gitDirPath(), "sf-devops-promotion-validation.json");
+    }
+
+    private async readPromotionValidation(): Promise<Record<string, any>> {
+        try {
+            return JSON.parse(fs.readFileSync(await this.promotionValidationFilePath(), "utf8"));
+        } catch {
+            return {};
+        }
+    }
+
+    async isPromotionValidated(storyId: string, targetEnv: string): Promise<boolean> {
+        const data = await this.readPromotionValidation();
+        const entry = data[`${storyId}::${targetEnv}`];
+        if (!entry?.passed) { return false; }
+        const currentSha = await this.remoteHeadSha(this.promoBranchName(storyId, targetEnv, "promote"));
+        return Boolean(currentSha) && currentSha === entry.branchSha;
+    }
+
+    async recordPromotionValidated(storyId: string, targetEnv: string, details: object = {}): Promise<void> {
+        const data = await this.readPromotionValidation();
+        const branchSha = await this.remoteHeadSha(this.promoBranchName(storyId, targetEnv, "promote"));
+        data[`${storyId}::${targetEnv}`] = { passed: true, branchSha, ...details, date: new Date().toISOString() };
+        try {
+            fs.writeFileSync(await this.promotionValidationFilePath(), JSON.stringify(data, null, 2));
+        } catch { /* best effort */ }
+    }
+
+    /** The raw validation record (including WHEN it passed), regardless of whether it's still fresh for the branch's current sha — used by the Story Progress timeline to show "validated at {date}" even if the branch has since moved and the gate itself has re-locked. */
+    async getPromotionValidationRecord(storyId: string, targetEnv: string): Promise<{ passed: boolean; date?: string } | null> {
+        const data = await this.readPromotionValidation();
+        const entry = data[`${storyId}::${targetEnv}`];
+        return entry ? { passed: Boolean(entry.passed), date: entry.date } : null;
+    }
+
+    /** Deletes a promotion branch, remote then local — used for the post-deploy cleanup prompt. Best-effort: a branch that's already gone (or was never fetched locally) isn't an error here. */
+    async deletePromotionBranch(storyId: string, targetEnv: string): Promise<void> {
+        const branch = this.promoBranchName(storyId, targetEnv, "promote");
+        await this.git(["push", "origin", "--delete", branch]).catch(() => {});
+        await this.git(["branch", "-D", branch]).catch(() => {});
+    }
+
+    /**
+     * Best-effort: fast-forwards the LOCAL ref for `branch` to match `origin/<branch>`,
+     * without checking it out or touching anything else — "pull it on local" / "keep the
+     * promotion branch updated on local" as a passive convenience, so the branch is already
+     * current whenever you do switch to it, instead of looking stale from before a merge.
+     * Never rewrites local history: a fetch into a non-checked-out branch ref is refused by
+     * git unless it's a fast-forward, and the checked-out case only merges when the working
+     * tree is clean. Silently does nothing if the branch doesn't exist locally yet, is
+     * checked out with uncommitted changes, or has diverged (never forces past that).
+     */
+    async syncLocalRef(branch: string): Promise<void> {
+        try {
+            const hasLocal = await this.git(["branch", "--list", branch]).then(out => out.trim().length > 0);
+            if (!hasLocal) { return; }
+            if ((await this.currentBranch()) === branch) {
+                if (!(await this.hasUncommittedChanges())) {
+                    await this.git(["merge", "--ff-only", `origin/${branch}`]).catch(() => {});
+                }
+                return;
+            }
+            await this.git(["fetch", "origin", `${branch}:${branch}`]).catch(() => {});
+        } catch { /* best effort */ }
+    }
+
+    /** Keeps every promotion branch that already exists locally current, ground-rule style — a promotion branch you're tracking should never look stale just because someone else pushed to it. Best-effort, run periodically (see extension.ts's poller). */
+    async syncLocalPromotionBranches(): Promise<void> {
+        try {
+            const prefix = getPromotionBranchTemplate().split("{")[0];
+            const out = await this.git(["for-each-ref", "--format=%(refname:short)", `refs/heads/${prefix}*`]);
+            for (const branch of out.split("\n").filter(Boolean)) {
+                await this.syncLocalRef(branch);
+            }
+        } catch { /* best effort */ }
     }
 
     /**

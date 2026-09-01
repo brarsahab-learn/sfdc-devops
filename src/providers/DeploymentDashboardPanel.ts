@@ -7,7 +7,10 @@
 import * as vscode from "vscode";
 import { GitHelper, warnUncommittedChanges } from "../GitHelper";
 import { runDeploy, DeployMode, DeployResult } from "../DeploymentEngine";
-import { groupChangesByStory, resolveSelection, DeploySelection, StoryChangeGroup, CommitInfo } from "../DeploymentPlanner";
+import {
+    groupChangesByStory, resolveSelection, DeploySelection, StoryChangeGroup, CommitInfo,
+    apexClassNamesIn, resolveEffectiveTestLevel, buildApexTestMap,
+} from "../DeploymentPlanner";
 import { buildPackageXml, AuditChangedFile, metadataTypeForPath } from "../AuditLog";
 import { getPromotableEnvironments, getPublishEnvironment, getSourceRootFolder, getDeployTimeoutSeconds, canPromote, getBaseBranch, ResolvedEnvironment } from "../config";
 import { getEffectiveRole } from "../RoleManager";
@@ -32,52 +35,11 @@ interface EnvViewModel {
     orgAliasSet:  boolean;
     /** Apex class basename → its detected test class basename (by naming convention), or null if none was found. Only covers non-test classes that are actually pending in this env. */
     apexTestMap:  Record<string, string | null>;
+    /** Test class basename → its actual file path(s) (.cls + .cls-meta.xml) on this env's branch — used to fold a specified test's own files into the deploy even when they weren't otherwise selected. */
+    apexTestFilePaths: Record<string, string[]>;
 }
 
-/** A class named like a test doesn't need a test of its own — it IS one. */
-function isLikelyTestClass(name: string): boolean {
-    return /(_Test|Test|Tests)$/.test(name) || /^Test/.test(name);
-}
-
-const VALID_TEST_LEVELS = ["NoTestRun", "RunSpecifiedTests", "RunLocalTests", "RunAllTestsInOrg"];
-
-/**
- * Picks the real `--test-level`/`--tests` to actually send to `sf project deploy`, given
- * the user's "Tests to run" choice for THIS action (auto-detected vs. run everything) and
- * exactly which Apex classes are in the files being deployed right now:
- *  - "all"  → RunAllTestsInOrg, unconditionally.
- *  - "auto" with at least one detected test → RunSpecifiedTests naming just those tests
- *    (deduped) — the whole point of this feature over a static per-env setting.
- *  - "auto" with Apex in the selection but nothing detected for any of it → RunSpecifiedTests
- *    would be sent with an empty list and the CLI would reject it outright, so fall back to
- *    RunLocalTests instead of silently failing.
- *  - no Apex in the selection at all → nothing to auto-pick; use the environment's own
- *    configured level (falling back to RunLocalTests if it's not one of the four real values).
- */
-function resolveEffectiveTestLevel(
-    configuredLevel: string,
-    testMode: "auto" | "all",
-    apexClassesInSelection: string[],
-    apexTestMap: Record<string, string | null>
-): { testLevel: string; tests?: string[] } {
-    if (testMode === "all") { return { testLevel: "RunAllTestsInOrg" }; }
-    const detected = Array.from(new Set(
-        apexClassesInSelection.map(name => apexTestMap[name]).filter((t): t is string => Boolean(t))
-    ));
-    if (detected.length > 0) { return { testLevel: "RunSpecifiedTests", tests: detected }; }
-    if (apexClassesInSelection.length > 0) { return { testLevel: "RunLocalTests" }; }
-    return { testLevel: VALID_TEST_LEVELS.includes(configuredLevel) ? configuredLevel : "RunLocalTests" };
-}
-
-/** Apex class basenames (excluding test classes themselves) among the given files — used to figure out which tests to auto-pick for exactly what's being deployed. */
-function apexClassNamesIn(files: AuditChangedFile[]): string[] {
-    return Array.from(new Set(
-        files.filter(f => f.path.endsWith(".cls") && metadataTypeForPath(f.path) === "ApexClass")
-             .map(f => f.path.split("/").pop()!.replace(/\.cls$/, ""))
-    )).filter(name => !isLikelyTestClass(name));
-}
-
-/** One-shot result of the last Validate/Deploy action, shown once as a banner then cleared — same idiom as the one-shot `_focusEnv`. */
+/** One-shot result of the last Validate/Deploy action, shown once as a banner then cleared. */
 interface DeployOutcome {
     env:     string;
     kind:    "validatePassed" | "validateFailed" | "deploySucceeded" | "deployFailed";
@@ -90,16 +52,24 @@ export class DeploymentDashboardPanel {
     private static current: DeploymentDashboardPanel | undefined;
     private readonly _panel: vscode.WebviewPanel;
     private _disposables: vscode.Disposable[] = [];
-    private _focusEnv?: string;
+    /**
+     * Which single environment this panel is showing — the whole point of this panel is now
+     * "you asked to deploy QA, so this is QA," not a general-purpose multi-tab surface. Every
+     * caller (`sfDevops.openDeploymentDashboard`) already passes a specific env; there's no
+     * "show me everything" entry point left, so binding to exactly one keeps the panel from
+     * showing environments the user didn't ask about (and can't act on anyway, thanks to the
+     * pipeline gate) alongside the one they did.
+     */
+    private _boundEnv: string;
     private _lastOutcome?: DeployOutcome;
     /** Fingerprint (sorted file paths, joined) of the last selection that successfully Validated, per env — Deploy is locked until the CURRENT selection matches it exactly. Sticky across renders (unlike _lastOutcome), so it's not just a one-time click-time check: the button re-locks the moment the checked selection changes. */
     private _validatedSelections = new Map<string, string>();
 
-    /** `focusEnv` opens (or brings to front) the dashboard with that environment's tab pre-selected — used by the "🚀 Deploy" link in Story Progress so a merged-but-undeployed story leads straight to the right tab instead of the first one. */
-    public static createOrShow(gitHelper: GitHelper, context: vscode.ExtensionContext, focusEnv?: string) {
+    /** Opens (or rebinds, if already open) the dashboard to exactly one environment — see `_boundEnv`. */
+    public static createOrShow(gitHelper: GitHelper, context: vscode.ExtensionContext, env: string) {
         if (DeploymentDashboardPanel.current) {
             DeploymentDashboardPanel.current._panel.reveal(vscode.ViewColumn.One);
-            if (focusEnv) { DeploymentDashboardPanel.current._focusEnv = focusEnv; }
+            DeploymentDashboardPanel.current._boundEnv = env;
             DeploymentDashboardPanel.current.refresh();
             return;
         }
@@ -109,7 +79,7 @@ export class DeploymentDashboardPanel {
             vscode.ViewColumn.One,
             { enableScripts: true, retainContextWhenHidden: true }
         );
-        DeploymentDashboardPanel.current = new DeploymentDashboardPanel(panel, gitHelper, context, focusEnv);
+        DeploymentDashboardPanel.current = new DeploymentDashboardPanel(panel, gitHelper, context, env);
     }
 
     /** Refreshes the dashboard in place if it's currently open — used by the background poller. */
@@ -121,16 +91,24 @@ export class DeploymentDashboardPanel {
         panel: vscode.WebviewPanel,
         private readonly _gitHelper: GitHelper,
         private readonly _extContext: vscode.ExtensionContext,
-        focusEnv?: string
+        env: string
     ) {
         this._panel = panel;
-        this._focusEnv = focusEnv;
+        this._boundEnv = env;
         this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
         this._panel.webview.onDidReceiveMessage(async (msg) => {
             if (msg.command === "refresh") { await this.refresh(); }
             if (msg.command === "runAction") { await this._runAction(msg); }
             if (msg.command === "viewFileDiff") { await this._viewFileDiff(msg); }
             if (msg.command === "viewPendingFileDiff") { await this._viewPendingFileDiff(msg); }
+            // The one remaining cross-env navigation — "deploy succeeded, N stories ready in
+            // the next stage" — rebinds this same panel to that env rather than switching a
+            // pre-rendered tab, so it stays true to "bound to exactly what was requested,"
+            // even though that request now originates from inside the panel itself.
+            if (msg.command === "rebind" && msg.env) {
+                this._boundEnv = msg.env;
+                await this.refresh();
+            }
         }, null, this._disposables);
 
         this._panel.webview.html = this._loadingHtml();
@@ -151,21 +129,25 @@ export class DeploymentDashboardPanel {
     public async refresh() {
         try {
             await this._gitHelper.fetchRemote();
-            // Dev (the publish env) gets its own tab too — same tree/Validate/Deploy UI as
+            // Dev (the publish env) is deployable here too — same tree/Validate/Deploy UI as
             // every other stage, tracked via the same recordDeployed/getDeployState this
             // dashboard already uses everywhere else. It never gates, and is never gated by,
             // anything (see the promotable-relative indexing in _runAction/_viewPendingFileDiff)
             // — it's just previously had NO way to see or trigger an actual deploy at all,
             // only "pushed to the dev branch," which is what made it unclear whether dev was
-            // ever really deployed.
+            // ever really deployed. Still need the full ordered list here even though only
+            // ONE env gets rendered — that's how prevEnv/nextEnv (gating, diff-vs-next
+            // preview) are found for whichever one is bound.
             const envs = [getPublishEnvironment(), ...getPromotableEnvironments()];
-            const models: EnvViewModel[] = [];
-            for (let i = 0; i < envs.length; i++) {
-                const prevEnv = i > 0 ? envs[i - 1] : undefined;
-                models.push(await this._buildViewModel(envs[i], envs[i + 1], prevEnv));
+            const idx = envs.findIndex(e => e.name === this._boundEnv);
+            if (idx === -1) {
+                this._panel.webview.html = `<body style="padding:16px;color:#f48771;font-family:sans-serif">Unknown environment "${escapeHtml(this._boundEnv)}" — check sfDevops.environments.</body>`;
+                return;
             }
-            this._panel.webview.html = this._renderHtml(models, this._focusEnv);
-            this._focusEnv = undefined; // one-shot: don't keep overriding the user's own tab clicks on later refreshes
+            const prevEnv = idx > 0 ? envs[idx - 1] : undefined;
+            const model = await this._buildViewModel(envs[idx], envs[idx + 1], prevEnv);
+            this._panel.title = `SF DevOps Deployments — ${model.env.label}`;
+            this._panel.webview.html = this._renderHtml(model);
         } catch (err) {
             this._panel.webview.html = `<body style="padding:16px;color:#f48771;font-family:sans-serif">Error: ${escapeHtml(String(err))}</body>`;
         }
@@ -211,23 +193,22 @@ export class DeploymentDashboardPanel {
         // the Code Coverage panel already uses (<Class>Test, <Class>_Test, Test<Class>,
         // <Class>Tests) — checked against what actually exists on this env's branch, not
         // just what's in the pending selection (a story can add a class whose test already
-        // lived on this branch from an earlier promotion).
-        const apexTestMap: Record<string, string | null> = {};
+        // lived on this branch from an earlier promotion). Also keeps each detected test
+        // class's own file paths (apexTestFilePaths) — RunSpecifiedTests requires the named
+        // test class to actually be IN the deployment package (or already exist in the
+        // target org); on a never-deployed-before env it won't exist there yet, and if the
+        // test file itself wasn't part of the pending selection either, the CLI fails with
+        // an opaque "tests specified must be in the deployment package" error. _runAction
+        // uses this map to fold the test file(s) into the deploy even when they weren't
+        // otherwise selected, so picking "auto-detected tests" can never produce a deploy
+        // that's missing the very test it asked for.
         const pendingApexClasses = apexClassNamesIn(allFiles);
-        if (pendingApexClasses.length > 0) {
-            const basenames = new Set(
-                (await this._gitHelper.listFilesAtRef(env.branch, sourceRoot))
-                    .filter(f => f.endsWith(".cls"))
-                    .map(f => f.split("/").pop()!.replace(/\.cls$/, ""))
-            );
-            for (const name of pendingApexClasses) {
-                const candidates = [`${name}Test`, `${name}_Test`, `Test${name}`, `${name}Tests`];
-                apexTestMap[name] = candidates.find(c => basenames.has(c)) ?? null;
-            }
-        }
+        const { apexTestMap, apexTestFilePaths } = pendingApexClasses.length > 0
+            ? buildApexTestMap(await this._gitHelper.listFilesAtRef(env.branch, sourceRoot), pendingApexClasses)
+            : { apexTestMap: {}, apexTestFilePaths: {} };
 
         return {
-            env, nextEnv, prevEnv, currentSha, lastDeploy, groups, allFiles, diffVsNext, packageXml, unmapped, apexTestMap,
+            env, nextEnv, prevEnv, currentSha, lastDeploy, groups, allFiles, diffVsNext, packageXml, unmapped, apexTestMap, apexTestFilePaths,
             canDeploy:   canPromote(this._userRole, env),
             orgAliasSet: Boolean(env.orgAlias),
         };
@@ -313,7 +294,7 @@ export class DeploymentDashboardPanel {
         }
 
         const model = await this._buildViewModel(env, nextEnv, prevEnv);
-        const { files, summary } = resolveSelection(selection, model.groups, model.allFiles);
+        let { files, summary } = resolveSelection(selection, model.groups, model.allFiles);
 
         // Which tests actually run is recomputed here from the FINAL resolved file list, not
         // trusted from the client — same "never trust the client for what actually executes"
@@ -321,6 +302,25 @@ export class DeploymentDashboardPanel {
         // client doesn't say otherwise.
         const testMode: "auto" | "all" = msg.testMode === "all" ? "all" : "auto";
         const { testLevel, tests } = resolveEffectiveTestLevel(env.deployTestLevel, testMode, apexClassNamesIn(files), model.apexTestMap);
+
+        // RunSpecifiedTests requires each named test class to actually be part of the
+        // deployment package (or already exist in the target org) — on a never-deployed
+        // env, or when the test file simply wasn't in the pending selection, it might be
+        // neither, and the CLI fails with an opaque "tests specified must be in the
+        // deployment package" error. Fold each detected test's own file(s) into what's
+        // actually being deployed so picking "auto-detected tests" can never produce a
+        // deploy that's missing the test it just asked for. "all" mode already deploys
+        // everything (sourceDirs stays empty), so there's nothing to fold in there.
+        if (testLevel === "RunSpecifiedTests" && selection.mode !== "all" && tests?.length) {
+            const present = new Set(files.map(f => f.path));
+            const extra: AuditChangedFile[] = [];
+            for (const testName of tests) {
+                for (const p of model.apexTestFilePaths[testName] ?? []) {
+                    if (!present.has(p)) { present.add(p); extra.push({ path: p, change: "modified" }); }
+                }
+            }
+            if (extra.length > 0) { files = [...files, ...extra]; }
+        }
 
         // An empty non-"all" selection must never silently fall through to deploying the
         // entire source root (DeploymentEngine treats an empty sourceDirs array as "no
@@ -350,7 +350,7 @@ export class DeploymentDashboardPanel {
         }
 
         if (await this._gitHelper.hasUncommittedChanges()) {
-            await warnUncommittedChanges(this._gitHelper, "Commit or stash your local changes before deploying — this checks out a different branch temporarily.");
+            await warnUncommittedChanges(this._gitHelper, "Commit or stash your local changes before deploying — this checks out a fresh copy of the environment branch from origin, which would collide with them. Note this deploy would never have included them anyway: it always deploys origin's pushed content, never local edits.");
             return;
         }
 
@@ -381,6 +381,7 @@ export class DeploymentDashboardPanel {
                             : { env: env.name, kind: "deployFailed", message: second.error ?? "Auto-deploy failed after a successful validate." };
                         if (second.success) {
                             vscode.window.showInformationMessage(`✅ Validated and auto-deployed to ${env.label} — ${summary}.`);
+                            await this._promptCleanupPromotionBranches(env, touchedStoryIds(model.groups, files));
                         } else {
                             vscode.window.showErrorMessage(`❌ Validate passed but auto-deploy to ${env.label} failed: ${second.error ?? "see the audit trail"}.`);
                         }
@@ -404,6 +405,7 @@ export class DeploymentDashboardPanel {
                             : { env: env.name, kind: "deployFailed", message: first.error ?? "Deploy failed." };
                         if (first.success) {
                             vscode.window.showInformationMessage(`✅ Deployed against ${env.label} — ${summary}.`);
+                            await this._promptCleanupPromotionBranches(env, touchedStoryIds(model.groups, files));
                         } else {
                             vscode.window.showErrorMessage(`❌ Deploy against ${env.label} failed: ${first.error ?? "see component failures in the audit trail"}.`);
                         }
@@ -426,6 +428,39 @@ export class DeploymentDashboardPanel {
                 }
             }
         );
+    }
+
+    /**
+     * Stage 4's "Clean Up" — asks once, right after a successful deploy, whether to delete
+     * the promotion branch(es) for whichever stories this deploy actually touched. Never
+     * silent/automatic (deleting a branch is real): a "No" or dismiss leaves everything
+     * exactly as it was. Dev (the publish env) has no promotion-branch concept, so this is
+     * a no-op there.
+     */
+    private async _promptCleanupPromotionBranches(env: ResolvedEnvironment, storyIds: string[]): Promise<void> {
+        if (env.name === getPublishEnvironment().name || storyIds.length === 0) { return; }
+        const branches = storyIds.map(id => ({ id, branch: this._gitHelper.promoBranchName(id, env.name, "promote") }));
+        const existing: typeof branches = [];
+        for (const b of branches) {
+            if (await this._gitHelper.remoteBranchExists(b.branch)) { existing.push(b); }
+        }
+        if (existing.length === 0) { return; }
+
+        const list = existing.map(b => b.branch).join(", ");
+        const choice = await vscode.window.showInformationMessage(
+            `${env.label} is deployed — delete the promotion branch${existing.length > 1 ? "es" : ""} now that ${existing.length > 1 ? "they're" : "it's"} done?\n\n${list}`,
+            "Yes, delete", "No"
+        );
+        if (choice !== "Yes, delete") { return; }
+
+        for (const b of existing) {
+            await this._gitHelper.deletePromotionBranch(b.id, env.name);
+            await this._gitHelper.appendAudit({
+                operation: "promote", storyId: b.id, targetEnv: env.name, branch: b.branch, outcome: "success",
+                summary: `${b.branch} deleted after a successful deploy to ${env.label}`,
+            });
+        }
+        vscode.window.showInformationMessage(`🧹 Deleted ${existing.length} promotion branch${existing.length > 1 ? "es" : ""}.`);
     }
 
     /** Diff between two environment branches — used by the "diff vs next env" preview list. */
@@ -468,20 +503,14 @@ export class DeploymentDashboardPanel {
         return `<!DOCTYPE html><html><body style="font-family:sans-serif;padding:24px;color:#888">Loading deployment status…</body></html>`;
     }
 
-    private _renderHtml(models: EnvViewModel[], focusEnv?: string): string {
-        const notificationStrip = models
-            .filter(m => m.groups.length > 0 || (m.lastDeploy === null && m.currentSha))
-            .map(m => m.groups.length > 0
-                ? `<div class="notice">⚠ <b>${escapeHtml(m.env.label)}</b>: ${m.groups.length} story/PR group(s), ${m.allFiles.length} file(s) pending deployment</div>`
-                : `<div class="notice muted">ℹ <b>${escapeHtml(m.env.label)}</b>: never deployed from this dashboard yet — nothing pending to bootstrap from</div>`
-            ).join("");
+    private _renderHtml(model: EnvViewModel): string {
+        const notice = model.groups.length > 0
+            ? `<div class="notice">⚠ ${model.groups.length} story/PR group(s), ${model.allFiles.length} file(s) pending deployment</div>`
+            : (model.lastDeploy === null && model.currentSha)
+            ? `<div class="notice muted">ℹ Never deployed from this dashboard yet — nothing pending to bootstrap from</div>`
+            : "";
 
-        const activeEnv = (focusEnv && models.some(m => m.env.name === focusEnv)) ? focusEnv : (models[0]?.env.name ?? "");
-        const envTabs = models.map((m) =>
-            `<button class="tab env-tab${m.env.name === activeEnv ? " active" : ""}" data-env="${m.env.name}" onclick="setEnvTab('${m.env.name}')">${escapeHtml(m.env.label)}</button>`
-        ).join("");
-
-        const envPanes = models.map(m => this._renderEnvPane(m)).join("\n");
+        const envPane = this._renderEnvPane(model);
         this._lastOutcome = undefined; // one-shot: shown once, then cleared
 
         return `<!DOCTYPE html>
@@ -501,13 +530,7 @@ export class DeploymentDashboardPanel {
   .notice { background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; font-size: 13px; }
   .notice.muted { border-left-color: var(--muted); color: var(--muted); }
 
-  .tabbar { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 8px 0 20px; position: sticky; top: 0; background: var(--bg); z-index: 5; padding-top: 4px; }
-  .tab { font-size: 13px; padding: 8px 14px; border: none; background: none; color: var(--muted); cursor: pointer; border-bottom: 2px solid transparent; }
-  .tab:hover { color: var(--fg); }
-  .tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
-
-  .pane { display: none; }
-  .pane.visible { display: block; }
+  .pane { display: block; }
   section.env { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin-bottom: 24px; }
   .meta { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
 
@@ -589,35 +612,19 @@ export class DeploymentDashboardPanel {
 </style>
 </head>
 <body>
-<h1>SF DevOps Deployments</h1>
-<div class="sub">Everything merged into an environment branch, not yet deployed by this extension. Deploys and validations run <code>sf project deploy</code> directly — no external CI involved.</div>
+<h1>SF DevOps Deployments — ${escapeHtml(model.env.label)}</h1>
+<div class="sub">Everything merged into ${escapeHtml(model.env.label)}'s branch, not yet deployed by this extension. Deploys and validations run <code>sf project deploy</code> directly — no external CI involved.</div>
 
-${notificationStrip}
+${notice}
 
-<div class="tabbar">
-  ${envTabs}
-</div>
-
-${envPanes}
+${envPane}
 
 <script>
   const vscode = acquireVsCodeApi();
-  let activeEnv = ${JSON.stringify(activeEnv)};
 
   function send(command, payload) { vscode.postMessage(Object.assign({ command }, payload)); }
   function refresh() { send('refresh'); }
-
-  function applyTabs() {
-    document.querySelectorAll('.pane').forEach(function (p) {
-      p.classList.toggle('visible', p.dataset.env === activeEnv);
-    });
-  }
-
-  function setEnvTab(e) {
-    activeEnv = e;
-    document.querySelectorAll('.tab.env-tab').forEach(function (b) { b.classList.toggle('active', b.dataset.env === e); });
-    applyTabs();
-  }
+  function rebind(env) { send('rebind', { env: env }); }
 
   function toggleFile(env) { recomputeSelection(env); }
 
@@ -880,9 +887,8 @@ ${envPanes}
     }
   });
 
-  applyTabs();
   document.querySelectorAll('.pane').forEach(function (p) {
-    recomputeSelection(p.dataset.env); // also sets the initial Deploy-button lock state per env
+    recomputeSelection(p.dataset.env); // also sets the initial Deploy-button lock state
   });
 </script>
 </body>
@@ -905,7 +911,7 @@ ${envPanes}
         const outcomeHtml = outcome
             ? `<div class="outcome outcome-${outcome.kind}">${escapeHtml(outcome.message)}${
                 outcome.nextEnv
-                    ? ` <a onclick="setEnvTab('${outcome.nextEnv.name}')">→ ${escapeHtml(outcome.nextEnv.label)} (${outcome.storyCount ?? 0} story/PR group(s) ready)</a>`
+                    ? ` <a onclick="rebind('${outcome.nextEnv.name}')">→ ${escapeHtml(outcome.nextEnv.label)} (${outcome.storyCount ?? 0} story/PR group(s) ready)</a>`
                     : ""
               }</div>`
             : "";
@@ -1020,6 +1026,7 @@ ${envPanes}
 <section class="env">
   <h2>${escapeHtml(env.label)} <span class="meta">(${escapeHtml(env.branch)} → ${escapeHtml(env.orgAlias || "no org alias")})</span></h2>
   <div class="meta">${lastDeployText}</div>
+  <div class="meta">📍 Everything below reflects <code>origin/${escapeHtml(env.branch)}</code> — the last commit actually <b>pushed</b> to that branch. Your local working tree (uncommitted edits, unpushed local commits, anything not on this remote branch) is never part of what gets validated or deployed here.</div>
   ${noticeIfNoOrg}${noticeIfNoRole}
   ${outcomeHtml}
 
@@ -1080,6 +1087,12 @@ function dedupe(files: AuditChangedFile[]): AuditChangedFile[] {
 function countTouchedGroups(groups: StoryChangeGroup[], files: AuditChangedFile[]): number {
     const paths = new Set(files.map(f => f.path));
     return groups.filter(g => g.files.some(f => paths.has(f.path))).length;
+}
+
+/** The story ids a given file selection actually touches — same matching countTouchedGroups uses, just returning which, not how many. */
+function touchedStoryIds(groups: StoryChangeGroup[], files: AuditChangedFile[]): string[] {
+    const paths = new Set(files.map(f => f.path));
+    return groups.filter(g => g.files.some(f => paths.has(f.path))).map(g => g.storyId);
 }
 
 /** Identifies a file selection by its exact contents (order-independent) — used to check whether Deploy's current selection is exactly what Validate last passed for. */

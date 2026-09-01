@@ -40,6 +40,15 @@ class EnvItem extends vscode.TreeItem {
     ) {
         super(env.label, vscode.TreeItemCollapsibleState.None);
 
+        // Clicking any environment here opens the Deployment Dashboard bound to exactly that
+        // one (see DeploymentDashboardPanel._boundEnv) — the same entry point Story Progress's
+        // 🚀 links use, just reachable from this read-only list too.
+        this.command = {
+            command:   "sfDevops.openDeploymentDashboard",
+            title:     `Open ${env.label} in the Deployment Dashboard`,
+            arguments: [env.name],
+        };
+
         const shortSha = lastDeploy?.sha ? lastDeploy.sha.slice(0, 8) : null;
         this.description = shortSha ? `${shortSha}${pending ? " (behind)" : ""}` : "not deployed yet";
 

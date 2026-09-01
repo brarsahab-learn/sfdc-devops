@@ -99,6 +99,23 @@ export async function commitAndPush(
         }
     }
 
+    // Another story (or a promotion) can be sitting mid-conflict right now — publishToDevBranch
+    // would otherwise silently `cherry-pick --abort` it with no warning, orphaning its "Resume"
+    // state. Surface it and let the user choose instead.
+    let discardConflicting = false;
+    const conflicting = await gitHelper.conflictingPendingOperation(storyId);
+    if (conflicting) {
+        const label = `${conflicting.storyId}${conflicting.targetEnv ? ` → ${conflicting.targetEnv}` : " (dev publish)"}`;
+        const choice = await vscode.window.showWarningMessage(
+            `${label} has an unresolved conflict from an earlier operation.\n\n` +
+            `Starting this now will discard that conflict and its "Resume" state — the other operation cannot be recovered afterward.`,
+            { modal: true },
+            "Discard it and continue"
+        );
+        if (!choice) { return; }
+        discardConflicting = true;
+    }
+
     await vscode.window.withProgress(
         {
             location:    vscode.ProgressLocation.Notification,
@@ -123,7 +140,7 @@ export async function commitAndPush(
                 if (stashed) { log(`Stashed other in-progress edits on ${branch} — will restore them once dev is updated.`); }
 
                 progress.report({ message: "Adding changes to dev branch..." });
-                const outcome = await gitHelper.publishToDevBranch(storyId);
+                const outcome = await gitHelper.publishToDevBranch(storyId, discardConflicting);
 
                 if (outcome.status === "conflict") {
                     await gitHelper.appendAudit({

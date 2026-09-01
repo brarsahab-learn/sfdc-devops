@@ -104,6 +104,20 @@ export async function runDeploy(
     }
     debugLog(`Raw CLI response:\n${JSON.stringify(parsed, null, 2)}`);
 
+    // The CLI's --json output has two entirely different shapes depending on WHERE it
+    // failed: a deploy that ran and then failed produces {result: {status, details, ...}},
+    // which everything below reads. But the command can also fail before ever producing a
+    // deploy result at all — bad arguments, an auth/permission problem, a timeout wrapped
+    // oddly — and THAT shape is a bare top-level error object ({status, name, message,
+    // exitCode, ...}, no "result" key). `parsed?.result ?? {}` used to silently treat that
+    // second shape as an empty (but present) deploy result, so none of the detail-extraction
+    // below ever found anything to report — exactly what produced the bare "Deploy did not
+    // succeed... no further detail" the audit log and error toast were showing, even though
+    // the real reason was sitting right there in parsed.message/parsed.name.
+    const topLevelError: string | undefined = !parsed?.result
+        ? String(parsed?.message ?? parsed?.name ?? "") || undefined
+        : undefined;
+
     const result = parsed?.result ?? {};
     const status = String(result?.status ?? "");
     const success = status === "Succeeded" || result?.success === true;
@@ -134,11 +148,13 @@ export async function runDeploy(
     // result.error" logic had nothing to show when this was left undefined), so the actual
     // reason sat unread in the log channel instead of reaching either surface. Always build
     // a real message out of whatever detail the CLI response actually gave us.
-    const errorMessage = success ? undefined : buildDeployErrorMessage(result, failures, testsFailed, testsRun, status);
+    const errorMessage = success ? undefined : buildDeployErrorMessage(result, failures, testsFailed, testsRun, status, topLevelError);
 
     if (success) {
         const testsPart = testsRun > 0 ? `, ${testsRun - testsFailed}/${testsRun} test(s) passed` : "";
         log(`${mode === "deploy" ? "Deployed" : "Validated"} — ${numberComponentsDeployed} component(s)${testsPart}.`);
+    } else if (topLevelError) {
+        log(`Failed — ${topLevelError}`);
     } else if (failures.length > 0) {
         log(`Failed — ${failures.length} component error(s):`);
         for (const f of failures.slice(0, 10)) { log(`  ${componentFailureLocator(f)} — ${f.problem}`); }
@@ -167,8 +183,10 @@ function buildDeployErrorMessage(
     failures: ComponentFailure[],
     testsFailed: number,
     testsRun: number,
-    status: string
+    status: string,
+    topLevelError?: string
 ): string {
+    if (topLevelError) { return topLevelError; }
     if (result?.errorMessage) { return String(result.errorMessage); }
     if (failures.length > 0) {
         const shown = failures.slice(0, 3).map(f => `${componentFailureLocator(f)}: ${f.problem}`).join("; ");
