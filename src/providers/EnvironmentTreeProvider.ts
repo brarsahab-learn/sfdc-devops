@@ -32,13 +32,23 @@ export class EnvironmentTreeProvider implements vscode.TreeDataProvider<EnvItem>
     }
 }
 
-class EnvItem extends vscode.TreeItem {
+export class EnvItem extends vscode.TreeItem {
+    /** The org alias this row represents — "" when none is configured yet (view icon handler checks this before running `sf org open`). */
+    readonly orgAlias: string;
+    readonly envLabel: string;
+
     constructor(
         env: ResolvedEnvironment,
         lastDeploy: { sha: string; deployedAt: string; numberComponentsDeployed?: number } | null,
         pending: boolean
     ) {
         super(env.label, vscode.TreeItemCollapsibleState.None);
+        this.orgAlias = env.orgAlias ?? "";
+        this.envLabel = env.label;
+
+        // Lets the inline "open org" icon (contributed in package.json's view/item/context,
+        // scoped to this contextValue) show up only on these rows.
+        this.contextValue = "sfDevopsEnvItem";
 
         // Clicking any environment here opens the Deployment Dashboard bound to exactly that
         // one (see DeploymentDashboardPanel._boundEnv) — the same entry point Story Progress's
@@ -49,11 +59,17 @@ class EnvItem extends vscode.TreeItem {
             arguments: [env.name],
         };
 
+        // The org name up front, then the branch it's fed from, then deploy status — in that
+        // order, since "which real Salesforce org is this" is the thing worth seeing at a
+        // glance before the git-side detail. No org alias configured yet shows as an explicit
+        // gap rather than silently vanishing from the row.
         const shortSha = lastDeploy?.sha ? lastDeploy.sha.slice(0, 8) : null;
-        this.description = shortSha ? `${shortSha}${pending ? " (behind)" : ""}` : "not deployed yet";
+        const orgPart    = env.orgAlias ? env.orgAlias : "⚠ no org alias set";
+        const deployPart = shortSha ? `${shortSha}${pending ? " (behind)" : ""}` : "not deployed yet";
+        this.description = `${orgPart} · ${env.branch} · ${deployPart}`;
 
         if (!lastDeploy) {
-            this.tooltip = `No deploy recorded for ${env.label} yet — run a Deploy from the Deployment Dashboard.`;
+            this.tooltip = `Org: ${orgPart}\nBranch: ${env.branch}\nNo deploy recorded for ${env.label} yet — run a Deploy from the Deployment Dashboard.`;
             this.iconPath = new vscode.ThemeIcon("circle-outline");
         } else {
             const deployedAt = new Date(lastDeploy.deployedAt).toLocaleString();
@@ -61,8 +77,8 @@ class EnvItem extends vscode.TreeItem {
                 ? `, ${lastDeploy.numberComponentsDeployed} component(s)`
                 : "";
             this.tooltip = pending
-                ? `Last deployed: ${deployedAt}${components}\n${env.branch} has newer commits not yet deployed.`
-                : `Last deployed: ${deployedAt}${components}\nUp to date with ${env.branch}.`;
+                ? `Org: ${orgPart}\nBranch: ${env.branch}\nLast deployed: ${deployedAt}${components}\n${env.branch} has newer commits not yet deployed.`
+                : `Org: ${orgPart}\nBranch: ${env.branch}\nLast deployed: ${deployedAt}${components}\nUp to date with ${env.branch}.`;
             this.iconPath = new vscode.ThemeIcon(pending ? "warning" : env.icon);
         }
     }

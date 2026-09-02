@@ -13,6 +13,7 @@ import { syncBranch }      from "./commands/syncBranch";
 import { prepare2gpBetaCommand } from "./commands/prepare2gpBeta";
 import { createGitProviderClient } from "./GitProviderClient";
 import { GitHelper, warnUncommittedChanges } from "./GitHelper";
+import { GitRefContentProvider, SF_DEVOPS_DIFF_SCHEME } from "./DiffContentProvider";
 import { DeploymentDashboardPanel } from "./providers/DeploymentDashboardPanel";
 import { AuditTrailPanel } from "./providers/AuditTrailPanel";
 import {
@@ -23,6 +24,8 @@ import {
 import { getEffectiveRole, canAccessConfig, promptChangeRole } from "./RoleManager";
 import { initLog } from "./Log";
 import { watchGitState } from "./GitWatcher";
+import { execSf } from "./SfCli";
+import { EnvItem } from "./providers/EnvironmentTreeProvider";
 
 let deployPoller:    NodeJS.Timeout | undefined;
 
@@ -37,6 +40,12 @@ export async function activate(context: vscode.ExtensionContext) {
     // repo still resolves PR/pipeline status correctly out of the box.
     const remoteUrl = await gitHelper.getRemoteUrl();
     const bbClient  = createGitProviderClient(context, remoteUrl);
+
+    // Backs "Review Changes" (Promote/Validate confirm) with real VS Code diff editors —
+    // content comes straight from git refs, no checkout needed for either side.
+    context.subscriptions.push(
+        vscode.workspace.registerTextDocumentContentProvider(SF_DEVOPS_DIFF_SCHEME, new GitRefContentProvider(gitHelper))
+    );
 
     // Role controls which promote buttons/config-management UI are available — see
     // sfDevops.roles and each environment's requiredRole in sfDevops.environments.
@@ -245,6 +254,29 @@ export async function activate(context: vscode.ExtensionContext) {
                 env = picked.env;
             }
             DeploymentDashboardPanel.createOrShow(gitHelper, context, env);
+        }),
+
+        // Inline "view" icon on each Environments tree row (package.json's view/item/context,
+        // scoped to EnvItem's contextValue) — `sf org open` launches the org in the browser
+        // using its own authenticated session (frontdoor.jsp under the hood), landing
+        // straight on the Deploy Status page instead of the default home page.
+        vscode.commands.registerCommand("sfDevops.openEnvOrgDeployStatus", async (item?: EnvItem) => {
+            if (!item?.orgAlias) {
+                vscode.window.showWarningMessage(
+                    `No org alias set for ${item?.envLabel ?? "this environment"} — set sfDevops.environments[].orgAlias to enable this.`
+                );
+                return;
+            }
+            try {
+                await execSf(
+                    ["org", "open", "--target-org", item.orgAlias, "--path", "lightning/setup/DeployStatus/home"],
+                    { cwd: gitHelper.getWorkspaceRoot(), timeout: 30_000, maxBuffer: 2 * 1024 * 1024 }
+                );
+            } catch (err: any) {
+                vscode.window.showErrorMessage(
+                    `Could not open "${item.orgAlias}" — it may not be authenticated yet. (${err?.message ?? err})`
+                );
+            }
         }),
 
         vscode.commands.registerCommand("sfDevops.changeRole", async () => {

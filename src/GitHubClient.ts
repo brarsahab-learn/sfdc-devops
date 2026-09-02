@@ -104,6 +104,24 @@ export class GitHubClient implements IGitProviderClient {
         return "none";
     }
 
+    /** Silent, same as getPRState — never prompts for a token. */
+    async getOpenPRUrl(sourceBranch: string, destinationBranch: string, repoOverride?: { workspace: string; repoSlug: string }): Promise<string | null> {
+        const owner = repoOverride?.workspace || this.owner;
+        const repo  = repoOverride?.repoSlug  || this.repo;
+        if (!owner || !repo) { return null; }
+        try {
+            const token = await this.getToken();
+            const prs = await this.fetch<any[]>(
+                "GET",
+                `/repos/${owner}/${repo}/pulls?head=${owner}:${sourceBranch}&base=${destinationBranch}&state=open`,
+                token
+            );
+            return prs[0]?.html_url ?? null;
+        } catch {
+            return null;
+        }
+    }
+
     async getLatestPipelines(limit = 10): Promise<PipelineRun[]> {
         if (!this.owner || !this.repo) { return []; }
         try {

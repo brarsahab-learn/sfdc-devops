@@ -20,6 +20,12 @@ function escapeHtml(s: string): string {
     return String(s).replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]!));
 }
 
+/** The other half of a metadata file's on-disk pair — Foo.cls <-> Foo.cls-meta.xml. Used to keep the two always selected together, since deploying one without the other is either invalid or silently incomplete. */
+function metaSiblingPath(filePath: string): string | null {
+    if (filePath.endsWith("-meta.xml")) { return filePath.slice(0, -"-meta.xml".length) || null; }
+    return `${filePath}-meta.xml`;
+}
+
 interface EnvViewModel {
     env:          ResolvedEnvironment;
     nextEnv?:     ResolvedEnvironment;
@@ -28,6 +34,8 @@ interface EnvViewModel {
     lastDeploy:   { sha: string; deployedAt: string } | null;
     groups:       StoryChangeGroup[];
     allFiles:     AuditChangedFile[];
+    /** Path → the date of the most recent commit (within this env's pending range) that touched it — powers the "Date updated" sort. */
+    fileDates:    Record<string, string>;
     diffVsNext:   AuditChangedFile[] | null;
     packageXml:   string;
     unmapped:     string[];
@@ -61,6 +69,15 @@ export class DeploymentDashboardPanel {
      * pipeline gate) alongside the one they did.
      */
     private _boundEnv: string;
+    /**
+     * Bumped at the start of every refresh() call. Since refresh() awaits fetchRemote() and
+     * git reads before rendering, two overlapping refreshes (e.g. clicking DEV then UAT in
+     * quick succession, or the background poller firing mid-refresh) can otherwise resolve
+     * out of order — whichever finishes last wins the render, even if it was reading
+     * _boundEnv for an env the user already navigated away from. Each refresh snapshots its
+     * own token and only applies its render if no newer refresh has started meanwhile.
+     */
+    private _refreshToken = 0;
     private _lastOutcome?: DeployOutcome;
     /** Fingerprint (sorted file paths, joined) of the last selection that successfully Validated, per env — Deploy is locked until the CURRENT selection matches it exactly. Sticky across renders (unlike _lastOutcome), so it's not just a one-time click-time check: the button re-locks the moment the checked selection changes. */
     private _validatedSelections = new Map<string, string>();
@@ -127,8 +144,10 @@ export class DeploymentDashboardPanel {
     }
 
     public async refresh() {
+        const token = ++this._refreshToken;
         try {
             await this._gitHelper.fetchRemote();
+            if (token !== this._refreshToken) { return; } // a newer refresh has since started — this one's result is stale
             // Dev (the publish env) is deployable here too — same tree/Validate/Deploy UI as
             // every other stage, tracked via the same recordDeployed/getDeployState this
             // dashboard already uses everywhere else. It never gates, and is never gated by,
@@ -146,9 +165,11 @@ export class DeploymentDashboardPanel {
             }
             const prevEnv = idx > 0 ? envs[idx - 1] : undefined;
             const model = await this._buildViewModel(envs[idx], envs[idx + 1], prevEnv);
+            if (token !== this._refreshToken) { return; } // stale by the time the view model finished building
             this._panel.title = `SF DevOps Deployments — ${model.env.label}`;
             this._panel.webview.html = this._renderHtml(model);
         } catch (err) {
+            if (token !== this._refreshToken) { return; }
             this._panel.webview.html = `<body style="padding:16px;color:#f48771;font-family:sans-serif">Error: ${escapeHtml(String(err))}</body>`;
         }
     }
@@ -160,6 +181,7 @@ export class DeploymentDashboardPanel {
 
         let groups: StoryChangeGroup[] = [];
         let allFiles: AuditChangedFile[] = [];
+        const fileDates: Record<string, string> = {};
 
         // Baseline to diff "what's pending" from: the last thing this dashboard actually
         // deployed here, or — if it's never deployed here at all — the point where this
@@ -175,7 +197,13 @@ export class DeploymentDashboardPanel {
             const commits: CommitInfo[] = await this._gitHelper.commitLogBetweenRaw(baseline, `origin/${env.branch}`);
             const filesByHash = new Map<string, AuditChangedFile[]>();
             for (const c of commits) {
-                filesByHash.set(c.hash, await this._gitHelper.filesInCommit(c.hash));
+                const filesForCommit = await this._gitHelper.filesInCommit(c.hash);
+                filesByHash.set(c.hash, filesForCommit);
+                // commits come back newest-first (git log's default order) — the first commit
+                // touching a given path is its most recent, so only record a path's date once.
+                for (const f of filesForCommit) {
+                    if (!(f.path in fileDates)) { fileDates[f.path] = c.date; }
+                }
             }
             groups = groupChangesByStory(commits, filesByHash);
             allFiles = dedupe(groups.flatMap(g => g.files));
@@ -208,7 +236,7 @@ export class DeploymentDashboardPanel {
             : { apexTestMap: {}, apexTestFilePaths: {} };
 
         return {
-            env, nextEnv, prevEnv, currentSha, lastDeploy, groups, allFiles, diffVsNext, packageXml, unmapped, apexTestMap, apexTestFilePaths,
+            env, nextEnv, prevEnv, currentSha, lastDeploy, groups, allFiles, fileDates, diffVsNext, packageXml, unmapped, apexTestMap, apexTestFilePaths,
             canDeploy:   canPromote(this._userRole, env),
             orgAliasSet: Boolean(env.orgAlias),
         };
@@ -222,7 +250,8 @@ export class DeploymentDashboardPanel {
         files: AuditChangedFile[],
         summary: string,
         testLevel: string,
-        tests?: string[]
+        tests?: string[],
+        progress?: vscode.Progress<{ message?: string }>
     ): Promise<DeployResult> {
         const { xml: packageXml, unmapped } = buildPackageXml(files);
 
@@ -234,7 +263,8 @@ export class DeploymentDashboardPanel {
             testLevel,
             getDeployTimeoutSeconds(),
             mode,
-            tests
+            tests,
+            status => progress?.report({ message: status })
         );
 
         if (result.success && mode === "deploy") {
@@ -268,6 +298,22 @@ export class DeploymentDashboardPanel {
         const promotable = getPromotableEnvironments();
         const env = [publishEnv, ...promotable].find(e => e.name === msg.env);
         if (!env) { return; }
+
+        // A real Validate/Deploy can take well past a few seconds (branch checkout, a real
+        // Salesforce check-only or real deploy, now polled every few seconds rather than one
+        // blocking call) — with nothing in the webview itself disabling buttons while that
+        // runs, a second click (Deploy again, or Validate while Deploy is still going) would
+        // otherwise race a second `git checkout -B` against the same working tree the first
+        // one is still using — exactly the class of bug already fixed for Promote/Resume/
+        // Publish. Refuse the second click instead of letting that race happen.
+        const lockKey = `dashboard:${env.name}`;
+        if (!this._gitHelper.tryBeginOperation(lockKey)) {
+            vscode.window.showWarningMessage(`Already ${msg.actionMode === "deploy" ? "deploying to" : "validating against"} ${env.label} — give it a moment to finish before clicking again.`);
+            return;
+        }
+
+        try {
+
         const isDev = env.name === publishEnv.name;
         const promIdx = promotable.findIndex(e => e.name === env.name);
 
@@ -296,6 +342,24 @@ export class DeploymentDashboardPanel {
         const model = await this._buildViewModel(env, nextEnv, prevEnv);
         let { files, summary } = resolveSelection(selection, model.groups, model.allFiles);
 
+        // Belt-and-suspenders, same as the auto-test-file folding below: a "files" selection
+        // is never trusted to have already paired each component with its own -meta.xml (the
+        // client does this too, but a selection could in principle arrive without it) — fold
+        // in any sibling that's actually pending here but wasn't in the selection.
+        if (selection.mode === "files") {
+            const present = new Set(files.map(f => f.path));
+            const pendingByPath = new Map(model.allFiles.map(f => [f.path, f]));
+            const extraMeta: AuditChangedFile[] = [];
+            for (const f of files) {
+                const sibling = metaSiblingPath(f.path);
+                if (sibling && !present.has(sibling)) {
+                    const siblingFile = pendingByPath.get(sibling);
+                    if (siblingFile) { present.add(sibling); extraMeta.push(siblingFile); }
+                }
+            }
+            if (extraMeta.length > 0) { files = [...files, ...extraMeta]; }
+        }
+
         // Which tests actually run is recomputed here from the FINAL resolved file list, not
         // trusted from the client — same "never trust the client for what actually executes"
         // principle as the deploy-lock/prod gates above. "auto" is the default whenever the
@@ -320,6 +384,26 @@ export class DeploymentDashboardPanel {
                 }
             }
             if (extra.length > 0) { files = [...files, ...extra]; }
+        }
+
+        // A deleted file doesn't exist on disk after the checkout below — passing it as
+        // --source-dir crashes the CLI outright with "File or folder not found" (this is the
+        // same gap buildPackageXml's manifest preview already works around — "real deletions
+        // belong in destructiveChanges.xml, not here" — that fix never reached what's actually
+        // sent to the CLI). Not deployable this way yet; drop them from the selection and say
+        // so clearly instead of crashing or silently leaving them undeleted with no explanation.
+        // "all" mode deploys the whole source root with no explicit file list, so this doesn't
+        // apply there.
+        if (selection.mode !== "all") {
+            const deletedFiles = files.filter(f => f.change === "deleted");
+            if (deletedFiles.length > 0) {
+                files = files.filter(f => f.change !== "deleted");
+                vscode.window.showWarningMessage(
+                    `${deletedFiles.length} deleted file(s) can't be included in this ${requestedMode === "deploy" ? "deploy" : "validate"} yet ` +
+                    `(${deletedFiles.slice(0, 3).map(f => f.path.split("/").pop()).join(", ")}${deletedFiles.length > 3 ? ", …" : ""}) — ` +
+                    `delete them manually in ${env.label} for now.`
+                );
+            }
         }
 
         // An empty non-"all" selection must never silently fall through to deploying the
@@ -349,20 +433,31 @@ export class DeploymentDashboardPanel {
             if (!confirm) { return; }
         }
 
+        let stashLabel: string | null = null;
         if (await this._gitHelper.hasUncommittedChanges()) {
-            await warnUncommittedChanges(this._gitHelper, "Commit or stash your local changes before deploying — this checks out a fresh copy of the environment branch from origin, which would collide with them. Note this deploy would never have included them anyway: it always deploys origin's pushed content, never local edits.");
-            return;
+            stashLabel = await warnUncommittedChanges(
+                this._gitHelper,
+                "Commit or stash your local changes before deploying — this checks out a fresh copy of the environment branch from origin, which would collide with them. Note this deploy would never have included them anyway: it always deploys origin's pushed content, never local edits.",
+                { offerStash: true }
+            );
+            if (!stashLabel) { return; }
         }
 
         const originalBranch = await this._gitHelper.currentBranch();
 
+        // Captured inside the progress callback, acted on AFTER it — see below for why.
+        // A plain `let` narrows to `null` at the read site below (TS can't see the closure
+        // actually assigns it), so this uses a wrapper object instead of relying on that.
+        const cleanupPrompt: { value: { env: ResolvedEnvironment; storyIds: string[] } | null } = { value: null };
+
         await vscode.window.withProgress(
             { location: vscode.ProgressLocation.Notification, title: `${requestedMode === "deploy" ? "Deploying" : "Validating"} against ${env.label}...`, cancellable: false },
-            async () => {
+            async (progress) => {
                 try {
+                    progress.report({ message: `Switching local checkout to origin/${env.branch} and pulling latest...` });
                     await this._gitHelper.createLocalBranchFrom(env.branch, env.branch);
 
-                    const first = await this._executeStep(env, requestedMode, selection, files, summary, testLevel, tests);
+                    const first = await this._executeStep(env, requestedMode, selection, files, summary, testLevel, tests, progress);
 
                     if (requestedMode === "validate" && first.success) {
                         this._validatedSelections.set(env.name, fingerprintFiles(files));
@@ -370,7 +465,7 @@ export class DeploymentDashboardPanel {
 
                     if (requestedMode === "validate" && first.success && autoDeployRequested) {
                         log(`Validate passed — auto-deploying to ${env.label} (auto-deploy enabled)…`);
-                        const second = await this._executeStep(env, "deploy", selection, files, summary, testLevel, tests);
+                        const second = await this._executeStep(env, "deploy", selection, files, summary, testLevel, tests, progress);
                         if (second.success) { this._validatedSelections.delete(env.name); }
                         this._lastOutcome = second.success
                             ? {
@@ -381,7 +476,7 @@ export class DeploymentDashboardPanel {
                             : { env: env.name, kind: "deployFailed", message: second.error ?? "Auto-deploy failed after a successful validate." };
                         if (second.success) {
                             vscode.window.showInformationMessage(`✅ Validated and auto-deployed to ${env.label} — ${summary}.`);
-                            await this._promptCleanupPromotionBranches(env, touchedStoryIds(model.groups, files));
+                            cleanupPrompt.value = { env, storyIds: touchedStoryIds(model.groups, files) };
                         } else {
                             vscode.window.showErrorMessage(`❌ Validate passed but auto-deploy to ${env.label} failed: ${second.error ?? "see the audit trail"}.`);
                         }
@@ -405,7 +500,7 @@ export class DeploymentDashboardPanel {
                             : { env: env.name, kind: "deployFailed", message: first.error ?? "Deploy failed." };
                         if (first.success) {
                             vscode.window.showInformationMessage(`✅ Deployed against ${env.label} — ${summary}.`);
-                            await this._promptCleanupPromotionBranches(env, touchedStoryIds(model.groups, files));
+                            cleanupPrompt.value = { env, storyIds: touchedStoryIds(model.groups, files) };
                         } else {
                             vscode.window.showErrorMessage(`❌ Deploy against ${env.label} failed: ${first.error ?? "see component failures in the audit trail"}.`);
                         }
@@ -424,10 +519,32 @@ export class DeploymentDashboardPanel {
                     vscode.window.showErrorMessage(`${requestedMode === "deploy" ? "Deploy" : "Validation"} failed: ${err}`);
                 } finally {
                     if (originalBranch) { await this._gitHelper.checkoutBranch(originalBranch).catch(() => {}); }
+                    if (stashLabel) {
+                        const restore = await this._gitHelper.restoreStash(stashLabel);
+                        if (restore.status === "conflict") {
+                            vscode.window.showWarningMessage(
+                                `Your stashed changes are safe but conflicted while restoring — resolve the conflict markers now showing in your files (Source Control view), then run "git stash drop" to finish (stash: ${restore.ref}).`
+                            );
+                        }
+                    }
                     await this.refresh();
                 }
             }
         );
+
+        // Deliberately OUTSIDE the progress notification above, not inside it — this prompt
+        // has its own action buttons ("Yes, delete" / "No") and awaiting it from inside the
+        // notification's callback left the "Deploying/Validating against X..." toast visibly
+        // stuck open (still showing its last, already-final status) for as long as this
+        // separate, easy-to-miss prompt sat unanswered — looking exactly like a hang even
+        // though the actual deploy had already finished. Now the deploy notification closes
+        // the instant the deploy itself is done, and this asks its own question afterward.
+        if (cleanupPrompt.value) {
+            await this._promptCleanupPromotionBranches(cleanupPrompt.value.env, cleanupPrompt.value.storyIds);
+        }
+        } finally {
+            this._gitHelper.endOperation(lockKey);
+        }
     }
 
     /**
@@ -547,6 +664,10 @@ export class DeploymentDashboardPanel {
   .select-row { font-size: 11px; margin-bottom: 6px; }
   .select-row a { color: var(--accent); cursor: pointer; text-decoration: none; }
   .select-row a:hover { text-decoration: underline; }
+  .tree-controls { display: flex; align-items: center; justify-content: space-between; font-size: 11px; margin-bottom: 8px; color: var(--muted); gap: 8px; }
+  .tree-controls label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+  .sort-select { font-size: 11px; padding: 2px 4px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 3px; }
+  .tree.hide-meta .meta-file { display: none; }
   .selection-summary { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
 
   .type-group { margin-bottom: 6px; }
@@ -570,6 +691,13 @@ export class DeploymentDashboardPanel {
   .group-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
   .shared { font-size: 11px; color: var(--err); margin-left: 6px; font-weight: normal; }
 
+  .busy-bar {
+    margin-top: 14px; padding: 8px 12px; border-radius: 6px; font-size: 12.5px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid var(--accent);
+    color: var(--fg); display: flex; align-items: center; gap: 8px;
+  }
+  .busy-bar .spin { display: inline-block; animation: sf-devops-spin 1s linear infinite; }
+  @keyframes sf-devops-spin { to { transform: rotate(360deg); } }
   .deploy-row { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
   .auto-deploy-label { font-size: 12px; display: flex; align-items: center; gap: 6px; }
   .auto-deploy-label .meta { margin: 0; }
@@ -626,7 +754,47 @@ ${envPane}
   function refresh() { send('refresh'); }
   function rebind(env) { send('rebind', { env: env }); }
 
-  function toggleFile(env) { recomputeSelection(env); }
+  // A component's -meta.xml is deployed together with it always — mirror the checkbox
+  // state onto its sibling so you never have to remember to check both (or worse, check
+  // just the meta file and forget the component it belongs to).
+  function metaSiblingPath(path) {
+    return path.endsWith('-meta.xml') ? path.slice(0, -'-meta.xml'.length) : (path + '-meta.xml');
+  }
+
+  function toggleFile(env, cb) {
+    var sibling = metaSiblingPath(cb.value);
+    var boxes = document.querySelectorAll('.file-check[data-env="' + env + '"]');
+    for (var i = 0; i < boxes.length; i++) {
+      if (boxes[i].value === sibling) { boxes[i].checked = cb.checked; break; }
+    }
+    recomputeSelection(env);
+  }
+
+  // Meta files stay in the DOM (and keep whatever checked state they were given above) even
+  // while hidden — this only controls whether their row is shown, never whether they're
+  // included in the actual selection sent to the server.
+  function toggleShowMeta(env) {
+    var tree = document.getElementById('tree-' + env);
+    var cb = document.getElementById('showMeta-' + env);
+    if (tree && cb) { tree.classList.toggle('hide-meta', !cb.checked); }
+  }
+
+  function applySort(env) {
+    var sel = document.querySelector('.sort-select[data-env="' + env + '"]');
+    var mode = sel ? sel.value : 'name';
+    document.querySelectorAll('.type-group[data-env="' + env + '"] ul.files').forEach(function (ul) {
+      var rows = Array.prototype.slice.call(ul.querySelectorAll('.tree-row'));
+      rows.sort(function (a, b) {
+        if (mode === 'date') {
+          var da = Date.parse(a.dataset.date || '') || 0;
+          var db = Date.parse(b.dataset.date || '') || 0;
+          if (da !== db) { return db - da; } // most recently updated first
+        }
+        return (a.dataset.name || '').localeCompare(b.dataset.name || '');
+      });
+      rows.forEach(function (row) { ul.appendChild(row); });
+    });
+  }
 
   function currentFingerprint(env) {
     var boxes = Array.prototype.slice.call(document.querySelectorAll('.file-check[data-env="' + env + '"]:checked'));
@@ -748,11 +916,35 @@ ${envPane}
     });
   }
 
+  // A real Validate/Deploy now runs async and polls for minutes, not one blocking call — with
+  // nothing else in the DOM changing meanwhile, the panel can look "frozen" even though it's
+  // working exactly as expected. Shows a visible busy state immediately on click so there's
+  // no doubt something is happening; the next refresh() (always sent once the action finishes,
+  // success or failure) replaces the whole panel and clears this on its own. The safety
+  // timeout only guards the pathological case where that refresh never arrives at all.
+  var BUSY_TIMEOUT_MS = 20 * 60 * 1000;
+  var busyTimeouts = {};
+  function showBusy(env, label) {
+    var bar = document.getElementById('busyBar-' + env);
+    if (bar) { bar.hidden = false; bar.innerHTML = '<span class="spin">&#9696;</span> ' + escapeHtmlJs(label); }
+    var validateBtn = document.getElementById('validateBtn-' + env);
+    var deployBtn = document.getElementById('deployBtn-' + env);
+    if (validateBtn) { validateBtn.disabled = true; }
+    if (deployBtn) { deployBtn.disabled = true; }
+    clearTimeout(busyTimeouts[env]);
+    busyTimeouts[env] = setTimeout(function () {
+      if (bar) { bar.hidden = true; }
+      if (validateBtn) { validateBtn.disabled = false; }
+      updateDeployButtonState(env);
+    }, BUSY_TIMEOUT_MS);
+  }
+
   function runAction(env, actionMode) {
     var boxes = Array.prototype.slice.call(document.querySelectorAll('.file-check[data-env="' + env + '"]:checked'));
     var files = boxes.map(function (b) { return b.value; });
     var autoCb = document.getElementById('autoDeploy-' + env);
     var autoDeployOnSuccess = Boolean(autoCb && autoCb.checked);
+    showBusy(env, (actionMode === 'deploy' ? 'Deploying' : 'Validating') + ' against ' + env + '…');
     send('runAction', { env: env, actionMode: actionMode, selectionMode: 'files', files: files, autoDeployOnSuccess: autoDeployOnSuccess, testMode: currentTestMode(env) });
   }
 
@@ -760,6 +952,7 @@ ${envPane}
   function bootstrapAction(env, actionMode) {
     var autoCb = document.getElementById('autoDeploy-' + env);
     var autoDeployOnSuccess = Boolean(autoCb && autoCb.checked);
+    showBusy(env, (actionMode === 'deploy' ? 'Deploying' : 'Validating') + ' against ' + env + '…');
     send('runAction', { env: env, actionMode: actionMode, selectionMode: 'all', autoDeployOnSuccess: autoDeployOnSuccess, testMode: currentTestMode(env) });
   }
 
@@ -954,8 +1147,11 @@ ${envPane}
             const apexName = f.path.endsWith(".cls") ? f.path.split("/").pop()!.replace(/\.cls$/, "") : null;
             const apexAttr = apexName && Object.prototype.hasOwnProperty.call(m.apexTestMap, apexName)
                 ? ` data-apex-name="${escapeHtml(apexName)}"` : "";
-            return `<li class="tree-row" data-env="${env.name}" data-stories="${stories.map(escapeHtml).join(",")}"${apexAttr}>
-          <input type="checkbox" class="file-check" data-env="${env.name}" value="${escapeHtml(f.path)}"${checked} onchange="toggleFile('${env.name}')">
+            const isMeta = f.path.endsWith("-meta.xml");
+            const name = f.path.split("/").pop() ?? f.path;
+            const date = m.fileDates[f.path] ?? "";
+            return `<li class="tree-row${isMeta ? " meta-file" : ""}" data-env="${env.name}" data-stories="${stories.map(escapeHtml).join(",")}" data-name="${escapeHtml(name)}" data-date="${escapeHtml(date)}"${apexAttr}>
+          <input type="checkbox" class="file-check" data-env="${env.name}" value="${escapeHtml(f.path)}"${checked} onchange="toggleFile('${env.name}', this)">
           <span class="change ${f.change}">${f.change}</span>
           <span class="file-path clickable" onclick="viewPendingFileDiff('${env.name}','${escapeHtml(f.path)}')" title="Preview diff">${escapeHtml(f.path)}</span>
           ${stories.length ? `<span class="story-badge" title="story/PR">${stories.map(escapeHtml).join(", ")}</span>` : ""}
@@ -1040,11 +1236,24 @@ ${envPane}
       ${m.allFiles.length ? `<div class="select-row">
         <a onclick="selectAll('${env.name}', true)">Select all</a> ·
         <a onclick="selectAll('${env.name}', false)">Select none</a>
+      </div>
+      <div class="tree-controls">
+        <label class="show-meta-label" title="Meta files (-meta.xml) are always deployed together with their component regardless of this — this only controls whether their own row is shown.">
+          <input type="checkbox" id="showMeta-${env.name}" onchange="toggleShowMeta('${env.name}')">
+          Show meta files
+        </label>
+        <label class="sort-label">
+          Sort:
+          <select class="sort-select" data-env="${env.name}" onchange="applySort('${env.name}')">
+            <option value="name">Name</option>
+            <option value="date">Date updated</option>
+          </select>
+        </label>
       </div>` : ""}
 
       <div class="selection-summary" id="selSummary-${env.name}">No files selected.</div>
 
-      <div class="tree" id="tree-${env.name}">
+      <div class="tree hide-meta" id="tree-${env.name}">
         ${typeGroupsHtml}${unmappedHtml}
         ${bootstrapHtml}${upToDateHtml}
       </div>
@@ -1063,13 +1272,15 @@ ${envPane}
 
   ${testsPanel}
 
+  <div class="busy-bar" id="busyBar-${env.name}" hidden></div>
+
   <div class="deploy-row">
     <label class="auto-deploy-label" title="${env.isProd ? "Prod always requires a manual Deploy click, regardless of this checkbox." : "If Validate succeeds, immediately run a real Deploy with the same selection."}">
       <input type="checkbox" id="autoDeploy-${env.name}" ${env.isProd ? "disabled" : ""}>
       Auto-deploy on success
       ${env.isProd ? `<span class="meta">(Prod always requires a manual Deploy click)</span>` : ""}
     </label>
-    <button class="btn btn-secondary" ${disabled} onclick="runAction('${env.name}','validate')">🔍 Validate</button>
+    <button class="btn btn-secondary" id="validateBtn-${env.name}" ${disabled} onclick="runAction('${env.name}','validate')">🔍 Validate</button>
     <button class="btn btn-primary" id="deployBtn-${env.name}" data-hard-disabled="${disabled ? "1" : "0"}" disabled title="Run Validate on this exact selection first">🚀 Deploy</button>
   </div>
 </section>

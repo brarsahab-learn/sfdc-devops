@@ -163,6 +163,24 @@ export class BitbucketClient implements IGitProviderClient {
         return "none";
     }
 
+    /** Silent, same as getPRState — never prompts for credentials. */
+    async getOpenPRUrl(sourceBranch: string, destinationBranch: string, repoOverride?: { workspace: string; repoSlug: string }): Promise<string | null> {
+        const workspace = repoOverride?.workspace || this.workspace;
+        const repoSlug  = repoOverride?.repoSlug  || this.repoSlug;
+        if (!workspace || !repoSlug) { return null; }
+        try {
+            const result = await this.fetch<any>(
+                "GET",
+                `/repositories/${workspace}/${repoSlug}/pullrequests?` +
+                `q=source.branch.name="${sourceBranch}"+AND+destination.branch.name="${destinationBranch}"&state=OPEN`
+            );
+            const pr = (result.values ?? [])[0];
+            return pr ? (pr.links?.html?.href || `${BB_WEB}/${workspace}/${repoSlug}/pull-requests/${pr.id}`) : null;
+        } catch {
+            return null;
+        }
+    }
+
     // ── Pipelines ────────────────────────────────────────────────────────────
 
     /** Get latest pipeline runs */

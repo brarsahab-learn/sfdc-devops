@@ -12,7 +12,7 @@
 
 import * as vscode from "vscode";
 import { IGitProviderClient } from "../GitProviderClient";
-import { GitHelper }        from "../GitHelper";
+import { GitHelper, warnUncommittedChanges } from "../GitHelper";
 import { StoryWebviewProvider } from "../providers/StoryWebviewProvider";
 import { coverageSettings } from "./coverageCheck";
 import { runDeploy, DeployResult } from "../DeploymentEngine";
@@ -24,8 +24,41 @@ import {
     ResolvedEnvironment,
 } from "../config";
 import { buildPackageXml, AuditChangedFile } from "../AuditLog";
+import { buildDiffUris } from "../DiffContentProvider";
 
 export type PromoteMode = "validate" | "promote";
+
+/**
+ * "Review Changes" — a real VS Code diff editor per file, current content on `targetBranch`
+ * vs incoming content on `featureBranch`, so the confirm step isn't just a file list. Loops
+ * the picker so multiple files can be reviewed in one pass; Esc (or picking nothing) returns
+ * control to the caller, which re-shows the actual confirm/cancel dialog.
+ */
+export async function reviewStoryDiff(
+    gitHelper:     GitHelper,
+    featureBranch: string,
+    targetBranch:  string,
+    files:         { path: string; change: "added" | "modified" | "deleted" }[]
+): Promise<void> {
+    if (files.length === 0) { return; }
+    const icon = (change: string) =>
+        change === "added" ? "$(diff-added)" : change === "deleted" ? "$(diff-removed)" : "$(diff-modified)";
+
+    while (true) {
+        const pick = await vscode.window.showQuickPick(
+            files.map(f => ({ label: `${icon(f.change)} ${f.path}`, description: f.change, file: f })),
+            {
+                title: `Review changes — ${featureBranch} → ${targetBranch} (${files.length} file(s))`,
+                placeHolder: "Select a file to view its diff — Esc to close",
+            }
+        );
+        if (!pick) { return; }
+        const { before, after } = buildDiffUris(pick.file.path, targetBranch, featureBranch);
+        await vscode.commands.executeCommand(
+            "vscode.diff", before, after, `${pick.file.path} (${targetBranch} ↔ ${featureBranch})`
+        );
+    }
+}
 
 /** Metadata changed on the story's feature branch vs base — used for the audit trail. */
 async function storyChangedFiles(gitHelper: GitHelper, storyId: string): Promise<AuditChangedFile[]> {
@@ -86,7 +119,7 @@ async function runPromotionValidate(
     const promotionBranch = gitHelper.promoBranchName(storyId, targetEnv, "promote");
     const targetBranch    = envCfg.branch;
 
-    progress?.report({ message: `Validating against ${targetEnv.toUpperCase()}...` });
+    progress?.report({ message: `Switching local checkout to origin/${promotionBranch} and pulling latest...` });
     await gitHelper.createLocalBranchFrom(promotionBranch, promotionBranch);
 
     let files = await gitHelper.diffNameStatusBetween(targetBranch, promotionBranch);
@@ -94,6 +127,26 @@ async function runPromotionValidate(
         // Nothing actually differs from the target branch (e.g. re-validating a no-op
         // reuse) — nothing to check-only deploy, so there's nothing to fail either.
         return { ran: false, success: true, numberComponentsDeployed: 0 };
+    }
+
+    // A deleted file doesn't exist on disk after the checkout above — passing it as
+    // --source-dir makes the CLI fail outright with "File or folder not found" (this is
+    // literally what buildPackageXml's manifest preview already excludes deletions for —
+    // "real deletions belong in destructiveChanges.xml, not here" — but that fix never made
+    // it into what's actually sent to the CLI). Deletions aren't deployable this way at all
+    // yet, so drop them from what's sent and say so clearly instead of crashing or silently
+    // dropping them with no explanation.
+    const deletedFiles = files.filter(f => f.change === "deleted");
+    if (deletedFiles.length > 0) {
+        files = files.filter(f => f.change !== "deleted");
+        vscode.window.showWarningMessage(
+            `${storyId}: ${deletedFiles.length} deleted file(s) can't be included in this validate/deploy yet ` +
+            `(${deletedFiles.slice(0, 3).map(f => f.path.split("/").pop()).join(", ")}${deletedFiles.length > 3 ? ", …" : ""}) — ` +
+            `delete them manually in ${targetEnv.toUpperCase()} for now.`
+        );
+        if (files.length === 0) {
+            return { ran: false, success: true, numberComponentsDeployed: 0 };
+        }
     }
 
     const apexClasses = apexClassNamesIn(files);
@@ -114,6 +167,7 @@ async function runPromotionValidate(
         }
     }
 
+    progress?.report({ message: `Validating against ${targetEnv.toUpperCase()}...` });
     return runDeploy(
         gitHelper.getWorkspaceRoot(),
         getSourceRootFolder(),
@@ -122,7 +176,8 @@ async function runPromotionValidate(
         testLevel,
         getDeployTimeoutSeconds(),
         "validate",
-        tests
+        tests,
+        status => progress?.report({ message: status })
     );
 }
 
@@ -140,6 +195,36 @@ export async function runPromotion(
     // differ (e.g. "prod" → branch "main"). Everything below that needs a real git ref
     // uses this; targetEnv itself stays the logical name for gating/audit/labels.
     const targetBranch = envCfg?.branch ?? targetEnv;
+
+    // Already has an open PR for this exact promotion? Jump straight to it instead of
+    // restarting the create-branch/validate sequence — a plain read-only provider-API check,
+    // so it runs before the operation lock and doesn't need to "begin" anything. Validate
+    // Only is unaffected — it never deals in PRs.
+    if (mode === "promote") {
+        const promoBranchForPr = promoBranchName(storyId, targetEnv, "promote");
+        const repoOverride = await gitHelper.resolveRepoIdentity(bbClient);
+        const openPrUrl = await bbClient.getOpenPRUrl(promoBranchForPr, targetBranch, repoOverride);
+        if (openPrUrl) {
+            vscode.env.openExternal(vscode.Uri.parse(openPrUrl));
+            vscode.window.showInformationMessage(`${storyId} already has an open PR into ${envUpper} — opened it instead of starting a new promotion.`);
+            return;
+        }
+    }
+
+    // A real Validate/Promote can take well past a few seconds (branch creation, a git push,
+    // often a real Salesforce check-only deploy) — refuse a second click that lands on this
+    // exact story+env while one's already running instead of racing two git operations
+    // against the same working tree.
+    const lockKey = `promote:${storyId}:${targetEnv}`;
+    if (!gitHelper.tryBeginOperation(lockKey)) {
+        vscode.window.showWarningMessage(`Already ${mode === "validate" ? "validating" : "promoting"} ${storyId} → ${envUpper} — give it a moment to finish before clicking again.`);
+        return;
+    }
+
+    const originalBranch = await gitHelper.currentBranch();
+    let stashLabel: string | null = null;
+
+    try {
 
     // Hard gate: the stage immediately before targetEnv must actually be deployed (not
     // just merged) — skipped for the first promotable env, whose "previous stage" is the
@@ -194,6 +279,22 @@ export async function runPromotion(
         }
     }
 
+    // Hard block, same as the Deployment Dashboard's own guard before its equivalent
+    // checkout: every path below (the reuse shortcut's checkoutFeature, and the main
+    // sequence's checkout -B for the promotion branch) force-syncs a branch from origin,
+    // which git will refuse — or worse, silently collide with — if you have uncommitted
+    // changes sitting around anywhere in the working tree right now. Catching it here with
+    // a clear, actionable message beats letting a raw git error surface from deep inside
+    // beginPromotion/createLocalBranchFrom.
+    if (await gitHelper.hasUncommittedChanges()) {
+        stashLabel = await warnUncommittedChanges(
+            gitHelper,
+            `Commit or stash your local changes before ${mode === "validate" ? "validating" : "promoting"} — this checks out a fresh copy of the promotion branch from origin, which would collide with them.`,
+            { offerStash: true }
+        );
+        if (!stashLabel) { return; }
+    }
+
     // Copado reuse: an existing promotion branch skips straight to opening the PR — but
     // ONLY if it's actually been validated for its current content. This used to just
     // trust that the branch existing meant it was safe to open a PR from; that's exactly
@@ -212,62 +313,93 @@ export async function runPromotion(
         return;
     }
 
+    // An existing-but-unvalidated promotion branch (we already know it's unvalidated —
+    // validated+exists returned above via the Copado-reuse shortcut) is never just reused
+    // as-is: reused unmodified, it validates against whatever the target branch looked like
+    // when it was first cut, which can silently drift as OTHER stories promote into that
+    // same env in the meantime — exactly what showed up as spurious "deleted" entries for a
+    // branch cut before a later, unrelated promotion landed. Refreshing it — re-cutting from
+    // the target's CURRENT tip and re-applying the story's current diff, via the same
+    // beginPromotion() a brand-new promotion uses — keeps every validate honest about what
+    // it's actually being checked against. The one case that must NOT be refreshed: a
+    // cherry-pick left mid-conflict on this exact branch, waiting on Resume — re-cutting
+    // would blow away whatever the user just resolved there.
+    const pendingOp = await gitHelper.getPendingOperation();
+    const hasOwnPendingConflict = Boolean(
+        pendingOp && pendingOp.kind === "promotion" && pendingOp.storyId === storyId && pendingOp.targetEnv === targetEnv
+    );
+    if (hasOwnPendingConflict) {
+        vscode.window.showWarningMessage(
+            `${storyId} → ${envUpper} has an unresolved conflict from an earlier attempt — resolve it and click Resume instead of Validate/Promote again.`
+        );
+        return;
+    }
+
     const promoBranch = promoBranchName(storyId, targetEnv, "promote");
     const branchAlreadyExists = await gitHelper.promotionBranchExists(storyId, targetEnv);
     const featureBranch = featureBranchName(storyId);
 
     // The single biggest source of "wait, what actually got promoted?" confusion: every
     // Validate/Promote works ENTIRELY off `origin/feature/{storyId}` — whatever's actually
-    // pushed — never your local working tree, even if you're sitting right on that branch
-    // with edits in front of you. Two things close that gap: say so explicitly in the
-    // confirm, and — when you're actually on that branch right now — check whether you have
-    // local changes that silently WON'T be part of this at all.
-    let localWarning = "";
-    if ((await gitHelper.currentBranch()) === featureBranch && await gitHelper.hasUncommittedChanges()) {
-        const staged = await gitHelper.stagedFiles();
-        const working = await gitHelper.workingTreeFiles();
-        const total = new Set([...staged, ...working]).size;
-        localWarning = `\n\n⚠ You have ${total} uncommitted local change(s) on ${featureBranch} — these are NOT pushed yet, so they will NOT be included. Only origin/${featureBranch} (what's actually pushed) gets ${mode === "validate" ? "validated" : "promoted"}. Use "☁ Commit & Publish" first if they should be part of this.`;
-    }
+    // pushed — never your local working tree. Say so explicitly in the confirm. (There used
+    // to also be a softer "you have uncommitted local changes, they won't be included, but
+    // proceed anyway if you want" warning scoped to just this branch — the hard block above
+    // now covers that same condition unconditionally, the same way Deploy's does, so that
+    // softer path can no longer be reached and was removed rather than left as dead code.)
     const sourceNote = `\n\nSource: origin/${featureBranch} (last pushed commit) — never your local uncommitted files.`;
 
-    // Promote (not Validate — lower-stakes, re-runnable, and this is the same asymmetry
-    // Deploy's own confirm already has) gets an explicit "here's exactly what's about to go
-    // out" file list before anything real happens — previously the only place this list
-    // existed was the Output Channel log, written by beginPromotion AFTER the cherry-pick
-    // had already started. A story with nothing new to promote (already fully promoted) is
-    // caught here too, instead of running the branch-creation dance into a doomed no-op.
-    let filesBlock = "";
-    if (mode === "promote" && !branchAlreadyExists) {
-        let preview: { path: string; change: string }[];
-        try {
-            preview = await gitHelper.previewStoryFiles(storyId);
-        } catch (err) {
-            vscode.window.showErrorMessage(String(err));
-            return;
-        }
-        if (preview.length === 0) {
-            vscode.window.showInformationMessage(`${storyId} has nothing new to promote to ${envUpper} — it's already up to date there.`);
-            return;
-        }
-        const shown = preview.slice(0, 8).map(f => `  ${f.change === "added" ? "+" : f.change === "deleted" ? "-" : "~"} ${f.path}`);
-        const more = preview.length > 8 ? `\n  ...and ${preview.length - 8} more` : "";
-        filesBlock = `\n\n${preview.length} file(s) (from origin/${featureBranch}):\n${shown.join("\n")}${more}`;
+    // Both Promote and Validate get an explicit "here's exactly what's about to go out" file
+    // list before anything real happens — previously the only place this list existed was
+    // the Output Channel log, written by beginPromotion AFTER the cherry-pick had already
+    // started, and only Promote got it even there. Validate is the FIRST gate in the
+    // mandatory pipeline, so it's exactly where "what's about to be checked" matters most.
+    // Always shown now — an existing branch gets refreshed (see above), so this preview is
+    // exactly what that refresh is about to apply. A story with nothing new (already fully
+    // promoted) is caught here too, instead of running the branch-creation dance into a
+    // doomed no-op.
+    let preview: { path: string; change: "added" | "modified" | "deleted" }[];
+    try {
+        preview = await gitHelper.previewStoryFiles(storyId);
+    } catch (err) {
+        vscode.window.showErrorMessage(String(err));
+        return;
     }
+    if (preview.length === 0) {
+        vscode.window.showInformationMessage(`${storyId} has nothing new to ${mode === "validate" ? "validate against" : "promote to"} ${envUpper} — it's already up to date there.`);
+        return;
+    }
+    const shown = preview.slice(0, 8).map(f => `  ${f.change === "added" ? "+" : f.change === "deleted" ? "-" : "~"} ${f.path}`);
+    const more = preview.length > 8 ? `\n  ...and ${preview.length - 8} more` : "";
+    const filesBlock = `\n\n${preview.length} file(s) (from origin/${featureBranch}):\n${shown.join("\n")}${more}`;
 
-    const stageWord = branchAlreadyExists ? "Re-validate" : "Create the promotion branch and validate";
+    const stageWord = branchAlreadyExists ? "Refresh the promotion branch and validate" : "Create the promotion branch and validate";
     const confirmMsg = mode === "validate"
-        ? `Validate ${storyId} against ${envUpper}?\n\nThis will:\n• ${branchAlreadyExists ? `Reuse ${promoBranch}` : `Create ${promoBranch} from ${targetBranch}`}\n• Run a real check-only validation against ${envUpper} (no deploy)${sourceNote}${localWarning}`
-        : `Promote ${storyId} to ${envUpper}?\n\nThis will:\n• ${stageWord}${branchAlreadyExists ? "" : ` — creates ${promoBranch} from ${targetBranch}`}\n• Only once validation passes: open a PR (promotion → ${targetBranch})\n• Deploy to ${envUpper} once you approve & merge the PR${filesBlock}${sourceNote}${localWarning}`;
+        ? `Validate ${storyId} against ${envUpper}?\n\nThis will:\n• ${branchAlreadyExists ? `Refresh ${promoBranch} from the current ${targetBranch}` : `Create ${promoBranch} from ${targetBranch}`}\n• Run a real check-only validation against ${envUpper} (no deploy)${filesBlock}${sourceNote}`
+        : `Promote ${storyId} to ${envUpper}?\n\nThis will:\n• ${stageWord} — ${branchAlreadyExists ? "refreshes" : "creates"} ${promoBranch} from ${targetBranch}\n• Only once validation passes: open a PR (promotion → ${targetBranch})\n• Deploy to ${envUpper} once you approve & merge the PR${filesBlock}${sourceNote}`;
     const confirmLabel = mode === "validate" ? `Yes, validate against ${envUpper}` : "Yes, Promote";
-    const confirm = await vscode.window.showWarningMessage(confirmMsg, { modal: true }, confirmLabel);
+
+    // "Review Changes" opens a real per-file diff (current on targetBranch vs incoming from
+    // featureBranch) and, once the review is done, re-shows this SAME confirm — a loop rather
+    // than a one-shot detour, so reviewing can never accidentally skip the actual confirm or
+    // silently proceed/cancel on its own.
+    let confirm: string | undefined;
+    while (true) {
+        confirm = await vscode.window.showWarningMessage(confirmMsg, { modal: true }, "Review Changes", confirmLabel);
+        if (confirm === "Review Changes") {
+            await reviewStoryDiff(gitHelper, featureBranch, targetBranch, preview);
+            continue;
+        }
+        break;
+    }
     if (!confirm) { return; }
 
     // Another story (or the same story against a different env) can be sitting mid-conflict
     // right now — beginPromotion would otherwise silently `cherry-pick --abort` it with no
     // warning, orphaning its "Resume" entirely. Surface it and let the user choose instead.
+    // Always checked now — beginPromotion always runs below, whether creating fresh or
+    // refreshing an existing branch.
     let discardConflicting = false;
-    if (!branchAlreadyExists) {
+    {
         const conflicting = await gitHelper.conflictingPendingOperation(storyId, targetEnv);
         if (conflicting) {
             const label = `${conflicting.storyId}${conflicting.targetEnv ? ` → ${conflicting.targetEnv}` : " (dev publish)"}`;
@@ -290,26 +422,24 @@ export async function runPromotion(
         },
         async (progress) => {
             try {
-                if (!branchAlreadyExists) {
-                    progress.report({ message: "① Creating promotion branch..." });
-                    const outcome = await gitHelper.beginPromotion(storyId, targetEnv, mode, targetBranch, discardConflicting);
+                progress.report({ message: branchAlreadyExists ? "① Refreshing promotion branch..." : "① Creating promotion branch..." });
+                const outcome = await gitHelper.beginPromotion(storyId, targetEnv, mode, targetBranch, discardConflicting);
 
-                    if (outcome.status === "conflict") {
-                        const changedFiles = await storyChangedFiles(gitHelper, storyId);
-                        const { xml: packageXml, unmapped: unmappedFiles } = buildPackageXml(changedFiles);
-                        await gitHelper.appendAudit({
-                            operation: mode, storyId, targetEnv, outcome: "conflict",
-                            summary: `Conflict preparing promotion branch for ${envUpper}`,
-                            details: { changedFiles, packageXml, unmappedFiles, conflicts: outcome.conflicts },
-                        });
-                        await reportOperationConflict(gitHelper, outcome.conflicts, envUpper);
-                        storyProvider.refresh();
-                        return;
-                    }
-
-                    progress.report({ message: "① Pushing promotion branch..." });
-                    await gitHelper.finalizePromotion(storyId, targetEnv, mode);
+                if (outcome.status === "conflict") {
+                    const changedFiles = await storyChangedFiles(gitHelper, storyId);
+                    const { xml: packageXml, unmapped: unmappedFiles } = buildPackageXml(changedFiles);
+                    await gitHelper.appendAudit({
+                        operation: mode, storyId, targetEnv, outcome: "conflict",
+                        summary: `Conflict preparing promotion branch for ${envUpper}`,
+                        details: { changedFiles, packageXml, unmappedFiles, conflicts: outcome.conflicts },
+                    });
+                    await reportOperationConflict(gitHelper, outcome.conflicts, envUpper);
+                    storyProvider.refresh();
+                    return;
                 }
+
+                progress.report({ message: "① Pushing promotion branch..." });
+                await gitHelper.finalizePromotion(storyId, targetEnv, mode);
 
                 await finalizeAndFinish(bbClient, gitHelper, storyId, targetEnv, mode, storyProvider, progress);
             } catch (err) {
@@ -322,6 +452,22 @@ export async function runPromotion(
             }
         }
     );
+    } finally {
+        if (stashLabel) {
+            // Land back wherever the stash was actually taken from before popping it —
+            // finalizeAndFinish always ends on the feature branch, which usually IS where the
+            // dirty tree was, but doesn't have to be (see the "dirty branch isn't the story's
+            // own feature branch" case).
+            if (originalBranch) { await gitHelper.checkoutBranch(originalBranch).catch(() => {}); }
+            const restore = await gitHelper.restoreStash(stashLabel);
+            if (restore.status === "conflict") {
+                vscode.window.showWarningMessage(
+                    `Your stashed changes are safe but conflicted while restoring — resolve the conflict markers now showing in your files (Source Control view), then run "git stash drop" to finish (stash: ${restore.ref}).`
+                );
+            }
+        }
+        gitHelper.endOperation(lockKey);
+    }
 }
 
 /**

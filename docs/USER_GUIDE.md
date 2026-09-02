@@ -194,6 +194,7 @@ Notes:
 - **Prod**: **Promote** requires the **Admin** role; **Validate Only** is available to everyone. Prod's branch is `main` by default — the same branch feature branches are cut from.
 - Only your **story's changes** are validated/deployed — never anyone else's.
 - Any promotion branch you already have checked out locally is kept in sync automatically (a fast-forward-only background sync) — it won't look stale just because someone else pushed to it.
+- If you have **any uncommitted local changes** anywhere in your working tree when you click Validate/Promote (or Resume after resolving a conflict), it stops with a clear message instead of proceeding — the step that follows checks out a fresh copy of the promotion branch from origin, which would collide with them. Commit or stash first, then retry. (The Deployment Dashboard has the exact same guard before a real deploy.)
 
 ---
 

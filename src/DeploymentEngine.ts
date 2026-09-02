@@ -30,10 +30,30 @@ export interface DeployResult {
     numberComponentErrors?:    number;
     componentFailures?:        ComponentFailure[];
     testsFailed?:              number;
+    testFailures?:             { name: string; methodName: string; message: string }[];
     error?:                    string;
 }
 
 export type DeployMode = "deploy" | "validate";
+
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/** Turns one `project deploy report` poll into a short human status line — real numbers as they change, not just a static "Validating...". */
+function formatProgress(result: any): string {
+    const status = String(result?.status ?? "Running");
+    const cd = Number(result?.numberComponentsDeployed ?? 0);
+    const ct = Number(result?.numberComponentsTotal ?? 0);
+    const td = Number(result?.numberTestsCompleted ?? 0);
+    const tt = Number(result?.numberTestsTotal ?? 0);
+    const parts: string[] = [];
+    if (ct > 0) { parts.push(`${cd}/${ct} component(s)`); }
+    if (tt > 0) { parts.push(`${td}/${tt} test(s)`); }
+    return parts.length > 0 ? `${status} — ${parts.join(", ")}` : `${status}...`;
+}
+
+const POLL_INTERVAL_MS = 3000;
 
 /**
  * Runs a real (or check-only) Salesforce deploy. `sourceDirs` selects exactly which
@@ -41,6 +61,12 @@ export type DeployMode = "deploy" | "validate";
  * The working tree must already contain the content to deploy (the CLI deploys from
  * disk, not from a git ref) — callers are expected to have checked out the right branch
  * first (see GitHelper.createLocalBranchFrom).
+ *
+ * Kicks the deploy off async and polls `project deploy report` every few seconds rather
+ * than blocking on a single `--wait` call — a real deploy/validate can run for minutes
+ * with zero visible feedback otherwise; `onProgress` (if given) gets a live "N/M
+ * components, N/M tests" status on every poll instead of a static "Deploying..." the
+ * whole time.
  */
 export async function runDeploy(
     workspaceRoot: string,
@@ -50,7 +76,8 @@ export async function runDeploy(
     testLevel:     string,
     timeoutSeconds: number,
     mode:          DeployMode,
-    specifiedTests?: string[]
+    specifiedTests?: string[],
+    onProgress?: (status: string) => void
 ): Promise<DeployResult> {
     const base: DeployResult = { ran: false, success: false };
 
@@ -71,18 +98,27 @@ export async function runDeploy(
     if (testLevel === "RunSpecifiedTests") {
         for (const t of specifiedTests!) { args.push("--tests", t); }
     }
-    args.push("--json", "--wait", String(Math.max(1, Math.round(timeoutSeconds / 60))));
+    // Only `deploy start` exposes this flag (not `deploy validate`, which never actually
+    // touches the org). Without it, the CLI's own source-tracking conflict check can block a
+    // real deploy outright — "N conflicts detected" — the moment the target org has anything
+    // source-tracking sees as changed since its last retrieve. That check is for the
+    // "org-as-source-of-truth" workflow `sf` was built around; this extension's whole model is
+    // the opposite — the promotion branch (already validated) IS the source of truth, so
+    // whatever the org's tracked state thinks changed should never be able to block it.
+    if (mode === "deploy") { args.push("--ignore-conflicts"); }
+    args.push("--json", "--async");
 
     const verb = mode === "deploy" ? "Deploying" : "Validating";
     const scope = sourceDirs.length > 0 ? `${sourceDirs.length} file(s)` : "all files";
     const testsPart = testLevel === "RunSpecifiedTests" ? ` — tests: ${specifiedTests!.join(", ")}` : "";
     revealLog(`${verb} ${scope} to ${orgAlias} (${testLevel})${testsPart}`);
+    onProgress?.(`Starting — ${scope} to ${orgAlias}...`);
 
     let stdout = "";
     try {
         const r = await execSf(args, {
             cwd: workspaceRoot,
-            timeout: timeoutSeconds * 1000,
+            timeout: 120_000, // starting the job async should be quick — this isn't the deploy itself
             maxBuffer: 20 * 1024 * 1024,
         });
         stdout = r.stdout;
@@ -102,6 +138,45 @@ export async function runDeploy(
         log("Failed — could not read the Salesforce CLI response.");
         return { ...base, error: "Could not parse the Salesforce CLI response." };
     }
+
+    // Async start can itself fail outright (bad args, auth) before ever producing a job id —
+    // same bare top-level-error shape handled below for the final result, just checked early
+    // here since there's nothing to poll for without an id.
+    const jobId: string | undefined = parsed?.result?.id;
+    if (!jobId) {
+        debugLog(`Raw CLI response (no job id):\n${JSON.stringify(parsed, null, 2)}`);
+        const message = String(parsed?.message ?? parsed?.name ?? "The Salesforce CLI didn't return a job id to track.");
+        log(`Failed — ${message}`);
+        return { ...base, error: message };
+    }
+    onProgress?.(formatProgress(parsed.result));
+
+    const deadline = Date.now() + timeoutSeconds * 1000;
+    const reportArgs = ["project", "deploy", "report", "--job-id", jobId, "--target-org", orgAlias, "--json"];
+    let timedOut = false;
+    while (true) {
+        const done = Boolean(parsed?.result?.done) || ["Succeeded", "Failed", "Canceled", "SucceededPartial"].includes(String(parsed?.result?.status ?? ""));
+        if (done) { break; }
+        if (Date.now() >= deadline) { timedOut = true; break; }
+        await sleep(POLL_INTERVAL_MS);
+        try {
+            const r = await execSf(reportArgs, { cwd: workspaceRoot, timeout: 60_000, maxBuffer: 20 * 1024 * 1024 });
+            parsed = JSON.parse(r.stdout);
+        } catch (e: any) {
+            // A single flaky poll shouldn't abandon an otherwise-healthy deploy — keep
+            // polling until the deadline; only a poll that never once succeeds falls through
+            // to the timeout/parse-failure paths below via the unchanged `parsed`.
+            debugLog(`Poll failed, retrying — ${e?.message ?? e}`);
+            continue;
+        }
+        onProgress?.(formatProgress(parsed.result));
+    }
+
+    if (timedOut) {
+        log(`Timed out after ${timeoutSeconds}s waiting for job ${jobId} — check its status directly with "sf project deploy report --job-id ${jobId}".`);
+        return { ...base, ran: true, deployId: jobId, error: `Timed out waiting for the deploy to finish (job ${jobId} may still be running in Salesforce — check it directly).` };
+    }
+
     debugLog(`Raw CLI response:\n${JSON.stringify(parsed, null, 2)}`);
 
     // The CLI's --json output has two entirely different shapes depending on WHERE it
@@ -138,7 +213,20 @@ export async function runDeploy(
         });
 
     const numberComponentsDeployed = Number(result?.numberComponentsDeployed ?? result?.details?.componentSuccesses?.length ?? 0);
-    const testsFailed = Number(result?.details?.runTestResult?.numberTestsFailed ?? 0);
+    // The underlying Metadata API RunTestsResult names this `numFailures`, not
+    // `numberTestsFailed` — reading the wrong field silently produced 0 for every real test
+    // failure once results started coming from `project deploy report` (this engine polls
+    // that now instead of one blocking `deploy start --wait`), which reports this same
+    // RunTestsResult shape but was never actually checked against real output before. That
+    // sent every pure-test-failure straight to the generic "no further detail" fallback
+    // below even though the CLI had real failure messages the whole time.
+    const testFailures: { name: string; methodName: string; message: string }[] =
+        (result?.details?.runTestResult?.failures ?? []).map((f: any) => ({
+            name:       String(f?.name ?? f?.className ?? ""),
+            methodName: String(f?.methodName ?? ""),
+            message:    String(f?.message ?? "Unknown test failure"),
+        }));
+    const testsFailed = Number(result?.details?.runTestResult?.numFailures ?? result?.details?.runTestResult?.numberTestsFailed ?? testFailures.length ?? 0);
     const testsRun = Number(result?.details?.runTestResult?.numTestsRun ?? 0);
 
     // What actually gets shown on screen (outcome banner, error toast) and written to the
@@ -148,7 +236,7 @@ export async function runDeploy(
     // result.error" logic had nothing to show when this was left undefined), so the actual
     // reason sat unread in the log channel instead of reaching either surface. Always build
     // a real message out of whatever detail the CLI response actually gave us.
-    const errorMessage = success ? undefined : buildDeployErrorMessage(result, failures, testsFailed, testsRun, status, topLevelError);
+    const errorMessage = success ? undefined : buildDeployErrorMessage(result, failures, testsFailed, testsRun, status, topLevelError, testFailures);
 
     if (success) {
         const testsPart = testsRun > 0 ? `, ${testsRun - testsFailed}/${testsRun} test(s) passed` : "";
@@ -160,7 +248,9 @@ export async function runDeploy(
         for (const f of failures.slice(0, 10)) { log(`  ${componentFailureLocator(f)} — ${f.problem}`); }
         if (failures.length > 10) { log(`  ...and ${failures.length - 10} more.`); }
     } else if (testsFailed > 0) {
-        log(`Failed — ${testsFailed} test(s) failed.`);
+        log(`Failed — ${testsFailed} test(s) failed:`);
+        for (const f of testFailures.slice(0, 10)) { log(`  ${f.name}.${f.methodName} — ${f.message}`); }
+        if (testFailures.length > 10) { log(`  ...and ${testFailures.length - 10} more.`); }
     } else {
         log(`Failed — ${errorMessage}`);
     }
@@ -173,6 +263,7 @@ export async function runDeploy(
         numberComponentErrors: Number(result?.numberComponentErrors ?? failures.length ?? 0),
         componentFailures: failures,
         testsFailed,
+        testFailures,
         error: errorMessage,
     };
 }
@@ -184,7 +275,8 @@ function buildDeployErrorMessage(
     testsFailed: number,
     testsRun: number,
     status: string,
-    topLevelError?: string
+    topLevelError?: string,
+    testFailures: { name: string; methodName: string; message: string }[] = []
 ): string {
     if (topLevelError) { return topLevelError; }
     if (result?.errorMessage) { return String(result.errorMessage); }
@@ -194,7 +286,9 @@ function buildDeployErrorMessage(
         return `${failures.length} component error(s) — ${shown}${more}`;
     }
     if (testsFailed > 0) {
-        return `${testsFailed} of ${testsRun} test(s) failed.`;
+        const shown = testFailures.slice(0, 3).map(f => `${f.name}.${f.methodName}: ${f.message}`).join("; ");
+        const more = testFailures.length > 3 ? ` (+${testFailures.length - 3} more — see the audit trail)` : "";
+        return shown ? `${testsFailed} of ${testsRun} test(s) failed — ${shown}${more}` : `${testsFailed} of ${testsRun} test(s) failed.`;
     }
     return `Deploy did not succeed${status ? ` (status: ${status})` : ""} — the Salesforce CLI gave no further detail.`;
 }

@@ -1141,6 +1141,27 @@ export class GitHelper {
         return Date.now() < this._selfInitiatedUntil;
     }
 
+    /**
+     * Refuses a second concurrent run of the same named operation (e.g. "resume:TEST3") —
+     * a real Resume/Promote/Validate/Publish can genuinely take well past a few seconds (a
+     * git push plus, often, a real Salesforce check-only deploy), and a UI element that
+     * looks like it's done too early (see the sidebar's busy-bar timeout) invites a second
+     * click that would otherwise start a SECOND git operation in the same working tree while
+     * the first is still running — corrupting neither repo state nor deploy result, but
+     * producing exactly the confusing "keeps on running" experience two overlapping
+     * operations racing each other would create. Callers: `if (!gitHelper.tryBeginOperation(key))
+     * { warn and return; }` then `finally { gitHelper.endOperation(key); }`.
+     */
+    private _inFlightOperations = new Set<string>();
+    tryBeginOperation(key: string): boolean {
+        if (this._inFlightOperations.has(key)) { return false; }
+        this._inFlightOperations.add(key);
+        return true;
+    }
+    endOperation(key: string): void {
+        this._inFlightOperations.delete(key);
+    }
+
     /** Raw `origin` remote URL, or null if there isn't one. */
     async getRemoteUrl(): Promise<string | null> {
         try {
@@ -1346,8 +1367,21 @@ export class GitHelper {
  * If some of those changes are already staged on a feature branch, also offers a one-click
  * "Commit to Dev" that runs the same Commit & Publish flow the toolbar button does — no
  * need to switch to Source Control just to finish something already staged.
+ *
+ * When `offerStash` is set (the operations that are about to force-checkout a branch from
+ * origin — Deploy/Validate/Promote/Resume — none of which would ever have included local
+ * edits anyway, since they always act on what's already pushed), also offers "Stash &
+ * Continue": sets the working tree aside and lets the caller proceed immediately instead of
+ * making the user go handle it manually and re-click the same button afterward. Returns the
+ * stash's label if it stashed something (the caller is expected to restore it with
+ * `gitHelper.restoreStash` once the operation finishes, success or fail), or null if the
+ * user picked anything else (including "nothing to stash" — same as declining).
  */
-export async function warnUncommittedChanges(gitHelper: GitHelper, reason: string): Promise<void> {
+export async function warnUncommittedChanges(
+    gitHelper: GitHelper,
+    reason: string,
+    options?: { offerStash?: boolean }
+): Promise<string | null> {
     const files  = await gitHelper.workingTreeFiles();
     const preview = files.slice(0, 5).join(", ") + (files.length > 5 ? `, +${files.length - 5} more` : "");
 
@@ -1356,15 +1390,27 @@ export async function warnUncommittedChanges(gitHelper: GitHelper, reason: strin
     const canCommitToDev = staged.length > 0 && isFeatureBranchName(branch);
 
     const stagedNote = canCommitToDev ? ` (${staged.length} already staged)` : "";
-    const actions = canCommitToDev ? ["Commit to Dev", "Review Changes"] : ["Review Changes"];
+    const actions = [
+        ...(options?.offerStash ? ["Stash & Continue"] : []),
+        ...(canCommitToDev ? ["Commit to Dev"] : []),
+        "Review Changes",
+    ];
+    const stashHint = options?.offerStash
+        ? `\n\n"Stash & Continue" sets these aside and restores them automatically once this finishes.` : "";
 
     const choice = await vscode.window.showWarningMessage(
-        `${reason}\n\n${files.length} file(s) uncommitted: ${preview}${stagedNote}`,
+        `${reason}\n\n${files.length} file(s) uncommitted: ${preview}${stagedNote}${stashHint}`,
         ...actions
     );
+    if (choice === "Stash & Continue") {
+        const label = `sf-devops-autostash-${Date.now()}`;
+        const stashed = await gitHelper.stashUnstagedChanges(label);
+        return stashed ? label : null;
+    }
     if (choice === "Review Changes") {
         await vscode.commands.executeCommand("workbench.view.scm");
     } else if (choice === "Commit to Dev") {
         await vscode.commands.executeCommand("sfDevops.commitAndPush");
     }
+    return null;
 }

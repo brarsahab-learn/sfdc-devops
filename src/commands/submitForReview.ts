@@ -116,6 +116,16 @@ export async function commitAndPush(
         discardConflicting = true;
     }
 
+    // A real publish can take well past a few seconds (a push, then the dev-branch cherry-
+    // pick and its own push) — refuse a second click on this exact story that lands while
+    // one's already running instead of racing two git operations against the same tree.
+    const lockKey = `publish:${storyId}`;
+    if (!gitHelper.tryBeginOperation(lockKey)) {
+        vscode.window.showWarningMessage(`Already publishing ${storyId} — give it a moment to finish before clicking again.`);
+        return;
+    }
+
+    try {
     await vscode.window.withProgress(
         {
             location:    vscode.ProgressLocation.Notification,
@@ -187,5 +197,8 @@ export async function commitAndPush(
             }
         }
     );
+    } finally {
+        gitHelper.endOperation(lockKey);
+    }
 }
 

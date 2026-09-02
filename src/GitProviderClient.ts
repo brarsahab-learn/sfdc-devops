@@ -27,6 +27,15 @@ export interface IGitProviderClient {
     /** State of a PR from sourceBranch -> destinationBranch, using stored credentials if available. */
     getPRState(sourceBranch: string, destinationBranch: string): Promise<"open" | "merged" | "none" | "pipeline_running">;
 
+    /**
+     * The browser URL of the CURRENTLY OPEN PR from sourceBranch -> destinationBranch, or
+     * null if there isn't one (none exists, it's already merged, no token is stored, or the
+     * API call fails). Silent — same "no token, no prompt" behavior as getPRState — used so
+     * clicking Promote on a story that already has an open PR jumps straight to it instead
+     * of restarting the create-branch/validate sequence from scratch.
+     */
+    getOpenPRUrl(sourceBranch: string, destinationBranch: string, repoOverride?: { workspace: string; repoSlug: string }): Promise<string | null>;
+
     /** Most recent pipeline/workflow runs for the repo. */
     getLatestPipelines(limit?: number): Promise<PipelineRun[]>;
 

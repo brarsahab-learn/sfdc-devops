@@ -39,13 +39,24 @@ function escapeHtml(s: string): string {
 // used to have no visible effect until the next full webview.html swap landed, which could
 // look frozen or unresponsive for a moment. A full refresh always replaces this markup
 // wholesale, so "clear the busy state" needs no explicit signal — it's implicit in a new
-// render arriving. The 5s timeout only covers the case where nothing re-renders at all (e.g.
-// a QuickPick the user cancelled), so the UI doesn't stay stuck looking busy forever.
+// render arriving.
+//
+// The fallback timeout only exists for the case where NOTHING ever re-renders at all (e.g. a
+// QuickPick the user cancelled) — it must never be short enough to fire while a real command
+// is still genuinely running. This bit a real user: Resume/Promote/Validate can involve a
+// git push plus an actual Salesforce check-only deploy, which routinely takes well past a
+// few seconds — a too-short timeout re-enabled the button while that was still in flight,
+// which both looked like nothing happened AND invited a second click that started a SECOND
+// overlapping git/CLI operation in the same working tree, compounding the apparent hang.
+// 2 minutes is short enough to still recover a truly-stuck panel, but long enough that it
+// essentially never races a real in-flight operation (the QuickPick-cancel case it actually
+// exists for resolves near-instantly regardless).
+const BUSY_TIMEOUT_MS = 120_000;
 const BUSY_BAR_CSS = `
   .busy-bar { display: none; position: sticky; top: 0; z-index: 20; background: var(--vscode-statusBarItem-warningBackground, var(--vscode-badge-background)); color: var(--vscode-statusBarItem-warningForeground, var(--vscode-badge-foreground)); font-size: 11px; text-align: center; padding: 3px 0; margin: -8px -8px 8px; }
   body.busy .btn, body.busy .tbtn, body.busy button, body.busy .org-btn { pointer-events: none; opacity: 0.55; }
 `;
-const BUSY_BAR_HTML = `<div class="busy-bar" id="busyBar">&#x23F3; Working&hellip;</div>`;
+const BUSY_BAR_HTML = `<div class="busy-bar" id="busyBar">&#x23F3; Working&hellip; (this can take a while for a real validate/deploy)</div>`;
 const BUSY_BAR_JS = `
   function showBusy() {
     document.body.classList.add('busy');
@@ -55,7 +66,7 @@ const BUSY_BAR_JS = `
     window.__busyTimeout = setTimeout(function () {
       document.body.classList.remove('busy');
       if (bar) { bar.style.display = 'none'; }
-    }, 5000);
+    }, ${BUSY_TIMEOUT_MS});
   }
 `;
 
@@ -516,8 +527,15 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                     `<div class="info">&#x26A1; ${nextEnv.label}'s PR is merged &mdash; deploy it to finish this stage.</div>
                      <button class="btn btn-primary" onclick="send('openDeploymentDashboard', '${nextEnv.name}')">&#x1F680; Deploy &mdash; ${nextEnv.label}</button>`;
             } else if (nextEnv) {
+                // Validation is mandatory and gates the PR — so which button is "primary"
+                // (the actually-next step) depends on whether nextEnv's promotion branch has
+                // ALREADY passed it. Not yet validated ("none"/"branch-created"): Validate is
+                // next, Promote is just secondary (it still works — it validates first — but
+                // shouldn't look equally "ready" as Validate). Already validated ("open"):
+                // Promote (open the PR) is next, Validate becomes a secondary "re-validate."
+                const isValidated = progress[nextEnv.name] === "open";
                 const validateBtn =
-                    `<button class="btn btn-primary" onclick="send('validate', '${nextEnv.name}')">&#x2714; Validate Only &mdash; ${nextEnv.label}</button>`;
+                    `<button class="btn ${isValidated ? "btn-secondary" : "btn-primary"}" onclick="send('validate', '${nextEnv.name}')">&#x2714; ${isValidated ? "Re-validate" : "Validate Only"} &mdash; ${nextEnv.label}</button>`;
                 const coverageBlocked = coverageBlockedEnv === nextEnv.name;
 
                 // The env the story is CURRENTLY sitting in — the one immediately before
@@ -530,14 +548,15 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                        <button class="btn btn-secondary" onclick="send('recordSignoff', '${currentEnv!.name}')">&#x2705; Record ${currentEnv!.label} Sign-off</button>`
                     : "";
 
+                const promoteClass = isValidated ? "btn-primary" : "btn-secondary";
                 const promoteBtn = !canPromote(this._userRole, nextEnv)
                     ? `<div class="info">&#x2705; A "${nextEnv.requiredRole}" runs Promote to ${nextEnv.label} (opens a PR — deploying is a separate step after it's merged)</div>`
                     : (coverageBlocked || signoffBlocked)
                     ? `${coverageBlocked ? `<div class="warning">&#x26A0; Coverage check required before promoting to ${nextEnv.label} &mdash; <a href="#" onclick="send('focusCoverage')">run it here</a>.</div>` : ""}
                        ${signoffAction}
                        <button class="btn btn-primary" disabled title="Resolve the gate(s) above first">&#x1F680; Promote &mdash; ${nextEnv.label}</button>`
-                    : `<button class="btn btn-primary" onclick="send('promote', '${nextEnv.name}')" title="Opens a PR into ${nextEnv.label} — deploying is a separate step once it's merged">&#x1F680; Promote &mdash; ${nextEnv.label}</button>`;
-                actionButton = promoteBtn + validateBtn;
+                    : `<button class="btn ${promoteClass}" onclick="send('promote', '${nextEnv.name}')" title="${isValidated ? `Opens a PR into ${nextEnv.label} — deploying is a separate step once it's merged` : `Validates first, then opens a PR into ${nextEnv.label} once it passes`}">&#x1F680; Promote &mdash; ${nextEnv.label}</button>`;
+                actionButton = isValidated ? (promoteBtn + validateBtn) : (validateBtn + promoteBtn);
             } else {
                 actionButton = `<div class="info">&#x2705; ${getTerminalStageMessage()}</div>`;
             }
