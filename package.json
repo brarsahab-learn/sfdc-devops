@@ -466,7 +466,8 @@
 		"compile": "tsc -p ./",
 		"watch": "tsc -watch -p ./",
 		"package": "vsce package",
-		"lint": "eslint src --ext ts"
+		"lint": "eslint src --ext ts",
+		"test": "npm run compile && node test/run.js"
 	},
 	"devDependencies": {
 		"@types/node": "^20.0.0",
