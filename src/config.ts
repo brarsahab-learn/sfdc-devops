@@ -394,6 +394,22 @@ export function getProdOrgAlias(): string {
     return readOrgAliases().prod || cfg().get<string>("prodOrgAlias") || "";
 }
 
+/**
+ * "Demo" isn't a pipeline stage — no branch, no promotion, no gate — it's an optional
+ * secondary org the Deployment Dashboard can deploy the SAME already-validated Prod
+ * package to, in parallel, from Prod's own pane (see DeploymentDashboardPanel). Stored in
+ * the same machine-local alias store as dev/qa/uat/prod, just under its own "demo" key —
+ * deliberately not part of getOrgAliasSlots() (which mirrors getEnvironments() 1:1, and
+ * Demo is never an environment in that sense).
+ */
+export function getDemoOrgAlias(): string {
+    return readOrgAliases().demo || "";
+}
+
+export async function setDemoOrgAlias(alias: string): Promise<void> {
+    await writeOrgAlias("demo", alias);
+}
+
 // ── Org alias management (one slot per configured environment) ──────────────
 // Used by the Setup Check panel to let a user view/edit/authenticate each org alias
 // directly, without hand-editing settings.json. Deliberately NOT a fixed 4-slot

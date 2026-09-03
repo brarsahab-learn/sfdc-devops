@@ -12,7 +12,7 @@ import {
     apexClassNamesIn, resolveEffectiveTestLevel, buildApexTestMap,
 } from "../DeploymentPlanner";
 import { buildPackageXml, AuditChangedFile, metadataTypeForPath } from "../AuditLog";
-import { getPromotableEnvironments, getPublishEnvironment, getSourceRootFolder, getDeployTimeoutSeconds, canPromote, getBaseBranch, ResolvedEnvironment } from "../config";
+import { getPromotableEnvironments, getPublishEnvironment, getSourceRootFolder, getDeployTimeoutSeconds, canPromote, getBaseBranch, ResolvedEnvironment, getDemoOrgAlias } from "../config";
 import { getEffectiveRole } from "../RoleManager";
 import { log } from "../Log";
 
@@ -288,6 +288,53 @@ export class DeploymentDashboardPanel {
         return result;
     }
 
+    /**
+     * Demo's half of a parallel Prod+Demo deploy — see _runAction. Deliberately NOT
+     * _executeStep with a fake env: no recordDeployed (Demo isn't a pipeline stage, nothing
+     * downstream gates on "last deployed to Demo"), no _validatedSelections bookkeeping
+     * (Demo rides along on whatever Prod already had validated, it never locks/unlocks
+     * anything of its own), its own audit entry under targetEnv "demo", and its progress
+     * messages prefixed so they stay legible sharing one notification with Prod's.
+     */
+    private async _executeDemoStep(
+        selection: DeploySelection,
+        files: AuditChangedFile[],
+        summary: string,
+        testLevel: string,
+        tests?: string[],
+        progress?: vscode.Progress<{ message?: string }>
+    ): Promise<DeployResult> {
+        const demoAlias = getDemoOrgAlias();
+        const { xml: packageXml, unmapped } = buildPackageXml(files);
+
+        const result = await runDeploy(
+            this._gitHelper.getWorkspaceRoot(),
+            getSourceRootFolder(),
+            selection.mode === "all" ? [] : files.map(f => f.path),
+            demoAlias,
+            testLevel,
+            getDeployTimeoutSeconds(),
+            "deploy",
+            tests,
+            status => progress?.report({ message: `[Demo] ${status}` })
+        );
+
+        await this._gitHelper.appendAudit({
+            operation:  "deploy",
+            targetEnv:  "demo",
+            outcome:    result.success ? "success" : "failure",
+            summary:    `${summary} (parallel Demo deploy) — ${result.success ? "succeeded" : (result.error ?? "failed")}`,
+            details:    {
+                changedFiles: files, packageXml, unmappedFiles: unmapped,
+                deployId: result.deployId, componentFailures: result.componentFailures,
+                selectionMode: selection.mode, error: result.error,
+                testLevel, tests,
+            },
+        });
+
+        return result;
+    }
+
     private async _runAction(msg: any) {
         // Dev (the publish env) is deployable from here too, but it's not in the promotable
         // pipeline — it never gates a later env and is never gated itself (its "previous
@@ -425,8 +472,11 @@ export class DeploymentDashboardPanel {
                 return;
             }
 
+            const demoNote = env.isProd && msg.deployToDemo && getDemoOrgAlias()
+                ? `\n\nAlso deploying the SAME selection to Demo (${getDemoOrgAlias()}) at the same time, in parallel.`
+                : "";
             const confirm = await vscode.window.showWarningMessage(
-                `${msg.selectionMode === "all" ? "Deploy ALL pending changes" : "Deploy the selected changes"} to ${env.label} (${env.orgAlias})?\n\nThis runs a real Salesforce deployment.`,
+                `${msg.selectionMode === "all" ? "Deploy ALL pending changes" : "Deploy the selected changes"} to ${env.label} (${env.orgAlias})?\n\nThis runs a real Salesforce deployment.${demoNote}`,
                 { modal: true },
                 "Yes, deploy"
             );
@@ -457,7 +507,27 @@ export class DeploymentDashboardPanel {
                     progress.report({ message: `Switching local checkout to origin/${env.branch} and pulling latest...` });
                     await this._gitHelper.createLocalBranchFrom(env.branch, env.branch);
 
-                    const first = await this._executeStep(env, requestedMode, selection, files, summary, testLevel, tests, progress);
+                    // Parallel Prod+Demo deploy: genuinely concurrent (Promise.all), not one
+                    // after the other — both real `sf project deploy` processes running at
+                    // the same time. Demo only ever rides along on a standalone manual Prod
+                    // Deploy click (never the validate-only path, never auto-deploy — Prod
+                    // already forces auto-deploy off regardless of this checkbox).
+                    const runDemoInParallel = requestedMode === "deploy" && env.isProd && Boolean(msg.deployToDemo) && Boolean(getDemoOrgAlias());
+                    const [first, demoResult] = await Promise.all([
+                        this._executeStep(env, requestedMode, selection, files, summary, testLevel, tests, progress),
+                        runDemoInParallel ? this._executeDemoStep(selection, files, summary, testLevel, tests, progress) : Promise.resolve(null),
+                    ]);
+
+                    // Reported independently of Prod's own outcome below — a Demo failure
+                    // never fails, blocks, or gets conflated with Prod's result, same as if
+                    // someone had deployed to Demo separately from another tab.
+                    if (demoResult) {
+                        if (demoResult.success) {
+                            vscode.window.showInformationMessage(`✅ Also deployed to Demo (${getDemoOrgAlias()}) in parallel — ${summary}.`);
+                        } else {
+                            vscode.window.showErrorMessage(`❌ Demo deploy failed: ${demoResult.error ?? "see the audit trail"}.`);
+                        }
+                    }
 
                     if (requestedMode === "validate" && first.success) {
                         this._validatedSelections.set(env.name, fingerprintFiles(files));
@@ -939,13 +1009,18 @@ ${envPane}
     }, BUSY_TIMEOUT_MS);
   }
 
+  function isDeployToDemoChecked(env) {
+    var cb = document.getElementById('deployToDemo-' + env);
+    return Boolean(cb && cb.checked);
+  }
+
   function runAction(env, actionMode) {
     var boxes = Array.prototype.slice.call(document.querySelectorAll('.file-check[data-env="' + env + '"]:checked'));
     var files = boxes.map(function (b) { return b.value; });
     var autoCb = document.getElementById('autoDeploy-' + env);
     var autoDeployOnSuccess = Boolean(autoCb && autoCb.checked);
     showBusy(env, (actionMode === 'deploy' ? 'Deploying' : 'Validating') + ' against ' + env + '…');
-    send('runAction', { env: env, actionMode: actionMode, selectionMode: 'files', files: files, autoDeployOnSuccess: autoDeployOnSuccess, testMode: currentTestMode(env) });
+    send('runAction', { env: env, actionMode: actionMode, selectionMode: 'files', files: files, autoDeployOnSuccess: autoDeployOnSuccess, deployToDemo: isDeployToDemoChecked(env), testMode: currentTestMode(env) });
   }
 
   // Used only when the tree is empty (never deployed before) — nothing to individually check.
@@ -953,7 +1028,7 @@ ${envPane}
     var autoCb = document.getElementById('autoDeploy-' + env);
     var autoDeployOnSuccess = Boolean(autoCb && autoCb.checked);
     showBusy(env, (actionMode === 'deploy' ? 'Deploying' : 'Validating') + ' against ' + env + '…');
-    send('runAction', { env: env, actionMode: actionMode, selectionMode: 'all', autoDeployOnSuccess: autoDeployOnSuccess, testMode: currentTestMode(env) });
+    send('runAction', { env: env, actionMode: actionMode, selectionMode: 'all', autoDeployOnSuccess: autoDeployOnSuccess, deployToDemo: isDeployToDemoChecked(env), testMode: currentTestMode(env) });
   }
 
   function viewFileDiff(targetEnv, beforeRef, beforeLabel, afterRef, afterLabel, path) {
@@ -1280,6 +1355,10 @@ ${envPane}
       Auto-deploy on success
       ${env.isProd ? `<span class="meta">(Prod always requires a manual Deploy click)</span>` : ""}
     </label>
+    ${env.isProd && getDemoOrgAlias() ? `<label class="auto-deploy-label" title="Runs a real deploy of this SAME selection to the Demo org (${escapeHtml(getDemoOrgAlias())}) at the same time as Prod's own deploy — a genuinely parallel deploy, not one after the other. Demo's result is reported separately and never blocks or fails Prod's.">
+      <input type="checkbox" id="deployToDemo-${env.name}">
+      Also deploy to Demo (${escapeHtml(getDemoOrgAlias())}) in parallel
+    </label>` : ""}
     <button class="btn btn-secondary" id="validateBtn-${env.name}" ${disabled} onclick="runAction('${env.name}','validate')">🔍 Validate</button>
     <button class="btn btn-primary" id="deployBtn-${env.name}" data-hard-disabled="${disabled ? "1" : "0"}" disabled title="Run Validate on this exact selection first">🚀 Deploy</button>
   </div>

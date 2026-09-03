@@ -9,7 +9,7 @@ import {
     extractStoryId, isFeatureBranch, getBaseBranch, getEnvironments, getPublishEnvironment,
     getPromotableEnvironments, canPromote, getTerminalStageMessage, promoBranchName, buildTicketUrl,
     getCoverageGateEnvironment, getOrgAliasSlots, setOrgAliasSlot, OrgAliasSlot,
-    ResolvedEnvironment, getFallbackRefreshSeconds,
+    ResolvedEnvironment, getFallbackRefreshSeconds, getDemoOrgAlias, setDemoOrgAlias,
 } from "../config";
 import { runSetupChecks, SetupCheckItem } from "../SetupCheck";
 import { getEffectiveRole, canAccessConfig } from "../RoleManager";
@@ -164,14 +164,19 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                     break;
                 case "saveOrgAlias":
                     if (msg.key && canAccessConfig(this._userRole)) {
-                        await setOrgAliasSlot(msg.key as OrgAliasSlot["key"], (msg.value ?? "").trim());
+                        const value = (msg.value ?? "").trim();
+                        // "demo" isn't one of getOrgAliasSlots()' 4 canonical env-mirrored
+                        // slots (see config.ts) — same underlying machine-local store, just
+                        // its own named getter/setter so it's not silently lumped in with
+                        // "the 4 canonical slots" setOrgAliasSlot's own doc comment means.
+                        if (msg.key === "demo") { await setDemoOrgAlias(value); } else { await setOrgAliasSlot(msg.key as OrgAliasSlot["key"], value); }
                         this.refresh();
                     }
                     break;
                 case "loginOrg":
                     if (msg.key && msg.value?.trim() && canAccessConfig(this._userRole)) {
                         const alias = msg.value.trim();
-                        await setOrgAliasSlot(msg.key as OrgAliasSlot["key"], alias);
+                        if (msg.key === "demo") { await setDemoOrgAlias(alias); } else { await setOrgAliasSlot(msg.key as OrgAliasSlot["key"], alias); }
                         const alreadyConnected = await isOrgConnected(alias, this._gitHelper.getWorkspaceRoot());
                         if (alreadyConnected) {
                             vscode.window.showInformationMessage(`"${alias}" is already authenticated — no login needed.`);
@@ -298,17 +303,24 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
             const requiredPassed = checks.filter(c => c.required).every(c => c.passed);
             const confirmed = this._extContext.workspaceState.get<boolean>(SETUP_CONFIRMED_KEY, false);
 
+            // Demo is optional (not a pipeline stage — see DeploymentDashboardPanel's
+            // parallel Prod+Demo deploy), so it's never part of runSetupChecks' required
+            // orgAuthentication gate. Its own connected/not status is still worth showing in
+            // the same manager row the 4 real slots use, just resolved separately here.
+            const demoAlias = getDemoOrgAlias();
+            const demoConnected = demoAlias ? await isOrgConnected(demoAlias, this._gitHelper.getWorkspaceRoot()) : false;
+
             if (!requiredPassed) {
                 if (confirmed) { await this._extContext.workspaceState.update(SETUP_CONFIRMED_KEY, false); }
-                this._view.webview.html = this._getSetupGateHtml(checks, false, false);
+                this._view.webview.html = this._getSetupGateHtml(checks, false, false, demoAlias, demoConnected);
                 return;
             }
             if (!confirmed) {
-                this._view.webview.html = this._getSetupGateHtml(checks, true, false);
+                this._view.webview.html = this._getSetupGateHtml(checks, true, false, demoAlias, demoConnected);
                 return;
             }
             if (this._forceShowSetup) {
-                this._view.webview.html = this._getSetupGateHtml(checks, true, true);
+                this._view.webview.html = this._getSetupGateHtml(checks, true, true, demoAlias, demoConnected);
                 return;
             }
 
@@ -835,7 +847,10 @@ ${onFeatureBranch ? `
      * Gated view shown until every required setup check passes AND the user has clicked
      * "Confirm" once for this workspace. Nothing else in the panel renders until then.
      */
-    private _getSetupGateHtml(checks: SetupCheckItem[], canConfirm: boolean, forced: boolean): string {
+    private _getSetupGateHtml(
+        checks: SetupCheckItem[], canConfirm: boolean, forced: boolean,
+        demoAlias: string = "", demoConnected: boolean = false
+    ): string {
         const orgAliasSlots = getOrgAliasSlots();
         const connectedAliases = checks.find(c => c.key === "orgAuthentication")?.connectedAliases;
 
@@ -846,6 +861,7 @@ ${onFeatureBranch ? `
                 : "";
             const orgAliasManager = c.key === "orgAuthentication"
                 ? this._renderOrgAliasSlots(orgAliasSlots, canAccessConfig(this._userRole), connectedAliases)
+                    + this._renderDemoOrgAliasRow(demoAlias, demoConnected, canAccessConfig(this._userRole))
                 : "";
             const envBranchManager = c.key === "environmentBranches" && c.missingEnvBranches?.length
                 ? this._renderMissingEnvBranches(c.missingEnvBranches, canAccessConfig(this._userRole))
@@ -977,6 +993,50 @@ ${forced ? `<button class="btn btn-secondary" onclick="send('closeSetupCheck')">
   </div>`).join("");
 
         return `<div class="org-manager">${rows}</div>`;
+    }
+
+    /**
+     * Demo isn't one of getOrgAliasSlots()'s environment-mirrored slots (it's not a
+     * pipeline stage — see DeploymentDashboardPanel's parallel Prod+Demo deploy) — this is
+     * its own optional row, rendered right after the real 4. Reuses the exact same
+     * save/login/open client functions the other slots use (saveOrgAlias/loginOrg/
+     * openOrgFromInput, keyed 'demo' the same way they're keyed by env name) — those
+     * handlers branch on key === "demo" server-side to call setDemoOrgAlias instead of
+     * setOrgAliasSlot, same underlying machine-local store either way.
+     */
+    private _renderDemoOrgAliasRow(alias: string, connected: boolean, editable: boolean): string {
+        const statusGlyph = !alias
+            ? `<span class="org-status" title="No alias set">—</span>`
+            : connected
+                ? `<span class="org-status" title="Connected">✅</span>`
+                : `<span class="org-status" title="Not authenticated — needs (re)login">❌</span>`;
+        const openBtn = alias
+            ? `<button class="org-btn" title="Open ${escapeHtml(alias)} in the browser" onclick="openOrg('${escapeHtml(alias)}')">🌐</button>`
+            : "";
+
+        if (!editable) {
+            return `<div class="org-manager">
+  <div class="org-row">
+    ${statusGlyph}
+    <span class="org-label">Demo</span>
+    <span class="org-readonly">${escapeHtml(alias) || "(not set)"}</span>
+    ${openBtn}
+  </div>
+  <div class="muted-note">Demo is optional — a secondary org the Dashboard can deploy the same Prod package to in parallel. Ask an Admin to configure it.</div>
+</div>`;
+        }
+
+        return `<div class="org-manager">
+  <div class="org-row">
+    ${statusGlyph}
+    <span class="org-label">Demo</span>
+    <input type="text" id="alias-demo" value="${escapeHtml(alias)}" placeholder="org alias / username (optional)">
+    <button class="org-btn" title="Save" onclick="saveOrgAlias('demo')">💾</button>
+    <button class="org-btn" title="Authenticate if needed (opens a terminal only when not already connected)" onclick="loginOrg('demo')">🔑</button>
+    <button class="org-btn" title="Open in the browser" onclick="openOrgFromInput('demo')">🌐</button>
+  </div>
+  <div class="muted-note">Optional — a secondary org the Deployment Dashboard can deploy the same Prod package to in parallel, from Prod's own pane.</div>
+</div>`;
     }
 
     /**
