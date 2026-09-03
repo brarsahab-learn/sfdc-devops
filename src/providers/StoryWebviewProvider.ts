@@ -186,6 +186,20 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                 case "openOrg":
                     if (msg.value?.trim()) { await this._openOrgInBrowser(msg.value.trim()); }
                     break;
+                case "pushEnvBranch":
+                    if (msg.value && canAccessConfig(this._userRole)) {
+                        try {
+                            await this._gitHelper.createEnvBranchOnOrigin(msg.value);
+                            vscode.window.showInformationMessage(`✅ Pushed "${msg.value}" to origin.`);
+                        } catch (err) {
+                            vscode.window.showErrorMessage(`Could not push "${msg.value}": ${err}`);
+                        }
+                        this.refresh();
+                    }
+                    break;
+                case "editEnvironmentsSetting":
+                    vscode.commands.executeCommand("workbench.action.openSettings", "sfDevops.environments");
+                    break;
                 case "recordSignoff":
                     if (msg.env) { await this._recordSignoff(msg.env); }
                     break;
@@ -833,11 +847,15 @@ ${onFeatureBranch ? `
             const orgAliasManager = c.key === "orgAuthentication"
                 ? this._renderOrgAliasSlots(orgAliasSlots, canAccessConfig(this._userRole), connectedAliases)
                 : "";
+            const envBranchManager = c.key === "environmentBranches" && c.missingEnvBranches?.length
+                ? this._renderMissingEnvBranches(c.missingEnvBranches, canAccessConfig(this._userRole))
+                : "";
             return `<div class="check ${c.passed ? "pass" : (c.required ? "fail" : "warn")}">
   <div class="check-head"><span class="icon">${icon}</span><span class="label">${escapeHtml(c.label)}</span>${c.required ? "" : "<span class=\"opt\">optional</span>"}</div>
   <div class="detail">${escapeHtml(c.detail)}</div>
   ${fixHtml}
   ${orgAliasManager}
+  ${envBranchManager}
 </div>`;
         }).join("");
 
@@ -910,6 +928,10 @@ ${forced ? `<button class="btn btn-secondary" onclick="send('closeSetupCheck')">
     const el = document.getElementById('alias-' + key);
     openOrg(el ? el.value : '');
   }
+  function pushEnvBranch(branch) {
+    showBusy();
+    vscode.postMessage({ command: 'pushEnvBranch', value: branch });
+  }
 </script>
 </body>
 </html>`;
@@ -955,6 +977,30 @@ ${forced ? `<button class="btn btn-secondary" onclick="send('closeSetupCheck')">
   </div>`).join("");
 
         return `<div class="org-manager">${rows}</div>`;
+    }
+
+    /**
+     * One-click fix for "these environment branches don't exist on origin yet" — same
+     * Admin-only editing gate as org aliases, since creating branches other stories will
+     * promote into is a repo-shape decision, not a routine per-developer action. "Push"
+     * creates the branch on origin from the current base branch tip (GitHelper.createEnvBranchOnOrigin
+     * — no local checkout involved); "Edit settings" is the alternative fix path (the
+     * branches already exist under different names) opened straight to sfDevops.environments.
+     */
+    private _renderMissingEnvBranches(missing: { branch: string; label: string }[], editable: boolean): string {
+        if (!editable) {
+            return `<div class="org-manager"><div class="muted-note">Ask an Admin to push the missing branch(es) or update sfDevops.environments.</div></div>`;
+        }
+        const rows = missing.map(m => `
+  <div class="org-row">
+    <span class="org-status" title="Missing on origin">❌</span>
+    <span class="org-label">${escapeHtml(m.label)}</span>
+    <span class="org-readonly">${escapeHtml(m.branch)}</span>
+    <button class="org-btn" title="Create &quot;${escapeHtml(m.branch)}&quot; on origin from the base branch" onclick="pushEnvBranch('${escapeHtml(m.branch)}')">⬆ Push</button>
+  </div>`).join("");
+        return `<div class="org-manager">${rows}
+  <button class="org-btn" style="margin-top:4px" onclick="send('editEnvironmentsSetting')">⚙ Edit sfDevops.environments instead</button>
+</div>`;
     }
 
     private _getLoadingHtml(): string {

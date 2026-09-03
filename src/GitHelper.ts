@@ -109,6 +109,22 @@ export class GitHelper {
         return branchName;
     }
 
+    /**
+     * Creates an environment branch (dev/qa/uat/prod/...) directly on origin, pointing at
+     * wherever the configured base branch's tip currently is — Setup Check's one-click fix
+     * for "this environment branch doesn't exist yet." Never touches the local checkout (no
+     * `git checkout` at all): a plain ref-to-ref push, so it can't collide with uncommitted
+     * work or leave the workspace on an unexpected branch.
+     */
+    async createEnvBranchOnOrigin(branchName: string): Promise<void> {
+        const base = getBaseBranch();
+        await this.git(["fetch", "origin", "--prune"]);
+        if (!(await this.remoteBranchExists(base))) {
+            throw new Error(`Base branch origin/${base} doesn't exist either — push that first (or fix sfDevops.baseBranch).`);
+        }
+        await this.git(["push", "origin", `origin/${base}:refs/heads/${branchName}`]);
+    }
+
     // ── Pending cherry-pick state (survives reloads via a file in the git dir) ──
 
     private async gitDirPath(): Promise<string> {
@@ -393,6 +409,26 @@ export class GitHelper {
                 code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : "modified";
             return { path: filePath, change };
         });
+    }
+
+    /**
+     * True if the story's CURRENT content (its net diff vs base, same set `previewStoryFiles`
+     * returns) is already fully reflected on `envBranch` for those exact files. Used to catch
+     * a real gap in the pipeline status: once a story has been promoted all the way through,
+     * publishing NEW changes to the feature branch (more commits, another Commit & Publish)
+     * used to leave every later stage still showing "Deployed"/"Merged" from the OLD content —
+     * storyCommitShaOnBranch just finds *some* commit for this story on that branch, it has no
+     * idea a newer one now exists on the feature branch that was never re-promoted. Returns
+     * true (nothing to compare) when there's no feature branch or no story files to check —
+     * absence of a gap, not a false "up to date."
+     */
+    async storyContentMatchesBranch(storyId: string, envBranch: string): Promise<boolean> {
+        const featureBranch = featureBranchName(storyId);
+        if (!(await this.remoteBranchExists(featureBranch))) { return true; }
+        const files = await this.previewStoryFiles(storyId).catch(() => []);
+        if (files.length === 0) { return true; }
+        const diff = await this.git(["diff", "--name-status", `origin/${envBranch}`, `origin/${featureBranch}`, "--", ...files.map(f => f.path)]);
+        return diff.trim().length === 0;
     }
 
     /** Validate Only pushes the validate-branch template; Promote & Deploy pushes the promotion-branch template (the PR source). */

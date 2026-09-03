@@ -31,10 +31,55 @@ export interface DeployResult {
     componentFailures?:        ComponentFailure[];
     testsFailed?:              number;
     testFailures?:             { name: string; methodName: string; message: string }[];
+    /** Org-side source-tracking conflicts this deploy is about to overwrite (deploy mode only — see checkDeployConflicts). Empty when the org doesn't have source tracking, or genuinely has none. */
+    conflicts?:                { fullName: string; type: string; filePath: string }[];
     error?:                    string;
 }
 
+export interface ConflictInfo {
+    fullName: string;
+    type:     string;
+    filePath: string;
+}
+
 export type DeployMode = "deploy" | "validate";
+
+/**
+ * Read-only lookup of exactly what `sf project deploy start --ignore-conflicts` (see below)
+ * is about to silently overwrite — this extension always deploys treating the git-validated
+ * promotion branch as authoritative, so org-side source tracking conflicts never block a real
+ * deploy, but that shouldn't mean the user never finds out ANYTHING changed in the org since
+ * it was last tracked. Best-effort: only orgs with source tracking enabled (sandboxes/scratch
+ * orgs, not Prod) report anything here at all, and any parsing failure just returns an empty
+ * list rather than blocking the actual deploy that follows.
+ */
+export async function checkDeployConflicts(
+    workspaceRoot: string,
+    sourceRoot:    string,
+    sourceDirs:    string[],
+    orgAlias:      string
+): Promise<ConflictInfo[]> {
+    const args = ["project", "deploy", "preview", "--target-org", orgAlias, "--json"];
+    if (sourceDirs.length > 0) {
+        for (const dir of sourceDirs) { args.push("--source-dir", dir); }
+    } else {
+        args.push("--source-dir", sourceRoot);
+    }
+    try {
+        const r = await execSf(args, { cwd: workspaceRoot, timeout: 60_000, maxBuffer: 20 * 1024 * 1024 });
+        const parsed = JSON.parse(r.stdout);
+        const raw = parsed?.result?.conflicts;
+        if (!Array.isArray(raw)) { return []; }
+        return raw.map((c: any) => ({
+            fullName: String(c?.fullName ?? c?.fileName ?? "unknown"),
+            type:     String(c?.type ?? c?.componentType ?? ""),
+            filePath: String(c?.filePath ?? c?.path ?? ""),
+        }));
+    } catch (e: any) {
+        debugLog(`deploy preview (conflict check) failed, skipping — ${e?.message ?? e}`);
+        return [];
+    }
+}
 
 function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -112,6 +157,19 @@ export async function runDeploy(
     const scope = sourceDirs.length > 0 ? `${sourceDirs.length} file(s)` : "all files";
     const testsPart = testLevel === "RunSpecifiedTests" ? ` — tests: ${specifiedTests!.join(", ")}` : "";
     revealLog(`${verb} ${scope} to ${orgAlias} (${testLevel})${testsPart}`);
+
+    // Real deploy only — see checkDeployConflicts' own comment for why this never blocks:
+    // logged up front, before the deploy itself, so it's visible even though --ignore-conflicts
+    // means the deploy below will proceed regardless of what this finds.
+    let conflicts: ConflictInfo[] = [];
+    if (mode === "deploy") {
+        onProgress?.(`Checking for org-side conflicts on ${orgAlias}...`);
+        conflicts = await checkDeployConflicts(workspaceRoot, sourceRoot, sourceDirs, orgAlias);
+        if (conflicts.length > 0) {
+            log(`⚠ ${conflicts.length} org-side conflict(s) — the org has changed since it was last tracked, and this deploy will overwrite them (git is treated as authoritative, never the org):`);
+            for (const c of conflicts) { log(`  ${c.type ? `${c.type} ` : ""}${c.fullName}${c.filePath ? ` (${c.filePath})` : ""}`); }
+        }
+    }
     onProgress?.(`Starting — ${scope} to ${orgAlias}...`);
 
     let stdout = "";
@@ -264,6 +322,7 @@ export async function runDeploy(
         componentFailures: failures,
         testsFailed,
         testFailures,
+        conflicts,
         error: errorMessage,
     };
 }

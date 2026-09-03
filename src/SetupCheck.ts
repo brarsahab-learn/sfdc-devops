@@ -24,6 +24,8 @@ export interface SetupCheckItem {
     fixSteps:  string[];
     /** Only populated on the "orgAuthentication" item — per-slot (dev/qa/uat/prod) connected status. */
     connectedAliases?: Record<string, boolean>;
+    /** Only populated on the "environmentBranches" item — lets Setup render a one-click "push this branch" action per missing branch instead of just telling the user to run it themselves. */
+    missingEnvBranches?: { branch: string; label: string }[];
 }
 
 const PROVIDER_TOKEN_SECRET: Record<string, string> = {
@@ -114,6 +116,7 @@ export async function runSetupChecks(
             ...missingEnvs.map(m => `Push "${m.env.branch}" to origin for the "${m.env.label}" environment, or`),
             "Update sfDevops.environments to match the branches that actually exist.",
         ],
+        missingEnvBranches: missingEnvs.map(m => ({ branch: m.env.branch, label: m.env.label })),
     });
 
     const sourceRoot = getSourceRootFolder();

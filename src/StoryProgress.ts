@@ -63,6 +63,14 @@ export async function getEnvState(
 
         const storyCommitSha = await gitHelper.storyCommitShaOnBranch(envBranch, storyId);
         if (storyCommitSha) {
+            // This env has SOME commit for the story — but the feature branch may have moved
+            // on since (another Commit & Publish landed new work on dev after this env was
+            // already promoted through). Without this check, "Deployed"/"Merged" would keep
+            // showing green forever, never prompting the story back through the pipeline for
+            // its new content.
+            if (!(await gitHelper.storyContentMatchesBranch(storyId, envBranch))) {
+                return "none";
+            }
             const lastDeploy = await gitHelper.getDeployState(env);
             if (lastDeploy && await gitHelper.isAncestorSha(storyCommitSha, lastDeploy.sha)) {
                 return "deployed";

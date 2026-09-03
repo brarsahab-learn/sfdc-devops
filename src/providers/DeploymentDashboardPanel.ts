@@ -6,7 +6,7 @@
 
 import * as vscode from "vscode";
 import { GitHelper, warnUncommittedChanges } from "../GitHelper";
-import { runDeploy, DeployMode, DeployResult } from "../DeploymentEngine";
+import { runDeploy, DeployMode, DeployResult, ConflictInfo } from "../DeploymentEngine";
 import {
     groupChangesByStory, resolveSelection, DeploySelection, StoryChangeGroup, CommitInfo,
     apexClassNamesIn, resolveEffectiveTestLevel, buildApexTestMap,
@@ -281,7 +281,7 @@ export class DeploymentDashboardPanel {
                 changedFiles: files, packageXml, unmappedFiles: unmapped,
                 deployId: result.deployId, componentFailures: result.componentFailures,
                 selectionMode: selection.mode, error: result.error,
-                testLevel, tests,
+                testLevel, tests, orgConflicts: result.conflicts,
             },
         });
 
@@ -475,7 +475,7 @@ export class DeploymentDashboardPanel {
                               }
                             : { env: env.name, kind: "deployFailed", message: second.error ?? "Auto-deploy failed after a successful validate." };
                         if (second.success) {
-                            vscode.window.showInformationMessage(`✅ Validated and auto-deployed to ${env.label} — ${summary}.`);
+                            vscode.window.showInformationMessage(`✅ Validated and auto-deployed to ${env.label} — ${summary}.${conflictNote(second.conflicts)}`);
                             cleanupPrompt.value = { env, storyIds: touchedStoryIds(model.groups, files) };
                         } else {
                             vscode.window.showErrorMessage(`❌ Validate passed but auto-deploy to ${env.label} failed: ${second.error ?? "see the audit trail"}.`);
@@ -499,7 +499,7 @@ export class DeploymentDashboardPanel {
                               }
                             : { env: env.name, kind: "deployFailed", message: first.error ?? "Deploy failed." };
                         if (first.success) {
-                            vscode.window.showInformationMessage(`✅ Deployed against ${env.label} — ${summary}.`);
+                            vscode.window.showInformationMessage(`✅ Deployed against ${env.label} — ${summary}.${conflictNote(first.conflicts)}`);
                             cleanupPrompt.value = { env, storyIds: touchedStoryIds(model.groups, files) };
                         } else {
                             vscode.window.showErrorMessage(`❌ Deploy against ${env.label} failed: ${first.error ?? "see component failures in the audit trail"}.`);
@@ -1286,6 +1286,14 @@ ${envPane}
 </section>
 </div>`;
     }
+}
+
+/** Appended to the success toast when the org had source-tracking conflicts this deploy overwrote — full detail is already in the Output Channel log (see DeploymentEngine.checkDeployConflicts), this is just enough to flag that it happened. */
+function conflictNote(conflicts?: ConflictInfo[]): string {
+    if (!conflicts || conflicts.length === 0) { return ""; }
+    const names = conflicts.slice(0, 3).map(c => c.fullName).join(", ");
+    const more = conflicts.length > 3 ? `, +${conflicts.length - 3} more` : "";
+    return ` ⚠ ${conflicts.length} org-side conflict(s) overwritten (${names}${more}) — see the Output Channel for detail.`;
 }
 
 function dedupe(files: AuditChangedFile[]): AuditChangedFile[] {

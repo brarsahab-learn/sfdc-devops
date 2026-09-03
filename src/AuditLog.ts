@@ -30,6 +30,8 @@ export interface AuditDetails {
     packageXml?:        string;
     unmappedFiles?:     string[];
     conflicts?:         string[];
+    /** Org-side source-tracking conflicts a real deploy overwrote (--ignore-conflicts) — distinct from `conflicts` above, which is a cherry-pick's file paths. */
+    orgConflicts?:      { fullName: string; type: string; filePath: string }[];
     error?:             string;
     prUrl?:             string;
     tag?:               string;
@@ -210,6 +212,12 @@ function renderEntry(entry: AuditEntry): string {
     if (d.releaseNotesPath) { rows.push(row("Release notes", d.releaseNotesPath)); }
     if (d.error)          { rows.push(row("Error", `<span class="err">${escapeHtml(d.error)}</span>`)); }
     if (d.conflicts?.length) { rows.push(row("Conflicts", d.conflicts.map(escapeHtml).join(", "))); }
+    if (d.orgConflicts?.length) {
+        rows.push(row(
+            "Org conflicts (overwritten)",
+            d.orgConflicts.map(c => escapeHtml(`${c.type ? `${c.type} ` : ""}${c.fullName}`)).join(", ")
+        ));
+    }
     if (d.deployId)        { rows.push(row("Deploy ID", d.deployId)); }
     if (d.note)            { rows.push(row("Note", escapeHtml(d.note))); }
     if (d.selectionMode)   { rows.push(row("Selection", d.selectionMode)); }
