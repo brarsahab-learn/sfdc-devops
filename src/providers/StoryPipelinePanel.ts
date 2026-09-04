@@ -52,6 +52,9 @@ export class StoryPipelinePanel {
             if (msg.command === "openBranch" && msg.branch) {
                 await vscode.commands.executeCommand("sfDevops.resumeStory");
             }
+            if (msg.command === "openJourney" && msg.storyId) {
+                await vscode.commands.executeCommand("sfDevops.openStoryJourney", msg.storyId);
+            }
             if (msg.command === "openDashboard" && msg.env) {
                 await vscode.commands.executeCommand("sfDevops.openDeploymentDashboard", msg.env);
             }
@@ -158,8 +161,9 @@ export class StoryPipelinePanel {
                 : "";
             const stale = card.isStale ? `<span class="stale-badge">stale</span>` : "";
             const link  = card.ticketUrl ? `<a href="${escapeHtml(card.ticketUrl)}" class="ticket-link">${escapeHtml(card.storyId)}</a>` : `<span class="story-id">${escapeHtml(card.storyId)}</span>`;
+            const journeyBtn = `<a class="journey-btn" href="#" onclick="openJourney('${escapeHtml(card.storyId)}')" title="View full journey">📜</a>`;
             return `<div class="card${card.isStale ? " stale" : ""}">
-  <div class="card-head">${link}${stale}</div>
+  <div class="card-head">${link}${stale}${journeyBtn}</div>
   <div class="card-meta">${escapeHtml(card.branch)}${age}</div>
 </div>`;
         };
@@ -221,6 +225,8 @@ export class StoryPipelinePanel {
   .ticket-link:hover { text-decoration: underline; }
   .stale-badge { font-size: 10px; background: var(--warn); color: #fff; border-radius: 3px; padding: 0 4px; }
   .age { font-size: 10px; color: var(--muted); margin-left: 4px; }
+  .journey-btn { font-size: 12px; margin-left: auto; text-decoration: none; opacity: 0.6; }
+  .journey-btn:hover { opacity: 1; }
   #swimlaneView, #kanbanView { display: none; }
   #swimlaneView.active, #kanbanView.active { display: block; }
   #kanbanView.active { display: flex; }
@@ -251,6 +257,7 @@ export class StoryPipelinePanel {
     document.getElementById('btnKanban').className    = 'view-btn' + (v === 'kanban'   ? ' active' : '');
   }
   function refresh() { vscode.postMessage({ command: 'refresh' }); }
+  function openJourney(storyId) { vscode.postMessage({ command: 'openJourney', storyId }); }
 </script>
 </body>
 </html>`;

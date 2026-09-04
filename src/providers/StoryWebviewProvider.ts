@@ -171,6 +171,9 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                 case "openPipelineView":
                     vscode.commands.executeCommand("sfDevops.openPipelineView");
                     this._clearBusy(); break;
+                case "openStoryJourney":
+                    vscode.commands.executeCommand("sfDevops.openStoryJourney");
+                    this._clearBusy(); break;
                 case "viewPendingActions":
                     vscode.commands.executeCommand("sfDevops.viewPendingActions");
                     this._clearBusy(); break;
@@ -904,6 +907,7 @@ ${(() => {
   <a class="tbtn" href="#" onclick="send('viewAuditLog')" title="Audit Trail">📋 Audit</a>
   <a class="tbtn" href="#" onclick="send('openAdminPanel')" title="Admin / Setup Panel">⚙ Setup</a>
   <a class="tbtn" href="#" onclick="send('openPipelineView')" title="Story Pipeline">🗂 Pipeline</a>
+  <a class="tbtn" href="#" onclick="send('openStoryJourney')" title="Full Story Journey / History">📜 Journey</a>
   <a class="tbtn" href="#" onclick="send('viewPendingActions')" title="Stories Pending My Action">⚡ Actions</a>
   ${coverageBlockedEnv ? `<a class="tbtn" href="#" onclick="send('focusCoverage')" title="Run Coverage Check">🧪 Coverage</a>` : ""}
   <a class="tbtn" href="#" onclick="send('refresh')" title="Refresh"><span>↻ Refresh</span> <span id="countdown" class="countdown"></span></a>

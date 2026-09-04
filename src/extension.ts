@@ -17,6 +17,7 @@ import { GitRefContentProvider, SF_DEVOPS_DIFF_SCHEME } from "./DiffContentProvi
 import { DeploymentDashboardPanel } from "./providers/DeploymentDashboardPanel";
 import { AuditTrailPanel } from "./providers/AuditTrailPanel";
 import { StoryPipelinePanel } from "./providers/StoryPipelinePanel";
+import { StoryJourneyPanel } from "./providers/StoryJourneyPanel";
 import { AdminPanel } from "./providers/AdminPanel";
 import {
     findEnvironment, canPromote, getRoles,
@@ -321,6 +322,10 @@ export async function activate(context: vscode.ExtensionContext) {
 
         vscode.commands.registerCommand("sfDevops.openPipelineView", () => {
             StoryPipelinePanel.createOrShow(gitHelper);
+        }),
+
+        vscode.commands.registerCommand("sfDevops.openStoryJourney", (_storyId?: string) => {
+            StoryJourneyPanel.createOrShow(gitHelper, _storyId);
         }),
 
         vscode.commands.registerCommand("sfDevops.openAdminPanel", () => {
