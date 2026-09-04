@@ -1005,6 +1005,37 @@ export class GitHelper {
     // components for a given story/env at a specific feature branch SHA.
     // The SHA is used to invalidate the ack when the feature branch advances.
 
+    // ── Inactive-story registry ──────────────────────────────────────────────
+
+    private async inactiveStoriesFilePath(): Promise<string> {
+        return path.join(await this.gitDirPath(), "sf-devops-inactive-stories.json");
+    }
+
+    /** Returns the set of story IDs the user has explicitly marked as inactive. */
+    async getInactiveStories(): Promise<Set<string>> {
+        try {
+            const raw = fs.readFileSync(await this.inactiveStoriesFilePath(), "utf8");
+            const arr = JSON.parse(raw);
+            return new Set(Array.isArray(arr) ? arr : []);
+        } catch {
+            return new Set();
+        }
+    }
+
+    async markStoryInactive(storyId: string): Promise<void> {
+        const inactive = await this.getInactiveStories();
+        inactive.add(storyId);
+        fs.writeFileSync(await this.inactiveStoriesFilePath(), JSON.stringify([...inactive], null, 2));
+    }
+
+    async markStoryActive(storyId: string): Promise<void> {
+        const inactive = await this.getInactiveStories();
+        inactive.delete(storyId);
+        fs.writeFileSync(await this.inactiveStoriesFilePath(), JSON.stringify([...inactive], null, 2));
+    }
+
+    // ── Deletion-ack registry ─────────────────────────────────────────────────
+
     private async deletionAckFilePath(): Promise<string> {
         return path.join(await this.gitDirPath(), "sf-devops-deletion-ack.json");
     }

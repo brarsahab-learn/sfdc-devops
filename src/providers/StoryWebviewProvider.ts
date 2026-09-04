@@ -392,9 +392,10 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
             const timelines = storyId ? await getStoryTimelines(this._gitHelper, storyId) : {};
             const deletionAckPending = (onFeature && storyId) ? await this._getDeletionAckPending(storyId) : null;
             const staleAgeDays = (onFeature && branch) ? await this._gitHelper.branchAgeDays(branch) : null;
+            const pendingActionsCount = await this._countPendingActions();
 
             this._view.webview.html = this._getWebviewHtml(
-                branch ?? "No branch", storyId, progress, behind, coverageBlockedEnv, repoOverride, signoffPassed, localChanges, timelines, deletionAckPending, staleAgeDays
+                branch ?? "No branch", storyId, progress, behind, coverageBlockedEnv, repoOverride, signoffPassed, localChanges, timelines, deletionAckPending, staleAgeDays, pendingActionsCount
             );
             this._externalSwitchNotice = undefined; // one-shot: shown once, then cleared
 
@@ -444,6 +445,19 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         if (apex.length === 0) { return null; }
         const passed = await this._gitHelper.isCoveragePassed(storyId);
         return passed ? null : gateEnv.name;
+    }
+
+    /** Count of envs that have undeployed merges the current role can act on — shown as a badge on the ⚡ Actions button. */
+    private async _countPendingActions(): Promise<number> {
+        const envs = getPromotableEnvironments();
+        let count = 0;
+        for (const env of envs) {
+            if (!canPromote(this._userRole, env)) { continue; }
+            const sha  = await this._gitHelper.remoteHeadSha(env.branch).catch(() => null);
+            const last = sha ? await this._gitHelper.getDeployState(env.name).catch(() => null) : null;
+            if (sha && last?.sha !== sha) { count++; }
+        }
+        return count;
     }
 
     /**
@@ -616,7 +630,8 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         localChanges: { staged: string[]; other: string[] } | null,
         timelines: Record<string, EnvTimeline>,
         deletionAckPending: { env: string; envLabel: string; files: string[] } | null = null,
-        staleAgeDays: number | null = null
+        staleAgeDays: number | null = null,
+        pendingActionsCount = 0
     ): string {
         const onFeatureBranch = isFeatureBranch(branch);
         const baseBranch      = getBaseBranch();
@@ -871,10 +886,17 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
   .divider   { border-top: 1px solid var(--vscode-panel-border); margin: 8px 0; }
   a          { color: var(--vscode-textLink-foreground); }
   .no-story  { color: var(--vscode-descriptionForeground); font-size: 11px; }
-  .toolbar   { display: flex; gap: 4px; margin-bottom: 8px; }
-  .tbtn      { flex: 1; display: flex; align-items: center; justify-content: center; gap: 3px; padding: 4px 2px; font-size: 10.5px; border: 1px solid var(--vscode-panel-border); border-radius: 4px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); cursor: pointer; text-decoration: none; white-space: nowrap; overflow: hidden; }
+  .toolbar   { display: flex; gap: 3px; margin-bottom: 8px; flex-wrap: wrap; }
+  .tbtn      { display: flex; align-items: center; justify-content: center; padding: 5px 7px; font-size: 14px; border: 1px solid var(--vscode-panel-border); border-radius: 4px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); cursor: pointer; text-decoration: none; white-space: nowrap; position: relative; }
   .tbtn:hover{ background: var(--vscode-button-secondaryHoverBackground); }
-  .countdown { opacity: 0.65; font-size: 9.5px; }
+  .tbtn.tbtn-wide { font-size: 12px; padding: 5px 10px; }
+  .tbtn-badge { position: absolute; top: -5px; right: -5px; background: var(--vscode-badge-background, #c72); color: var(--vscode-badge-foreground, #fff); border-radius: 8px; font-size: 9px; font-weight: 700; min-width: 15px; height: 15px; display: flex; align-items: center; justify-content: center; padding: 0 3px; }
+  .countdown { opacity: 0.65; font-size: 9px; margin-left: 2px; }
+  .story-card { background: var(--vscode-button-secondaryBackground); border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+  .story-card .branch-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11.5px; font-weight: 600; margin-bottom: 5px; }
+  .story-card .story-row  { font-size: 11px; color: var(--vscode-descriptionForeground); margin-bottom: 6px; }
+  .story-card .action-row { display: flex; gap: 5px; }
+  .story-card .action-row button { flex: 1; font-size: 11px; padding: 4px 6px; }
   .version-footer { text-align: center; font-size: 10px; opacity: 0.5; margin-top: 10px; color: var(--vscode-descriptionForeground); }
   ${BUSY_BAR_CSS}
 </style>
@@ -897,25 +919,28 @@ ${(() => {
     return "";
 })()}
 
-<div class="card">
-  <div class="branch">${escapeHtml(branch)} ${branch !== "No branch" ? `<a href="#" onclick="send('viewBranchInBrowser')" title="View branch in browser">🔗</a>` : ""}</div>
-  ${storyId ? `<div class="story-id">${storyIdHtml}</div>` : `<div class="no-story">No active story</div>`}
-</div>
-
+<!-- Toolbar: icon-only buttons, compact -->
 <div class="toolbar">
-  <a class="tbtn" href="#" onclick="send('changeRole')" title="Change Role">👤 ${escapeHtml(this._userRole)}</a>
-  <a class="tbtn" href="#" onclick="send('viewAuditLog')" title="Audit Trail">📋 Audit</a>
-  <a class="tbtn" href="#" onclick="send('openAdminPanel')" title="Admin / Setup Panel">⚙ Setup</a>
-  <a class="tbtn" href="#" onclick="send('openPipelineView')" title="Story Pipeline">🗂 Pipeline</a>
-  <a class="tbtn" href="#" onclick="send('openStoryJourney')" title="Full Story Journey / History">📜 Journey</a>
-  <a class="tbtn" href="#" onclick="send('viewPendingActions')" title="Stories Pending My Action">⚡ Actions</a>
-  ${coverageBlockedEnv ? `<a class="tbtn" href="#" onclick="send('focusCoverage')" title="Run Coverage Check">🧪 Coverage</a>` : ""}
-  <a class="tbtn" href="#" onclick="send('refresh')" title="Refresh"><span>↻ Refresh</span> <span id="countdown" class="countdown"></span></a>
+  <a class="tbtn" href="#" onclick="send('changeRole')" title="Change Role (${escapeHtml(this._userRole)})">${this._userRole === "Admin" ? "🛡️" : this._userRole === "Lead" ? "🎯" : "👨‍💻"}</a>
+  <a class="tbtn" href="#" onclick="send('openAdminPanel')" title="Setup / Admin Panel">⚙️</a>
+  <a class="tbtn" href="#" onclick="send('viewAuditLog')" title="Audit Trail">📋</a>
+  <a class="tbtn" href="#" onclick="send('openPipelineView')" title="Pipeline &amp; Story Journey">🗂️</a>
+  <a class="tbtn" href="#" onclick="send('viewPendingActions')" title="Stories Pending My Action" style="position:relative">⚡${pendingActionsCount > 0 ? `<span class="tbtn-badge">${pendingActionsCount}</span>` : ""}</a>
+  ${coverageBlockedEnv ? `<a class="tbtn" href="#" onclick="send('focusCoverage')" title="Run Coverage Check">🧪</a>` : ""}
+  <a class="tbtn" href="#" onclick="send('refresh')" title="Refresh">↻<span id="countdown" class="countdown"></span></a>
 </div>
 
-<div class="card">
-  <button class="btn btn-primary" onclick="send('startStory')">&#x1F680; Start New Story</button>
-  <button class="btn btn-secondary" onclick="send('resumeStory')">&#x23F3; Continue with Existing Story</button>
+<!-- Top card: branch + story + action buttons inline -->
+<div class="story-card">
+  <div class="branch-row">
+    ${escapeHtml(branch)}
+    ${branch !== "No branch" ? `<a href="#" onclick="send('viewBranchInBrowser')" title="View in browser" style="font-size:12px;text-decoration:none">🔗</a>` : ""}
+  </div>
+  ${storyId ? `<div class="story-row">${storyIdHtml}</div>` : `<div class="story-row" style="font-style:italic">No active story</div>`}
+  <div class="action-row">
+    <button class="btn btn-primary" onclick="send('startStory')" title="Start New Story">🚀 New Story</button>
+    <button class="btn btn-secondary" onclick="send('resumeStory')" title="Continue with Existing Story">⏳ Existing</button>
+  </div>
 </div>
 
 ${onFeatureBranch ? `

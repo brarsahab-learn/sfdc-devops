@@ -194,9 +194,9 @@ export class StoryJourneyPanel {
             ? `<a href="${escapeHtml(ticketUrl)}" class="story-link">${escapeHtml(storyId)}</a>`
             : escapeHtml(storyId);
 
-        // Story picker
-        const pickerOptions = allStoryIds.map(id =>
-            `<option value="${escapeHtml(id)}"${id === storyId ? " selected" : ""}>${escapeHtml(id)}</option>`
+        // Story picker — datalist gives type-to-search on large lists
+        const datalistOptions = allStoryIds.map(id =>
+            `<option value="${escapeHtml(id)}">`
         ).join("");
 
         // Pipeline bar
@@ -228,7 +228,8 @@ export class StoryJourneyPanel {
   .story-link:hover { text-decoration: underline; }
 
   .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
-  select { background: var(--card); color: var(--fg); border: 1px solid var(--border); padding: 5px 10px; border-radius: 5px; font-size: 12px; }
+  select, input[type="text"] { background: var(--card); color: var(--fg); border: 1px solid var(--border); padding: 5px 10px; border-radius: 5px; font-size: 12px; }
+  input[type="text"] { min-width: 180px; }
   .btn { font-size: 12px; padding: 5px 12px; border-radius: 5px; border: 1px solid var(--border); cursor: pointer; background: transparent; color: var(--fg); }
   .btn:hover { opacity: 0.8; }
 
@@ -288,8 +289,9 @@ export class StoryJourneyPanel {
   <h1>📜 Story Journey &mdash; ${storyTitle}</h1>
 </div>
 
+<datalist id="storyList">${datalistOptions}</datalist>
 <div class="controls">
-  <select id="storyPicker" onchange="selectStory(this.value)">${pickerOptions}</select>
+  <input type="text" id="storySearch" list="storyList" value="${escapeHtml(storyId)}" placeholder="Search story…" onchange="selectStory(this.value)" oninput="maybeSelect(this.value)">
   <button class="btn" onclick="send('refresh')">↻ Refresh</button>
 </div>
 
@@ -302,8 +304,10 @@ ${events.length === 0
 
 <script>
   const vscode = acquireVsCodeApi();
+  const VALID_IDS = new Set(${JSON.stringify(allStoryIds)});
   function send(cmd, extra) { vscode.postMessage({ command: cmd, ...extra }); }
-  function selectStory(id) { send('selectStory', { storyId: id }); }
+  function selectStory(id) { if (id && VALID_IDS.has(id)) { send('selectStory', { storyId: id }); } }
+  function maybeSelect(id) { if (VALID_IDS.has(id)) { send('selectStory', { storyId: id }); } }
   function toggleDetail(id) {
     var el = document.getElementById(id);
     if (el) { el.classList.toggle('open'); }

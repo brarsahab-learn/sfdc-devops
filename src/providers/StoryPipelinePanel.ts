@@ -15,6 +15,8 @@ interface StoryCard {
     stageIndex:   number;         // -1 = feature-only, 0 = dev, 1+ = QA/UAT/Prod index
     stageName:    string;
     isStale:      boolean;
+    isComplete:   boolean;        // commit found on the prod/final branch (auto-detected)
+    isInactive:   boolean;        // explicitly marked inactive by the user
     ticketUrl:    string | undefined;
 }
 
@@ -55,6 +57,14 @@ export class StoryPipelinePanel {
             if (msg.command === "openJourney" && msg.storyId) {
                 await vscode.commands.executeCommand("sfDevops.openStoryJourney", msg.storyId);
             }
+            if (msg.command === "markInactive" && msg.storyId) {
+                await this._gitHelper.markStoryInactive(msg.storyId);
+                await this._refresh();
+            }
+            if (msg.command === "markActive" && msg.storyId) {
+                await this._gitHelper.markStoryActive(msg.storyId);
+                await this._refresh();
+            }
             if (msg.command === "openDashboard" && msg.env) {
                 await vscode.commands.executeCommand("sfDevops.openDeploymentDashboard", msg.env);
             }
@@ -79,15 +89,15 @@ export class StoryPipelinePanel {
         const envs      = getPromotableEnvironments();
         const devEnv    = getPublishEnvironment();
         const allEnvs   = [devEnv, ...envs];
+        const prodEnv   = envs.find(e => e.isProd) ?? envs[envs.length - 1]; // final stage = "complete"
         const pattern   = getTicketKeyPattern();
         const staleDay  = getStaleStoryThresholdDays();
         const now       = Date.now();
 
-        // Build map: envName → set of story IDs that have been deployed there.
-        // A story is "in" an env if its story ID appears in any of the last 300 commits on
-        // that env's remote branch. We use recentCommitsOnBranch (git log -n) instead of
-        // the ~500 range form, which silently returns [] when the branch has fewer than 500
-        // commits and would mislabel all stories as "Feature (not yet deployed)".
+        // Load inactive story registry (user-explicitly-marked).
+        const inactiveSet = await this._gitHelper.getInactiveStories();
+
+        // Build map: envName → set of story IDs present in that env's branch log.
         const deployedInEnv = new Map<string, Set<string>>();
         for (const env of allEnvs) {
             const ids = new Set<string>();
@@ -103,8 +113,7 @@ export class StoryPipelinePanel {
         const cards: StoryCard[] = [];
 
         for (const branch of remoteBranches) {
-            // extractStoryId strips the feature-branch prefix and extracts the ticket key.
-            const storyId = extractStoryId(branch) || branch;
+            const storyId   = extractStoryId(branch) || branch;
             const ticketUrl = buildTicketUrl(storyId);
             const lastActivity = await this._gitHelper.branchLastCommitTimestamp(branch);
 
@@ -119,10 +128,13 @@ export class StoryPipelinePanel {
                 }
             }
 
-            const ageMs = lastActivity ? now - new Date(lastActivity).getTime() : 0;
-            const isStale = staleDay > 0 && ageMs > staleDay * 24 * 60 * 60 * 1000;
+            const ageMs     = lastActivity ? now - new Date(lastActivity).getTime() : 0;
+            const isStale   = staleDay > 0 && ageMs > staleDay * 24 * 60 * 60 * 1000;
+            // A story is "complete" if its commit appears on the prod/final env branch.
+            const isComplete = prodEnv ? (deployedInEnv.get(prodEnv.name)?.has(storyId) ?? false) : false;
+            const isInactive = inactiveSet.has(storyId);
 
-            cards.push({ storyId, branch, lastActivity, stageIndex, stageName, isStale, ticketUrl });
+            cards.push({ storyId, branch, lastActivity, stageIndex, stageName, isStale, isComplete, isInactive, ticketUrl });
         }
 
         // Sort: highest stage first, then most recently active.
@@ -155,16 +167,34 @@ export class StoryPipelinePanel {
         const stageLabels = ["Feature (not yet deployed)", ...allEnvs.map(e => e.label)];
         const stageKeys   = [-1, ...allEnvs.map((_, i) => i)];
 
+        const completedCount = cards.filter(c => c.isComplete && !c.isInactive).length;
+        const inactiveCount  = cards.filter(c => c.isInactive).length;
+        const activeCount    = cards.filter(c => !c.isComplete && !c.isInactive).length;
+
         const cardHtml = (card: StoryCard) => {
             const age   = card.lastActivity
                 ? `<span class="age">${this._relativeAge(card.lastActivity)}</span>`
                 : "";
-            const stale = card.isStale ? `<span class="stale-badge">stale</span>` : "";
-            const link  = card.ticketUrl ? `<a href="${escapeHtml(card.ticketUrl)}" class="ticket-link">${escapeHtml(card.storyId)}</a>` : `<span class="story-id">${escapeHtml(card.storyId)}</span>`;
-            const journeyBtn = `<a class="journey-btn" href="#" onclick="openJourney('${escapeHtml(card.storyId)}')" title="View full journey">📜</a>`;
-            return `<div class="card${card.isStale ? " stale" : ""}">
-  <div class="card-head">${link}${stale}${journeyBtn}</div>
+            const staleBadge    = card.isStale    ? `<span class="stale-badge">stale</span>` : "";
+            const completeBadge = card.isComplete ? `<span class="complete-badge">🏁 done</span>` : "";
+            const inactiveBadge = card.isInactive ? `<span class="inactive-badge">💤 inactive</span>` : "";
+            const link = card.ticketUrl
+                ? `<a href="${escapeHtml(card.ticketUrl)}" class="ticket-link">${escapeHtml(card.storyId)}</a>`
+                : `<span class="story-id">${escapeHtml(card.storyId)}</span>`;
+            const journeyBtn  = `<a class="card-action" href="#" onclick="openJourney('${escapeHtml(card.storyId)}')" title="View full journey">📜</a>`;
+            const inactiveBtn = card.isInactive
+                ? `<a class="card-action" href="#" onclick="markActive('${escapeHtml(card.storyId)}')" title="Restore to active tracking">↩</a>`
+                : `<a class="card-action" href="#" onclick="markInactive('${escapeHtml(card.storyId)}')" title="Mark as inactive (hide from default view)">💤</a>`;
+            const cls = [
+                "card",
+                card.isStale    ? "stale"    : "",
+                card.isComplete ? "complete" : "",
+                card.isInactive ? "inactive" : "",
+            ].filter(Boolean).join(" ");
+            return `<div class="${cls}" data-story="${escapeHtml(card.storyId)}" data-complete="${card.isComplete}" data-inactive="${card.isInactive}">
+  <div class="card-head">${link}${staleBadge}${completeBadge}${inactiveBadge}</div>
   <div class="card-meta">${escapeHtml(card.branch)}${age}</div>
+  <div class="card-actions">${journeyBtn}${inactiveBtn}</div>
 </div>`;
         };
 
@@ -203,6 +233,10 @@ export class StoryPipelinePanel {
   .refresh-btn { font-size: 12px; padding: 4px 10px; border-radius: 5px; border: 1px solid var(--border); cursor: pointer; background: transparent; color: var(--muted); }
   .muted { color: var(--muted); font-size: 12px; }
   .count { font-size: 11px; background: var(--border); border-radius: 8px; padding: 1px 6px; }
+  .filter-row { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
+  .filter-row input, .filter-row select { background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 5px; padding: 5px 10px; font-size: 12px; }
+  .filter-row input { flex: 1; min-width: 120px; }
+  .hidden { display: none !important; }
 
   /* Swimlane */
   .swimlane { margin-bottom: 12px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
@@ -223,10 +257,17 @@ export class StoryPipelinePanel {
   .story-id { font-weight: 600; color: var(--accent); }
   .ticket-link { font-weight: 600; color: var(--accent); text-decoration: none; }
   .ticket-link:hover { text-decoration: underline; }
-  .stale-badge { font-size: 10px; background: var(--warn); color: #fff; border-radius: 3px; padding: 0 4px; }
+  .stale-badge    { font-size: 10px; background: var(--warn); color: #1a1a1a; border-radius: 3px; padding: 0 4px; }
+  .complete-badge { font-size: 10px; background: var(--ok);   color: #1a1a1a; border-radius: 3px; padding: 0 4px; }
+  .inactive-badge { font-size: 10px; background: var(--border); color: var(--muted); border-radius: 3px; padding: 0 4px; }
+  .card.complete  { border-color: var(--ok); opacity: 0.85; }
+  .card.inactive  { border-color: var(--border); opacity: 0.6; border-style: dashed; }
   .age { font-size: 10px; color: var(--muted); margin-left: 4px; }
-  .journey-btn { font-size: 12px; margin-left: auto; text-decoration: none; opacity: 0.6; }
-  .journey-btn:hover { opacity: 1; }
+  .card-actions { display: flex; gap: 6px; margin-top: 4px; }
+  .card-action  { font-size: 12px; text-decoration: none; opacity: 0.55; }
+  .card-action:hover { opacity: 1; }
+  .toggle-btn { font-size: 11px; padding: 3px 8px; border-radius: 4px; border: 1px solid var(--border); cursor: pointer; background: transparent; color: var(--muted); }
+  .toggle-btn.on { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); border-color: var(--accent); }
   #swimlaneView, #kanbanView { display: none; }
   #swimlaneView.active, #kanbanView.active { display: block; }
   #kanbanView.active { display: flex; }
@@ -238,7 +279,25 @@ export class StoryPipelinePanel {
   <button class="view-btn active" id="btnSwimlane" onclick="setView('swimlane')">Swimlane</button>
   <button class="view-btn" id="btnKanban" onclick="setView('kanban')">Kanban</button>
   <button class="refresh-btn" onclick="refresh()">↻ Refresh</button>
-  <span class="muted">${cards.length} active stor${cards.length === 1 ? "y" : "ies"}</span>
+  <button class="toggle-btn" id="btnComplete" onclick="toggleShow('complete')" title="Stories that have reached the final (prod) environment">${completedCount > 0 ? `🏁 Completed (${completedCount})` : "🏁 Completed"}</button>
+  <button class="toggle-btn" id="btnInactive" onclick="toggleShow('inactive')" title="Stories explicitly marked inactive">${inactiveCount > 0 ? `💤 Inactive (${inactiveCount})` : "💤 Inactive"}</button>
+  <span class="muted" id="storyCount">${activeCount} active</span>
+</div>
+
+<div class="filter-row">
+  <input id="searchBox" type="text" placeholder="🔍 Search by story ID or branch…" oninput="applyFilter()">
+  <select id="dateFilter" onchange="applyFilter()">
+    <option value="">Any age</option>
+    <option value="1">Active today</option>
+    <option value="7">Last 7 days</option>
+    <option value="30">Last 30 days</option>
+    <option value="90">Last 90 days</option>
+  </select>
+  <select id="staleFilter" onchange="applyFilter()">
+    <option value="">All stories</option>
+    <option value="stale">Stale only</option>
+    <option value="fresh">Active only</option>
+  </select>
 </div>
 
 <div id="swimlaneView" class="active">
@@ -250,14 +309,72 @@ export class StoryPipelinePanel {
 
 <script>
   const vscode = acquireVsCodeApi();
+  // Card metadata for client-side filtering
+  const CARDS = ${JSON.stringify(cards.map(c => ({
+      id: c.storyId,
+      branch: c.branch,
+      stale: c.isStale,
+      complete: c.isComplete,
+      inactive: c.isInactive,
+      lastActivity: c.lastActivity ?? "",
+  })))};
+
+  let showComplete = false;
+  let showInactive = false;
+
   function setView(v) {
     document.getElementById('swimlaneView').className = v === 'swimlane' ? 'active' : '';
     document.getElementById('kanbanView').className   = v === 'kanban'   ? 'kanban active' : 'kanban';
     document.getElementById('btnSwimlane').className  = 'view-btn' + (v === 'swimlane' ? ' active' : '');
     document.getElementById('btnKanban').className    = 'view-btn' + (v === 'kanban'   ? ' active' : '');
   }
-  function refresh() { vscode.postMessage({ command: 'refresh' }); }
-  function openJourney(storyId) { vscode.postMessage({ command: 'openJourney', storyId }); }
+
+  function toggleShow(type) {
+    if (type === 'complete') {
+      showComplete = !showComplete;
+      document.getElementById('btnComplete').classList.toggle('on', showComplete);
+    } else {
+      showInactive = !showInactive;
+      document.getElementById('btnInactive').classList.toggle('on', showInactive);
+    }
+    applyFilter();
+  }
+
+  function applyFilter() {
+    const q      = document.getElementById('searchBox').value.toLowerCase().trim();
+    const days   = parseInt(document.getElementById('dateFilter').value || '0', 10);
+    const stale  = document.getElementById('staleFilter').value;
+    const cutoff = days ? Date.now() - days * 86400000 : 0;
+    let visible  = 0;
+
+    CARDS.forEach(c => {
+      // Visibility gates: complete/inactive hidden by default unless toggled on
+      if (c.complete && !showComplete) {
+        document.querySelectorAll('[data-story="' + c.id + '"]').forEach(el => el.classList.add('hidden'));
+        return;
+      }
+      if (c.inactive && !showInactive) {
+        document.querySelectorAll('[data-story="' + c.id + '"]').forEach(el => el.classList.add('hidden'));
+        return;
+      }
+      const matchSearch = !q || c.id.toLowerCase().includes(q) || c.branch.toLowerCase().includes(q);
+      const matchDate   = !cutoff || (c.lastActivity && new Date(c.lastActivity).getTime() >= cutoff);
+      const matchStale  = !stale  || (stale === 'stale' ? c.stale : !c.stale);
+      const show = matchSearch && matchDate && matchStale;
+      if (show) { visible++; }
+      document.querySelectorAll('[data-story="' + c.id + '"]').forEach(el => el.classList.toggle('hidden', !show));
+    });
+    document.getElementById('storyCount').textContent = visible + ' stor' + (visible === 1 ? 'y' : 'ies');
+  }
+
+  // Hide complete and inactive by default on load
+  document.addEventListener('DOMContentLoaded', applyFilter);
+  applyFilter();  // also run immediately (webview may not fire DOMContentLoaded after html swap)
+
+  function refresh()               { vscode.postMessage({ command: 'refresh' }); }
+  function openJourney(storyId)    { vscode.postMessage({ command: 'openJourney', storyId }); }
+  function markInactive(storyId)   { vscode.postMessage({ command: 'markInactive', storyId }); }
+  function markActive(storyId)     { vscode.postMessage({ command: 'markActive',   storyId }); }
 </script>
 </body>
 </html>`;
