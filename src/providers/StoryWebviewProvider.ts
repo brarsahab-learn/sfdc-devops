@@ -149,6 +149,12 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                     vscode.commands.executeCommand("sfDevopsCoverageView.focus"); break;
                 case "recheckSetup":
                     this.refresh(); break;
+                case "openAdminPanel":
+                    vscode.commands.executeCommand("sfDevops.openAdminPanel"); break;
+                case "openPipelineView":
+                    vscode.commands.executeCommand("sfDevops.openPipelineView"); break;
+                case "viewPendingActions":
+                    vscode.commands.executeCommand("sfDevops.viewPendingActions"); break;
                 case "openSetupCheck":
                     this._forceShowSetup = true;
                     this.refresh();
@@ -843,7 +849,9 @@ ${(() => {
 <div class="toolbar">
   <a class="tbtn" href="#" onclick="send('changeRole')" title="Change Role">👤 ${escapeHtml(this._userRole)}</a>
   <a class="tbtn" href="#" onclick="send('viewAuditLog')" title="Audit Trail">📋 Audit</a>
-  <a class="tbtn" href="#" onclick="send('openSetupCheck')" title="Setup Check">⚙ Setup</a>
+  <a class="tbtn" href="#" onclick="send('openAdminPanel')" title="Admin / Setup Panel">⚙ Setup</a>
+  <a class="tbtn" href="#" onclick="send('openPipelineView')" title="Story Pipeline">🗂 Pipeline</a>
+  <a class="tbtn" href="#" onclick="send('viewPendingActions')" title="Stories Pending My Action">⚡ Actions</a>
   <a class="tbtn" href="#" onclick="send('refresh')" title="Refresh"><span>↻ Refresh</span> <span id="countdown" class="countdown"></span></a>
 </div>
 

@@ -17,6 +17,7 @@ import { GitRefContentProvider, SF_DEVOPS_DIFF_SCHEME } from "./DiffContentProvi
 import { DeploymentDashboardPanel } from "./providers/DeploymentDashboardPanel";
 import { AuditTrailPanel } from "./providers/AuditTrailPanel";
 import { StoryPipelinePanel } from "./providers/StoryPipelinePanel";
+import { AdminPanel } from "./providers/AdminPanel";
 import {
     findEnvironment, canPromote, getRoles,
     isFeatureBranch, getBaseBranch, getStaleBranchThreshold, getPromotableEnvironments,
@@ -324,6 +325,10 @@ export async function activate(context: vscode.ExtensionContext) {
 
         vscode.commands.registerCommand("sfDevops.openPipelineView", () => {
             StoryPipelinePanel.createOrShow(gitHelper);
+        }),
+
+        vscode.commands.registerCommand("sfDevops.openAdminPanel", () => {
+            AdminPanel.createOrShow(gitHelper, bbClient, context);
         }),
 
         // "Stories Pending My Action" — surfaced as a QuickPick so users can jump directly
