@@ -140,7 +140,11 @@ async function runPromotionValidate(
     const deletedFiles = files.filter(f => f.change === "deleted");
     if (deletedFiles.length > 0) {
         files = files.filter(f => f.change !== "deleted");
-        log(`${storyId}: ${deletedFiles.length} deleted file(s) excluded from validate/deploy — deletion acknowledged.`);
+        vscode.window.showWarningMessage(
+            `${storyId}: ${deletedFiles.length} deleted file(s) can't be included in this validate/deploy yet ` +
+            `(${deletedFiles.slice(0, 3).map(f => f.path.split("/").pop()).join(", ")}${deletedFiles.length > 3 ? ", …" : ""}) — ` +
+            `delete them manually in ${targetEnv.toUpperCase()} for now.`
+        );
         if (files.length === 0) {
             return { ran: false, success: true, numberComponentsDeployed: 0 };
         }
