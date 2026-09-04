@@ -455,7 +455,9 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
             if (!canPromote(this._userRole, env)) { continue; }
             const sha  = await this._gitHelper.remoteHeadSha(env.branch).catch(() => null);
             const last = sha ? await this._gitHelper.getDeployState(env.name).catch(() => null) : null;
-            if (sha && last?.sha !== sha) { count++; }
+            // Only count as pending when a prior deploy record exists AND the branch has moved on.
+            // Omitting this guard would inflate the count on fresh installs (no deploy history).
+            if (sha && last !== null && last.sha !== sha) { count++; }
         }
         return count;
     }

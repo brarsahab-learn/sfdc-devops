@@ -58,12 +58,20 @@ export class StoryPipelinePanel {
                 await vscode.commands.executeCommand("sfDevops.openStoryJourney", msg.storyId);
             }
             if (msg.command === "markInactive" && msg.storyId) {
-                await this._gitHelper.markStoryInactive(msg.storyId);
-                await this._refresh();
+                try {
+                    await this._gitHelper.markStoryInactive(msg.storyId);
+                    await this._refresh();
+                } catch (err) {
+                    vscode.window.showErrorMessage(`Could not mark story inactive: ${err}`);
+                }
             }
             if (msg.command === "markActive" && msg.storyId) {
-                await this._gitHelper.markStoryActive(msg.storyId);
-                await this._refresh();
+                try {
+                    await this._gitHelper.markStoryActive(msg.storyId);
+                    await this._refresh();
+                } catch (err) {
+                    vscode.window.showErrorMessage(`Could not restore story: ${err}`);
+                }
             }
             if (msg.command === "openDashboard" && msg.env) {
                 await vscode.commands.executeCommand("sfDevops.openDeploymentDashboard", msg.env);
@@ -309,18 +317,27 @@ export class StoryPipelinePanel {
 
 <script>
   const vscode = acquireVsCodeApi();
-  // Card metadata for client-side filtering
-  const CARDS = ${JSON.stringify(cards.map(c => ({
-      id: c.storyId,
-      branch: c.branch,
-      stale: c.isStale,
-      complete: c.isComplete,
-      inactive: c.isInactive,
-      lastActivity: c.lastActivity ?? "",
-  })))};
+  // safeJson: JSON.stringify + escape </script> so the literal can never close this block.
+  const CARDS = JSON.parse('${
+      JSON.stringify(cards.map(c => ({
+          id: c.storyId,
+          branch: c.branch,
+          stale: c.isStale,
+          complete: c.isComplete,
+          inactive: c.isInactive,
+          lastActivity: c.lastActivity ?? "",
+      }))).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026")
+  }');
 
   let showComplete = false;
   let showInactive = false;
+
+  // Safe DOM lookup by exact attribute value — avoids CSS selector injection
+  // from story IDs that contain quotes or brackets.
+  function cardsForStory(id) {
+    return Array.from(document.querySelectorAll('[data-story]'))
+      .filter(el => el.getAttribute('data-story') === id);
+  }
 
   function setView(v) {
     document.getElementById('swimlaneView').className = v === 'swimlane' ? 'active' : '';
@@ -348,13 +365,13 @@ export class StoryPipelinePanel {
     let visible  = 0;
 
     CARDS.forEach(c => {
-      // Visibility gates: complete/inactive hidden by default unless toggled on
-      if (c.complete && !showComplete) {
-        document.querySelectorAll('[data-story="' + c.id + '"]').forEach(el => el.classList.add('hidden'));
-        return;
-      }
-      if (c.inactive && !showInactive) {
-        document.querySelectorAll('[data-story="' + c.id + '"]').forEach(el => el.classList.add('hidden'));
+      // A card is eligible to display if its toggle is on OR it is neither complete nor inactive.
+      // A card that is BOTH complete and inactive is shown when EITHER toggle is on.
+      const eligibleByToggle = (!c.complete && !c.inactive)
+                             || (c.complete  && showComplete)
+                             || (c.inactive  && showInactive);
+      if (!eligibleByToggle) {
+        cardsForStory(c.id).forEach(el => el.classList.add('hidden'));
         return;
       }
       const matchSearch = !q || c.id.toLowerCase().includes(q) || c.branch.toLowerCase().includes(q);
@@ -362,19 +379,18 @@ export class StoryPipelinePanel {
       const matchStale  = !stale  || (stale === 'stale' ? c.stale : !c.stale);
       const show = matchSearch && matchDate && matchStale;
       if (show) { visible++; }
-      document.querySelectorAll('[data-story="' + c.id + '"]').forEach(el => el.classList.toggle('hidden', !show));
+      cardsForStory(c.id).forEach(el => el.classList.toggle('hidden', !show));
     });
     document.getElementById('storyCount').textContent = visible + ' stor' + (visible === 1 ? 'y' : 'ies');
   }
 
-  // Hide complete and inactive by default on load
   document.addEventListener('DOMContentLoaded', applyFilter);
-  applyFilter();  // also run immediately (webview may not fire DOMContentLoaded after html swap)
+  applyFilter();
 
-  function refresh()               { vscode.postMessage({ command: 'refresh' }); }
-  function openJourney(storyId)    { vscode.postMessage({ command: 'openJourney', storyId }); }
-  function markInactive(storyId)   { vscode.postMessage({ command: 'markInactive', storyId }); }
-  function markActive(storyId)     { vscode.postMessage({ command: 'markActive',   storyId }); }
+  function refresh()             { vscode.postMessage({ command: 'refresh' }); }
+  function openJourney(storyId)  { vscode.postMessage({ command: 'openJourney',   storyId }); }
+  function markInactive(storyId) { vscode.postMessage({ command: 'markInactive', storyId }); }
+  function markActive(storyId)   { vscode.postMessage({ command: 'markActive',   storyId }); }
 </script>
 </body>
 </html>`;

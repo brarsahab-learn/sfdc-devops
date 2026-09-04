@@ -291,7 +291,7 @@ export class StoryJourneyPanel {
 
 <datalist id="storyList">${datalistOptions}</datalist>
 <div class="controls">
-  <input type="text" id="storySearch" list="storyList" value="${escapeHtml(storyId)}" placeholder="Search story…" onchange="selectStory(this.value)" oninput="maybeSelect(this.value)">
+  <input type="text" id="storySearch" list="storyList" value="${escapeHtml(storyId)}" placeholder="Search story…" onchange="selectStory(this.value)">
   <button class="btn" onclick="send('refresh')">↻ Refresh</button>
 </div>
 
@@ -304,10 +304,14 @@ ${events.length === 0
 
 <script>
   const vscode = acquireVsCodeApi();
-  const VALID_IDS = new Set(${JSON.stringify(allStoryIds)});
+  // Unicode-escape < > & so the JSON literal can never contain </script> and close this block.
+  const VALID_IDS = new Set(JSON.parse('${
+      JSON.stringify(allStoryIds).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026")
+  }'));
   function send(cmd, extra) { vscode.postMessage({ command: cmd, ...extra }); }
+  // selectStory fires on commit (blur or Enter via datalist selection) — not on every keystroke,
+  // which would navigate away mid-typing when a partial input matches a shorter story ID.
   function selectStory(id) { if (id && VALID_IDS.has(id)) { send('selectStory', { storyId: id }); } }
-  function maybeSelect(id) { if (VALID_IDS.has(id)) { send('selectStory', { storyId: id }); } }
   function toggleDetail(id) {
     var el = document.getElementById(id);
     if (el) { el.classList.toggle('open'); }

@@ -1022,16 +1022,25 @@ export class GitHelper {
         }
     }
 
+    // Promise chain used as a mutex: all writes are serialized so concurrent rapid
+    // clicks (mark-inactive on two cards) never interleave their read-modify-write.
+    private _inactiveWriteLock = Promise.resolve();
+
+    private _updateInactiveStories(fn: (set: Set<string>) => void): Promise<void> {
+        this._inactiveWriteLock = this._inactiveWriteLock.then(async () => {
+            const inactive = await this.getInactiveStories();
+            fn(inactive);
+            fs.writeFileSync(await this.inactiveStoriesFilePath(), JSON.stringify([...inactive], null, 2));
+        });
+        return this._inactiveWriteLock;
+    }
+
     async markStoryInactive(storyId: string): Promise<void> {
-        const inactive = await this.getInactiveStories();
-        inactive.add(storyId);
-        fs.writeFileSync(await this.inactiveStoriesFilePath(), JSON.stringify([...inactive], null, 2));
+        return this._updateInactiveStories(set => set.add(storyId));
     }
 
     async markStoryActive(storyId: string): Promise<void> {
-        const inactive = await this.getInactiveStories();
-        inactive.delete(storyId);
-        fs.writeFileSync(await this.inactiveStoriesFilePath(), JSON.stringify([...inactive], null, 2));
+        return this._updateInactiveStories(set => set.delete(storyId));
     }
 
     // ── Deletion-ack registry ─────────────────────────────────────────────────
