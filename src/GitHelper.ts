@@ -1513,6 +1513,29 @@ export class GitHelper {
         }
     }
 
+    /** Changed files between two remote branch refs, with rename detection — used by the visual Diff Viewer panel. */
+    async filesChangedBetween(
+        fromRef: string,
+        toRef:   string
+    ): Promise<{ path: string; oldPath?: string; status: string }[]> {
+        try {
+            const raw = await this.git(["diff", "--name-status", "-M", `origin/${fromRef}`, `origin/${toRef}`]);
+            if (!raw) { return []; }
+            return raw.split("\n").filter(Boolean).map(line => {
+                const parts = line.split("\t");
+                const code  = parts[0].trim();
+                const s0    = code.charAt(0).toUpperCase();
+                const status = s0 === "A" ? "added" : s0 === "D" ? "deleted" : s0 === "R" ? "renamed" : "modified";
+                if (status === "renamed" && parts.length >= 3) {
+                    return { path: parts[2].trim(), oldPath: parts[1].trim(), status };
+                }
+                return { path: (parts[1] ?? parts[0]).trim(), status };
+            });
+        } catch {
+            return [];
+        }
+    }
+
     /** File content at a bare commit SHA (not a branch ref) — used to diff against a recorded last-deployed marker, which is stored as a raw SHA, not a branch name. */
     async fileContentAtSha(sha: string, filePath: string): Promise<string | null> {
         try {

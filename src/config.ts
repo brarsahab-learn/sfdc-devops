@@ -34,15 +34,36 @@ export function initOrgAliasStore(context: vscode.ExtensionContext): void {
 
 const ORG_ALIASES_KEY = "sfDevops.orgAliases";
 
+/**
+ * Migrate org alias data from globalState to workspaceState on first use,
+ * so each workspace/project has independent org alias mappings.
+ */
+function _migrateOrgAliasesIfNeeded(): void {
+    if (!_extContext) { return; }
+    const alreadyMigrated = _extContext.workspaceState.get<boolean>("sfDevops.orgAliasesMigrated");
+    if (alreadyMigrated) { return; }
+    const legacy = _extContext.globalState.get<Record<string, string>>(ORG_ALIASES_KEY);
+    if (legacy && Object.keys(legacy).length > 0) {
+        const existing = _extContext.workspaceState.get<Record<string, string>>(ORG_ALIASES_KEY) ?? {};
+        // Only copy if workspace has no aliases yet (avoid overwriting project-specific data)
+        if (Object.keys(existing).length === 0) {
+            _extContext.workspaceState.update(ORG_ALIASES_KEY, legacy);
+        }
+    }
+    _extContext.workspaceState.update("sfDevops.orgAliasesMigrated", true);
+}
+
 function readOrgAliases(): Record<string, string> {
-    return _extContext?.globalState.get<Record<string, string>>(ORG_ALIASES_KEY) ?? {};
+    _migrateOrgAliasesIfNeeded();
+    return _extContext?.workspaceState.get<Record<string, string>>(ORG_ALIASES_KEY) ?? {};
 }
 
 async function writeOrgAlias(key: string, alias: string): Promise<void> {
     if (!_extContext) { return; }
+    _migrateOrgAliasesIfNeeded();
     const data = readOrgAliases();
     data[key] = alias;
-    await _extContext.globalState.update(ORG_ALIASES_KEY, data);
+    await _extContext.workspaceState.update(ORG_ALIASES_KEY, data);
 }
 
 // ── Branch naming ────────────────────────────────────────────────────────────

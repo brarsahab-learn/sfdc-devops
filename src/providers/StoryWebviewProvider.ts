@@ -171,6 +171,9 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                 case "openPipelineView":
                     vscode.commands.executeCommand("sfDevops.openPipelineView");
                     this._clearBusy(); break;
+                case "openDiffViewer":
+                    vscode.commands.executeCommand("sfDevops.openDiffViewer");
+                    this._clearBusy(); break;
                 case "openStoryJourney":
                     vscode.commands.executeCommand("sfDevops.openStoryJourney");
                     this._clearBusy(); break;
@@ -641,6 +644,11 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         const publishEnv      = getPublishEnvironment();
         const promotable      = getPromotableEnvironments();
 
+        // Role gates — resolved once per render.
+        // Developer: commit/validate/coverage only; Lead: + promote/deploy/signoff; Admin: everything.
+        const isLead    = this._userRole !== "Developer";   // Lead or Admin
+        const isAdminRole = canAccessConfig(this._userRole); // Admin only
+
         const devPublished = progress[publishEnv.name] === "published";
         // "merged" (PR landed on the env branch) is deliberately NOT treated as done here —
         // only an actual `sf project deploy` (tracked as "deployed") completes a stage, so
@@ -658,9 +666,10 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
             } else if (nextEnv && progress[nextEnv.name] === "merged") {
                 // PR already merged into nextEnv's branch — the real next step is deploying
                 // it, not another promotion. Hand off straight to the Deployment Dashboard.
-                actionButton =
-                    `<div class="info">&#x26A1; ${nextEnv.label}'s PR is merged &mdash; deploy it to finish this stage.</div>
-                     <button class="btn btn-primary" onclick="send('openDeploymentDashboard', '${nextEnv.name}')">&#x1F680; Deploy &mdash; ${nextEnv.label}</button>`;
+                actionButton = isLead
+                    ? `<div class="info">&#x26A1; ${nextEnv.label}'s PR is merged &mdash; deploy it to finish this stage.</div>
+                       <button class="btn btn-primary" onclick="send('openDeploymentDashboard', '${nextEnv.name}')">&#x1F680; Deploy &mdash; ${nextEnv.label}</button>`
+                    : `<div class="info">&#x26A1; ${nextEnv.label}'s PR is merged &mdash; a Lead or Admin needs to deploy it to finish this stage.</div>`;
             } else if (nextEnv) {
                 // Validation is mandatory and gates the PR — so which button is "primary"
                 // (the actually-next step) depends on whether nextEnv's promotion branch has
@@ -679,8 +688,10 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                 const currentEnv = nextIdx > 0 ? environments[nextIdx - 1] : undefined;
                 const signoffBlocked = Boolean(currentEnv?.signoffGate && !signoffPassed[currentEnv.name]);
                 const signoffAction = signoffBlocked
-                    ? `<div class="warning">&#x26A0; ${currentEnv!.label} sign-off required before promoting to ${nextEnv.label}.</div>
-                       <button class="btn btn-secondary" onclick="send('recordSignoff', '${currentEnv!.name}')">&#x2705; Record ${currentEnv!.label} Sign-off</button>`
+                    ? (isLead
+                        ? `<div class="warning">&#x26A0; ${currentEnv!.label} sign-off required before promoting to ${nextEnv.label}.</div>
+                           <button class="btn btn-secondary" onclick="send('recordSignoff', '${currentEnv!.name}')">&#x2705; Record ${currentEnv!.label} Sign-off</button>`
+                        : `<div class="warning">&#x26A0; ${currentEnv!.label} sign-off by a Lead or Admin is required before promoting to ${nextEnv.label}.</div>`)
                     : "";
 
                 const promoteClass = isValidated ? "btn-primary" : "btn-secondary";
@@ -769,12 +780,14 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                 // trigger at all, which is exactly what made it unclear whether dev had ever
                 // really been deployed vs. just pushed to the branch.
                 if (isPublishStage) {
-                    if (state === "published") {
+                    if (state === "published" && isLead) {
                         stageLinks += ` <a href="#" title="Open Dev in the Deployment Dashboard to deploy it to the Dev org" onclick="send('openDeploymentDashboard', '${envCfg.name}')">🚀</a>`;
                     }
                 } else {
                     stageLinks += ` <a href="#" title="Promote a story to ${envCfg.label} (pick from a list — opens a PR)" onclick="send('promote', '${envCfg.name}')">⬆</a>`;
-                    stageLinks += ` <a href="#" title="Open ${envCfg.label} in the Deployment Dashboard" onclick="send('openDeploymentDashboard', '${envCfg.name}')">🚀</a>`;
+                    if (isLead) {
+                        stageLinks += ` <a href="#" title="Open ${envCfg.label} in the Deployment Dashboard" onclick="send('openDeploymentDashboard', '${envCfg.name}')">🚀</a>`;
+                    }
                 }
                 if (state === "open" && storyId) {
                     const promotionBranch = promoBranchName(storyId, envCfg.name, "promote");
@@ -921,13 +934,14 @@ ${(() => {
     return "";
 })()}
 
-<!-- Toolbar: icon-only buttons, compact -->
+<!-- Toolbar: icon-only buttons, compact. Role-gated: Dev sees core actions; Lead + Admin see deploy/signoff; Admin sees setup. -->
 <div class="toolbar">
   <a class="tbtn" href="#" onclick="send('changeRole')" title="Change Role (${escapeHtml(this._userRole)})">${this._userRole === "Admin" ? "🛡️" : this._userRole === "Lead" ? "🎯" : "👨‍💻"}</a>
-  <a class="tbtn" href="#" onclick="send('openAdminPanel')" title="Setup / Admin Panel">⚙️</a>
+  ${isAdminRole ? `<a class="tbtn" href="#" onclick="send('openAdminPanel')" title="Setup / Admin Panel">⚙️</a>` : ""}
   <a class="tbtn" href="#" onclick="send('viewAuditLog')" title="Audit Trail">📋</a>
   <a class="tbtn" href="#" onclick="send('openPipelineView')" title="Pipeline &amp; Story Journey">🗂️</a>
-  <a class="tbtn" href="#" onclick="send('viewPendingActions')" title="Stories Pending My Action" style="position:relative">⚡${pendingActionsCount > 0 ? `<span class="tbtn-badge">${pendingActionsCount}</span>` : ""}</a>
+  <a class="tbtn" href="#" onclick="send('openDiffViewer')" title="Compare Branches / View File Diffs">🔍</a>
+  ${isLead ? `<a class="tbtn" href="#" onclick="send('viewPendingActions')" title="Stories Pending My Action" style="position:relative">⚡${pendingActionsCount > 0 ? `<span class="tbtn-badge">${pendingActionsCount}</span>` : ""}</a>` : ""}
   ${coverageBlockedEnv ? `<a class="tbtn" href="#" onclick="send('focusCoverage')" title="Run Coverage Check">🧪</a>` : ""}
   <a class="tbtn" href="#" onclick="send('refresh')" title="Refresh">↻<span id="countdown" class="countdown"></span></a>
 </div>

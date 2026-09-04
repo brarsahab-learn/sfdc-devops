@@ -19,6 +19,7 @@ import { AuditTrailPanel } from "./providers/AuditTrailPanel";
 import { StoryPipelinePanel } from "./providers/StoryPipelinePanel";
 import { StoryJourneyPanel } from "./providers/StoryJourneyPanel";
 import { AdminPanel } from "./providers/AdminPanel";
+import { DiffViewerPanel } from "./providers/DiffViewerPanel";
 import {
     findEnvironment, canPromote, getRoles,
     isFeatureBranch, getBaseBranch, getStaleBranchThreshold, getPromotableEnvironments,
@@ -330,6 +331,10 @@ export async function activate(context: vscode.ExtensionContext) {
 
         vscode.commands.registerCommand("sfDevops.openAdminPanel", () => {
             AdminPanel.createOrShow(gitHelper, bbClient, context);
+        }),
+
+        vscode.commands.registerCommand("sfDevops.openDiffViewer", (fromRef?: string, toRef?: string) => {
+            DiffViewerPanel.createOrShow(gitHelper, fromRef, toRef);
         }),
 
         // Opens the Coverage panel on the right — also triggered automatically when coverage
