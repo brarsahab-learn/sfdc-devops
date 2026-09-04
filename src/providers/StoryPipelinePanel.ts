@@ -5,9 +5,8 @@
 
 import * as vscode from "vscode";
 import { GitHelper } from "../GitHelper";
-import { getPromotableEnvironments, getPublishEnvironment, buildTicketUrl, featureBranchName, getStaleStoryThresholdDays } from "../config";
+import { getPromotableEnvironments, getPublishEnvironment, buildTicketUrl, getStaleStoryThresholdDays, extractStoryId, getTicketKeyPattern } from "../config";
 import { storyIdFromMessage } from "../DeploymentPlanner";
-import { getTicketKeyPattern } from "../config";
 
 interface StoryCard {
     storyId:      string;
@@ -82,19 +81,18 @@ export class StoryPipelinePanel {
         const now       = Date.now();
 
         // Build map: envName → set of story IDs that have been deployed there.
-        // A story is "in" an env if its squash commit appears in that env's remote branch log.
+        // A story is "in" an env if its story ID appears in any of the last 300 commits on
+        // that env's remote branch. We use recentCommitsOnBranch (git log -n) instead of
+        // the ~500 range form, which silently returns [] when the branch has fewer than 500
+        // commits and would mislabel all stories as "Feature (not yet deployed)".
         const deployedInEnv = new Map<string, Set<string>>();
         for (const env of allEnvs) {
             const ids = new Set<string>();
-            try {
-                const log = await this._gitHelper.commitLogBetweenRaw(
-                    `origin/${env.branch}~500`, `origin/${env.branch}`
-                ).catch(() => [] as { hash: string; date: string; author: string; message: string }[]);
-                for (const c of log) {
-                    const id = storyIdFromMessage(c.message, pattern);
-                    if (id) { ids.add(id); }
-                }
-            } catch { /* env branch may not exist yet */ }
+            const log = await this._gitHelper.recentCommitsOnBranch(env.branch, 300);
+            for (const c of log) {
+                const id = storyIdFromMessage(c.message, pattern);
+                if (id) { ids.add(id); }
+            }
             deployedInEnv.set(env.name, ids);
         }
 
@@ -102,9 +100,8 @@ export class StoryPipelinePanel {
         const cards: StoryCard[] = [];
 
         for (const branch of remoteBranches) {
-            // Extract story ID from branch name itself (same logic as isFeatureBranch).
-            const branchTip = branch.split("/").pop() ?? branch;
-            const storyId   = storyIdFromMessage(branchTip, pattern) ?? branchTip;
+            // extractStoryId strips the feature-branch prefix and extracts the ticket key.
+            const storyId = extractStoryId(branch) || branch;
             const ticketUrl = buildTicketUrl(storyId);
             const lastActivity = await this._gitHelper.branchLastCommitTimestamp(branch);
 

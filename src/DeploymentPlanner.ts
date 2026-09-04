@@ -16,24 +16,25 @@ export function isLikelyTestClass(name: string): boolean {
 export const VALID_TEST_LEVELS = ["NoTestRun", "RunSpecifiedTests", "RunLocalTests", "RunAllTestsInOrg"];
 
 /**
- * Picks the real `--test-level`/`--tests` to actually send to `sf project deploy`, given
- * the "Tests to run" choice for THIS action (auto-detected vs. run everything) and exactly
- * which Apex classes are in the files being deployed/validated right now:
+ * Picks the real `--test-level`/`--tests` to actually send to `sf project deploy`.
+ *
+ * Sandbox vs production matters: Salesforce requires tests for production deployments, but
+ * sandbox deployments with no Apex/test-class changes get `NoTestRun` to skip the overhead.
+ *
  *  - "all"  → RunAllTestsInOrg, unconditionally.
- *  - "auto" with at least one detected test → RunSpecifiedTests naming just those tests
- *    (deduped) — the whole point of this over a static per-env setting: a story touching 2
- *    classes shouldn't have to wait on the org's entire local test suite.
- *  - "auto" with Apex in the selection but nothing detected for any of it → RunSpecifiedTests
- *    would be sent with an empty list and the CLI would reject it outright, so fall back to
- *    RunLocalTests instead of silently failing.
- *  - no Apex in the selection at all → nothing to auto-pick; use the environment's own
- *    configured level (falling back to RunLocalTests if it's not one of the four real values).
+ *  - "auto" with at least one detected test → RunSpecifiedTests naming just those tests.
+ *  - "auto" with Apex in the selection but nothing detected → RunLocalTests (RunSpecifiedTests
+ *    with an empty list is rejected by the CLI).
+ *  - no Apex in the selection + sandbox (isProd === false) → NoTestRun.
+ *  - no Apex in the selection + production (isProd === true) → use the configured level
+ *    (Salesforce mandates tests on production deployments; never override to NoTestRun).
  */
 export function resolveEffectiveTestLevel(
     configuredLevel: string,
     testMode: "auto" | "all",
     apexClassesInSelection: string[],
-    apexTestMap: Record<string, string | null>
+    apexTestMap: Record<string, string | null>,
+    isProd = false,
 ): { testLevel: string; tests?: string[] } {
     if (testMode === "all") { return { testLevel: "RunAllTestsInOrg" }; }
     const detected = Array.from(new Set(
@@ -41,6 +42,8 @@ export function resolveEffectiveTestLevel(
     ));
     if (detected.length > 0) { return { testLevel: "RunSpecifiedTests", tests: detected }; }
     if (apexClassesInSelection.length > 0) { return { testLevel: "RunLocalTests" }; }
+    // No Apex in the deployment package.
+    if (!isProd) { return { testLevel: "NoTestRun" }; }
     return { testLevel: VALID_TEST_LEVELS.includes(configuredLevel) ? configuredLevel : "RunLocalTests" };
 }
 

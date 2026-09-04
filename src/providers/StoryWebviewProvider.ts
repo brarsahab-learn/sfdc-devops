@@ -161,7 +161,7 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                     if (msg.path) { await this._viewWorkingFileDiff(msg.path); }
                     this._clearBusy(); break;
                 case "focusCoverage":
-                    vscode.commands.executeCommand("sfDevopsCoverageView.focus");
+                    vscode.commands.executeCommand("sfDevops.runCoverage");
                     this._clearBusy(); break;
                 case "recheckSetup":
                     this.refresh(); break;
@@ -905,6 +905,7 @@ ${(() => {
   <a class="tbtn" href="#" onclick="send('openAdminPanel')" title="Admin / Setup Panel">⚙ Setup</a>
   <a class="tbtn" href="#" onclick="send('openPipelineView')" title="Story Pipeline">🗂 Pipeline</a>
   <a class="tbtn" href="#" onclick="send('viewPendingActions')" title="Stories Pending My Action">⚡ Actions</a>
+  ${coverageBlockedEnv ? `<a class="tbtn" href="#" onclick="send('focusCoverage')" title="Run Coverage Check">🧪 Coverage</a>` : ""}
   <a class="tbtn" href="#" onclick="send('refresh')" title="Refresh"><span>↻ Refresh</span> <span id="countdown" class="countdown"></span></a>
 </div>
 

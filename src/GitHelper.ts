@@ -1262,6 +1262,23 @@ export class GitHelper {
         }
     }
 
+    /** Last `count` commits on `origin/<branch>`, newest first. Safe for branches with fewer commits than `count`. */
+    async recentCommitsOnBranch(
+        branch: string,
+        count = 300
+    ): Promise<{ hash: string; date: string; author: string; message: string }[]> {
+        try {
+            const format = "%H%x1f%aI%x1f%an%x1f%s";
+            const raw = await this.git(["log", "--no-merges", `-n`, String(count), `--pretty=format:${format}`, `origin/${branch}`]);
+            return raw.split("\n").filter(Boolean).map(line => {
+                const [hash, date, author, message] = line.split("\x1f");
+                return { hash, date, author, message };
+            });
+        } catch {
+            return [];
+        }
+    }
+
     /** Days since the last commit on `origin/<branch>` (fractional), or null if the branch has no commits / doesn't exist. */
     async branchAgeDays(branch: string): Promise<number | null> {
         const ts = await this.branchLastCommitTimestamp(branch);

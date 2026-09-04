@@ -2,7 +2,7 @@
 	"name": "sf-devops",
 	"displayName": "Salesforce DevOps",
 	"description": "Generic, settings-driven Salesforce CI/CD workflow — 1-click story management, pipeline status, environment promotion, and an org-per-branch 2GP packaging release gate",
-	"version": "4.1.0",
+	"version": "4.2.0",
 	"publisher": "your-company",
 	"engines": {
 		"vscode": "^1.85.0"
@@ -29,11 +29,6 @@
 				{
 					"id": "sfDevopsStoryView",
 					"name": "Current Story",
-					"type": "webview"
-				},
-				{
-					"id": "sfDevopsCoverageView",
-					"name": "Code Coverage",
 					"type": "webview"
 				},
 				{

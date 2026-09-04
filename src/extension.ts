@@ -2,7 +2,7 @@
 
 import * as vscode from "vscode";
 import { StoryWebviewProvider, StoryStatusInfo }   from "./providers/StoryWebviewProvider";
-import { CoverageWebviewProvider} from "./providers/CoverageWebviewProvider";
+import { CoveragePanel } from "./providers/CoveragePanel";
 import { EnvironmentTreeProvider} from "./providers/EnvironmentTreeProvider";
 import { startStory }      from "./commands/startStory";
 import { commitAndPush }   from "./commands/submitForReview";
@@ -126,14 +126,10 @@ export async function activate(context: vscode.ExtensionContext) {
     const storyProvider = new StoryWebviewProvider(
         context.extensionUri, bbClient, gitHelper, context, updateStatusBar
     );
-    const coverageProvider = new CoverageWebviewProvider(
-        context.extensionUri, gitHelper, storyProvider
-    );
-    const envProvider      = new EnvironmentTreeProvider(gitHelper);
+    const envProvider = new EnvironmentTreeProvider(gitHelper);
 
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider("sfDevopsStoryView", storyProvider),
-        vscode.window.registerWebviewViewProvider("sfDevopsCoverageView", coverageProvider),
         vscode.window.registerTreeDataProvider("sfDevopsEnvView", envProvider)
     );
 
@@ -329,6 +325,12 @@ export async function activate(context: vscode.ExtensionContext) {
 
         vscode.commands.registerCommand("sfDevops.openAdminPanel", () => {
             AdminPanel.createOrShow(gitHelper, bbClient, context);
+        }),
+
+        // Opens the Coverage panel on the right — also triggered automatically when coverage
+        // is blocking a promotion (focusCoverage link in the sidebar warning banner).
+        vscode.commands.registerCommand("sfDevops.runCoverage", async () => {
+            CoveragePanel.createOrShow(gitHelper, storyProvider);
         }),
 
         // "Stories Pending My Action" — surfaced as a QuickPick so users can jump directly

@@ -151,21 +151,20 @@ async function runPromotionValidate(
     }
 
     const apexClasses = apexClassNamesIn(files);
-    let testLevel = envCfg.deployTestLevel;
-    let tests: string[] | undefined;
+    let apexTestFilePaths: Record<string, string[]> = {};
+    let apexTestMap: Record<string, string | null> = {};
     if (apexClasses.length > 0) {
         const allClsFiles = await gitHelper.listFilesAtRef(promotionBranch, getSourceRootFolder());
-        const { apexTestMap, apexTestFilePaths } = buildApexTestMap(allClsFiles, apexClasses);
-        ({ testLevel, tests } = resolveEffectiveTestLevel(envCfg.deployTestLevel, "auto", apexClasses, apexTestMap));
+        ({ apexTestMap, apexTestFilePaths } = buildApexTestMap(allClsFiles, apexClasses));
+    }
+    let { testLevel, tests } = resolveEffectiveTestLevel(envCfg.deployTestLevel, "auto", apexClasses, apexTestMap, envCfg.isProd);
 
-        // Same fold-in as the Dashboard: RunSpecifiedTests requires the named test class to
-        // actually be part of the deployment package (or already exist in the org) — make
-        // sure it's always included even if it wasn't otherwise part of the diff.
-        if (testLevel === "RunSpecifiedTests" && tests?.length) {
-            const present = new Set(files.map(f => f.path));
-            const extra = tests.flatMap(t => apexTestFilePaths[t] ?? []).filter(p => !present.has(p));
-            if (extra.length > 0) { files = [...files, ...extra.map(p => ({ path: p, change: "modified" as const }))]; }
-        }
+    // RunSpecifiedTests requires the named test class to be part of the deployment package
+    // (or already exist in the org). Fold in test files that weren't otherwise selected.
+    if (testLevel === "RunSpecifiedTests" && tests?.length) {
+        const present = new Set(files.map(f => f.path));
+        const extra = tests.flatMap(t => apexTestFilePaths[t] ?? []).filter(p => !present.has(p));
+        if (extra.length > 0) { files = [...files, ...extra.map(p => ({ path: p, change: "modified" as const }))]; }
     }
 
     progress?.report({ message: `Validating against ${targetEnv.toUpperCase()}...` });

@@ -413,7 +413,7 @@ export class DeploymentDashboardPanel {
         // principle as the deploy-lock/prod gates above. "auto" is the default whenever the
         // client doesn't say otherwise.
         const testMode: "auto" | "all" = msg.testMode === "all" ? "all" : "auto";
-        const { testLevel, tests } = resolveEffectiveTestLevel(env.deployTestLevel, testMode, apexClassNamesIn(files), model.apexTestMap);
+        const { testLevel, tests } = resolveEffectiveTestLevel(env.deployTestLevel, testMode, apexClassNamesIn(files), model.apexTestMap, env.isProd);
 
         // RunSpecifiedTests requires each named test class to actually be part of the
         // deployment package (or already exist in the target org) — on a never-deployed
