@@ -64,11 +64,17 @@ const BUSY_BAR_JS = `
     var bar = document.getElementById('busyBar');
     if (bar) { bar.style.display = 'block'; }
     clearTimeout(window.__busyTimeout);
-    window.__busyTimeout = setTimeout(function () {
-      document.body.classList.remove('busy');
-      if (bar) { bar.style.display = 'none'; }
-    }, ${BUSY_TIMEOUT_MS});
+    window.__busyTimeout = setTimeout(function () { clearBusy(); }, ${BUSY_TIMEOUT_MS});
   }
+  function clearBusy() {
+    clearTimeout(window.__busyTimeout);
+    document.body.classList.remove('busy');
+    var bar = document.getElementById('busyBar');
+    if (bar) { bar.style.display = 'none'; }
+  }
+  window.addEventListener('message', function(e) {
+    if (e.data && e.data.command === 'clearBusy') { clearBusy(); }
+  });
 `;
 
 export class StoryWebviewProvider implements vscode.WebviewViewProvider {
@@ -111,51 +117,71 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         // Handle messages from webview
         webviewView.webview.onDidReceiveMessage(async (msg: { command: string; env?: string; key?: string; value?: string; path?: string }) => {
             switch (msg.command) {
+                // Commands that open VS Code UI (QuickPick, panels) without replacing the
+                // webview HTML — clear busy immediately so buttons don't stay grayed.
                 case "resumeStory":
-                    vscode.commands.executeCommand("sfDevops.resumeStory"); break;
+                    vscode.commands.executeCommand("sfDevops.resumeStory");
+                    this._clearBusy(); break;
                 case "startStory":
-                    vscode.commands.executeCommand("sfDevops.startStory"); break;
+                    vscode.commands.executeCommand("sfDevops.startStory");
+                    this._clearBusy(); break;
                 case "commitAndPush":
-                    vscode.commands.executeCommand("sfDevops.commitAndPush"); break;
+                    vscode.commands.executeCommand("sfDevops.commitAndPush");
+                    this._clearBusy(); break;
                 case "promote":
-                    // No msg.env (e.g. the toolbar's general "Promote" button, not the
-                    // per-story action button) → the command itself prompts for which
-                    // environment, then opens the picker of eligible stories for it —
-                    // independent of whatever story/branch is currently checked out.
                     vscode.commands.executeCommand("sfDevops.promoteEnv", msg.env || undefined);
-                    break;
+                    this._clearBusy(); break;
                 case "validate":
                     if (msg.env) { vscode.commands.executeCommand("sfDevops.validateEnv", msg.env); }
-                    break;
+                    this._clearBusy(); break;
                 case "resumePromotion":
-                    vscode.commands.executeCommand("sfDevops.resumePromotion"); break;
+                    vscode.commands.executeCommand("sfDevops.resumePromotion");
+                    this._clearBusy(); break;
                 case "cancelPromotion":
-                    vscode.commands.executeCommand("sfDevops.cancelPromotion"); break;
+                    vscode.commands.executeCommand("sfDevops.cancelPromotion");
+                    this._clearBusy(); break;
                 case "syncBranch":
-                    vscode.commands.executeCommand("sfDevops.syncBranch"); break;
+                    vscode.commands.executeCommand("sfDevops.syncBranch");
+                    this._clearBusy(); break;
                 case "refresh":
-                    this.refresh(); break;
+                    this.refresh(); break;  // refresh replaces HTML — no explicit clearBusy needed
                 case "viewAuditLog":
-                    vscode.commands.executeCommand("sfDevops.viewAuditLog"); break;
+                    vscode.commands.executeCommand("sfDevops.viewAuditLog");
+                    this._clearBusy(); break;
                 case "openDeploymentDashboard":
-                    vscode.commands.executeCommand("sfDevops.openDeploymentDashboard", msg.env); break;
+                    vscode.commands.executeCommand("sfDevops.openDeploymentDashboard", msg.env);
+                    this._clearBusy(); break;
                 case "changeRole":
-                    vscode.commands.executeCommand("sfDevops.changeRole"); break;
+                    vscode.commands.executeCommand("sfDevops.changeRole");
+                    this._clearBusy(); break;
                 case "viewBranchInBrowser":
-                    await this._viewBranchInBrowser(); break;
+                    await this._viewBranchInBrowser();
+                    this._clearBusy(); break;
                 case "viewWorkingFileDiff":
                     if (msg.path) { await this._viewWorkingFileDiff(msg.path); }
-                    break;
+                    this._clearBusy(); break;
                 case "focusCoverage":
-                    vscode.commands.executeCommand("sfDevopsCoverageView.focus"); break;
+                    vscode.commands.executeCommand("sfDevopsCoverageView.focus");
+                    this._clearBusy(); break;
                 case "recheckSetup":
                     this.refresh(); break;
                 case "openAdminPanel":
-                    vscode.commands.executeCommand("sfDevops.openAdminPanel"); break;
+                    vscode.commands.executeCommand("sfDevops.openAdminPanel");
+                    this._clearBusy(); break;
                 case "openPipelineView":
-                    vscode.commands.executeCommand("sfDevops.openPipelineView"); break;
+                    vscode.commands.executeCommand("sfDevops.openPipelineView");
+                    this._clearBusy(); break;
                 case "viewPendingActions":
-                    vscode.commands.executeCommand("sfDevops.viewPendingActions"); break;
+                    vscode.commands.executeCommand("sfDevops.viewPendingActions");
+                    this._clearBusy(); break;
+                case "editEnvironmentsSetting":
+                    vscode.commands.executeCommand("workbench.action.openSettings", "sfDevops.environments");
+                    this._clearBusy(); break;
+                case "openOrg":
+                    if (msg.value?.trim()) { await this._openOrgInBrowser(msg.value.trim()); }
+                    this._clearBusy(); break;
+
+                // Commands that call refresh() — busy clears naturally via HTML replacement.
                 case "openSetupCheck":
                     this._forceShowSetup = true;
                     this.refresh();
@@ -195,9 +221,6 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                         this.refresh();
                     }
                     break;
-                case "openOrg":
-                    if (msg.value?.trim()) { await this._openOrgInBrowser(msg.value.trim()); }
-                    break;
                 case "pushEnvBranch":
                     if (msg.value && canAccessConfig(this._userRole)) {
                         try {
@@ -208,9 +231,6 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                         }
                         this.refresh();
                     }
-                    break;
-                case "editEnvironmentsSetting":
-                    vscode.commands.executeCommand("workbench.action.openSettings", "sfDevops.environments");
                     break;
                 case "recordSignoff":
                     if (msg.env) { await this._recordSignoff(msg.env); }
@@ -228,6 +248,12 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         webviewView.onDidDispose(() => this._clearAutoRefresh());
 
         this.refresh();
+    }
+
+    /** Posts a clearBusy message to the webview — used after commands that dispatch VS Code UI
+     *  (QuickPick, panels) without replacing the webview HTML, so buttons don't stay grayed. */
+    private _clearBusy(): void {
+        this._view?.webview.postMessage({ command: "clearBusy" });
     }
 
     private _clearAutoRefresh(): void {
