@@ -19,9 +19,9 @@ import { AuditTrailPanel } from "./providers/AuditTrailPanel";
 import {
     findEnvironment, canPromote, getRoles,
     isFeatureBranch, getBaseBranch, getStaleBranchThreshold, getPromotableEnvironments,
-    initOrgAliasStore, getPublishEnvironment,
+    initOrgAliasStore, getPublishEnvironment, getAuditLogRetentionDays,
 } from "./config";
-import { getEffectiveRole, canAccessConfig, promptChangeRole } from "./RoleManager";
+import { getEffectiveRole, canAccessConfig, promptChangeRole, migrateRolePasswordIfNeeded, resetRolePassword, resetRolePasswordForce } from "./RoleManager";
 import { initLog } from "./Log";
 import { watchGitState } from "./GitWatcher";
 import { execSf } from "./SfCli";
@@ -33,8 +33,19 @@ export async function activate(context: vscode.ExtensionContext) {
     console.log("Salesforce DevOps extension activated");
     initLog(context);
     initOrgAliasStore(context);
+    await migrateRolePasswordIfNeeded(context);
 
     const gitHelper = new GitHelper();
+
+    // Auto-trim audit log on startup using configured retention window.
+    const retentionDays = getAuditLogRetentionDays();
+    if (retentionDays > 0) {
+        const trimmed = await gitHelper.trimAuditLog(retentionDays * 24 * 60 * 60 * 1000);
+        if (trimmed > 0) {
+            console.log(`SF DevOps: auto-trimmed ${trimmed} audit entries older than ${retentionDays} days.`);
+        }
+    }
+
     // sfDevops.gitProvider is optional — when it's left unset, pick the provider from the
     // origin remote's host instead of silently defaulting to Bitbucket, so a GitHub-origin
     // repo still resolves PR/pipeline status correctly out of the box.
@@ -280,8 +291,16 @@ export async function activate(context: vscode.ExtensionContext) {
         }),
 
         vscode.commands.registerCommand("sfDevops.changeRole", async () => {
-            const changed = await promptChangeRole(context, getRoles());
+            const changed = await promptChangeRole(context, getRoles(), gitHelper);
             if (changed) { storyProvider.refresh(); }
+        }),
+
+        vscode.commands.registerCommand("sfDevops.resetRolePassword", async () => {
+            await resetRolePassword(context, gitHelper);
+        }),
+
+        vscode.commands.registerCommand("sfDevops.resetRolePasswordForce", async () => {
+            await resetRolePasswordForce(context, gitHelper);
         }),
 
         // Dedicated 2GP Release Gate — occasional, admin-triggered, separate from the

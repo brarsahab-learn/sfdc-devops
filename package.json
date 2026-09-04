@@ -133,6 +133,34 @@
 				"title": "Open Org — Deployment Status",
 				"icon": "$(link-external)",
 				"category": "Salesforce DevOps"
+			},
+			{
+				"command": "sfDevops.resetRolePassword",
+				"title": "Reset Role Password",
+				"category": "Salesforce DevOps"
+			},
+			{
+				"command": "sfDevops.resetRolePasswordForce",
+				"title": "Reset All Role Passwords (Break-Glass)",
+				"category": "Salesforce DevOps"
+			},
+			{
+				"command": "sfDevops.openPipelineView",
+				"title": "Open Pipeline View",
+				"icon": "$(graph)",
+				"category": "Salesforce DevOps"
+			},
+			{
+				"command": "sfDevops.viewPendingActions",
+				"title": "View Pending Actions",
+				"icon": "$(zap)",
+				"category": "Salesforce DevOps"
+			},
+			{
+				"command": "sfDevops.openAdminPanel",
+				"title": "Open Admin Panel",
+				"icon": "$(shield)",
+				"category": "Salesforce DevOps"
 			}
 		],
 		"menus": {
@@ -281,6 +309,10 @@
 									"isProd": {
 										"type": "boolean",
 										"description": "Marks this environment as Prod for safety gates (e.g. the Deployment Dashboard's auto-deploy-after-validate never applies here, regardless of the checkbox). Defaults to true when name is \"prod\" — set this explicitly if your production environment uses a different name."
+									},
+									"locked": {
+										"type": "boolean",
+										"description": "When true, blocks all promotions and deploys into this environment for all roles including Admin. Use for emergency stops."
 									}
 								}
 							}
@@ -371,6 +403,16 @@
 					"type": "string",
 					"description": "Salesforce DX source root folder name (the package directory in sfdx-project.json), used to detect Apex classes and other metadata changes.",
 					"default": "force-app"
+				},
+				"sfDevops.staleStoryThresholdDays": {
+					"type": "number",
+					"description": "Days with no new commits before a story is flagged as stale in the Current Story panel and Pipeline view. Set to 0 to disable stale detection.",
+					"default": 14
+				},
+				"sfDevops.auditLogRetentionDays": {
+					"type": "number",
+					"description": "Auto-trim audit log entries older than this many days on extension startup. Set to 0 to disable auto-trim.",
+					"default": 90
 				},
 				"sfDevops.staleBranchThreshold": {
 					"type": "number",

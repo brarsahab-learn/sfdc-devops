@@ -15,7 +15,9 @@ export type AuditOperation =
     | "runTests"
     | "deploy"
     | "deployValidate"
-    | "signoff";
+    | "signoff"
+    | "changeRole"
+    | "acknowledgeDeletion";
 
 export type AuditOutcome = "success" | "conflict" | "failure";
 
@@ -72,9 +74,11 @@ const OPERATION_LABELS: Record<AuditOperation, string> = {
     syncBranch:       "Sync Branch with Dev",
     prepare2gpBeta:   "Prepare 2GP Beta from UAT",
     runTests:         "Run Apex Tests",
-    deploy:           "Deploy to Environment",
-    deployValidate:   "Validate Deploy (dry-run)",
-    signoff:          "Manual Sign-off Recorded",
+    deploy:                "Deploy to Environment",
+    deployValidate:        "Validate Deploy (dry-run)",
+    signoff:               "Manual Sign-off Recorded",
+    changeRole:            "Role Change",
+    acknowledgeDeletion:   "Deletion Manually Acknowledged",
 };
 
 // Salesforce source-format folder name (under .../default/) → metadata API type.

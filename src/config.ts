@@ -197,6 +197,8 @@ export interface EnvironmentSetting {
     deployTestLevel?: string;
     /** Explicit override for "is this Prod" — see ResolvedEnvironment.isProd. */
     isProd?:      boolean;
+    /** When true, blocks all promotions and deploys into this environment for all roles. */
+    locked?:      boolean;
 }
 
 export interface ResolvedEnvironment {
@@ -218,6 +220,8 @@ export interface ResolvedEnvironment {
      * stop protecting it.
      */
     isProd:       boolean;
+    /** When true, blocks all promotions and deploys into this environment for all roles including Admin. */
+    locked:       boolean;
 }
 
 const DEFAULT_ENVIRONMENTS: EnvironmentSetting[] = [
@@ -284,6 +288,7 @@ export function getEnvironments(): ResolvedEnvironment[] {
                 // is what actually delivers "run just the relevant tests" now.
                 deployTestLevel: e.deployTestLevel || "RunLocalTests",
                 isProd,
+                locked: e.locked ?? false,
             };
         });
 }
@@ -339,11 +344,20 @@ export function getCoverageSourceOrg(): { alias: string; label: string } {
  * (only someone whose role is exactly "Lead" could), which contradicts that model.
  */
 export function canPromote(role: string, env: ResolvedEnvironment): boolean {
+    if (env.locked) { return false; } // locked beats all roles
     if (!env.requiredRole) { return true; }
     const roles = getRoles();
     const requiredRank = roles.indexOf(env.requiredRole);
     if (requiredRank === -1) { return role === env.requiredRole; } // requiredRole isn't even in sfDevops.roles — fall back to an exact match
     return roles.indexOf(role) >= requiredRank;
+}
+
+export function getStaleStoryThresholdDays(): number {
+    return cfg().get<number>("staleStoryThresholdDays") ?? 14;
+}
+
+export function getAuditLogRetentionDays(): number {
+    return cfg().get<number>("auditLogRetentionDays") ?? 90;
 }
 
 /** Message shown once a story has been merged into the last configured environment. */

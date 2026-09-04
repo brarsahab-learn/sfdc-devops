@@ -174,6 +174,38 @@ export class GitHelper {
         } catch { /* logging must never break the underlying operation */ }
     }
 
+    /**
+     * Removes audit entries older than `olderThanMs` milliseconds. Returns count removed.
+     * Pass 0 to remove all entries.
+     */
+    async trimAuditLog(olderThanMs: number): Promise<number> {
+        try {
+            const entries = await this.readAuditEntries();
+            if (entries.length === 0) { return 0; }
+            const cutoff = Date.now() - olderThanMs;
+            const kept = olderThanMs === 0 ? [] : entries.filter(e => {
+                const ts = new Date(e.timestamp ?? 0).getTime();
+                return ts >= cutoff;
+            });
+            if (kept.length === entries.length) { return 0; }
+            const removed = entries.length - kept.length;
+            fs.writeFileSync(await this.auditJsonPath(), JSON.stringify(kept, null, 2));
+            fs.writeFileSync(await this.auditHtmlPath(), renderAuditHtml(kept));
+            return removed;
+        } catch {
+            return 0;
+        }
+    }
+
+    /** Returns the file size of the audit log JSON in bytes, or 0 if not present. */
+    async getAuditLogSizeBytes(): Promise<number> {
+        try {
+            return fs.statSync(await this.auditJsonPath()).size;
+        } catch {
+            return 0;
+        }
+    }
+
     // ── Deployment state (local-only, per clone, in the git dir) ────────────────
 
     private async deployStateFilePath(): Promise<string> {
@@ -905,6 +937,48 @@ export class GitHelper {
         try {
             fs.writeFileSync(await this.signoffFilePath(), JSON.stringify(data, null, 2));
         } catch { /* best effort */ }
+    }
+
+    // ── Deletion acknowledgement gate (per story + environment, in the git dir) ───
+    // Records that the developer has manually handled a set of deleted metadata
+    // components for a given story/env at a specific feature branch SHA.
+    // The SHA is used to invalidate the ack when the feature branch advances.
+
+    private async deletionAckFilePath(): Promise<string> {
+        return path.join(await this.gitDirPath(), "sf-devops-deletion-ack.json");
+    }
+
+    private async readDeletionAcks(): Promise<Record<string, { sha: string }>> {
+        try {
+            return JSON.parse(fs.readFileSync(await this.deletionAckFilePath(), "utf8")) as Record<string, { sha: string }>;
+        } catch {
+            return {};
+        }
+    }
+
+    private async writeDeletionAcks(data: Record<string, { sha: string }>): Promise<void> {
+        try {
+            fs.writeFileSync(await this.deletionAckFilePath(), JSON.stringify(data, null, 2));
+        } catch { /* best effort */ }
+    }
+
+    async getDeletionAcknowledgement(storyId: string, env: string): Promise<{ sha: string } | null> {
+        const key = `${storyId}::${env}`;
+        return (await this.readDeletionAcks())[key] ?? null;
+    }
+
+    async setDeletionAcknowledgement(storyId: string, env: string, sha: string): Promise<void> {
+        const key = `${storyId}::${env}`;
+        const data = await this.readDeletionAcks();
+        data[key] = { sha };
+        await this.writeDeletionAcks(data);
+    }
+
+    async clearDeletionAcknowledgement(storyId: string, env: string): Promise<void> {
+        const key = `${storyId}::${env}`;
+        const data = await this.readDeletionAcks();
+        delete data[key];
+        await this.writeDeletionAcks(data);
     }
 
     /** Files with unresolved merge conflicts. */

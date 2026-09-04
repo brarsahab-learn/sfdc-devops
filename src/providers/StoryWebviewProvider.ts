@@ -9,7 +9,7 @@ import {
     extractStoryId, isFeatureBranch, getBaseBranch, getEnvironments, getPublishEnvironment,
     getPromotableEnvironments, canPromote, getTerminalStageMessage, promoBranchName, buildTicketUrl,
     getCoverageGateEnvironment, getOrgAliasSlots, setOrgAliasSlot, OrgAliasSlot,
-    ResolvedEnvironment, getFallbackRefreshSeconds,
+    ResolvedEnvironment, getFallbackRefreshSeconds, featureBranchName,
 } from "../config";
 import { runSetupChecks, SetupCheckItem } from "../SetupCheck";
 import { getEffectiveRole, canAccessConfig } from "../RoleManager";
@@ -189,6 +189,9 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                 case "recordSignoff":
                     if (msg.env) { await this._recordSignoff(msg.env); }
                     break;
+                case "acknowledgeDeletion":
+                    if (msg.env) { await this._recordDeletionAck(msg.env); }
+                    break;
             }
         });
 
@@ -280,7 +283,7 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         try {
             // Basic setup must be validated (and, the first time, explicitly confirmed)
             // before anything else in this panel is shown.
-            const checks = await runSetupChecks(this._gitHelper, this._bbClient, this._extContext);
+            const checks = await runSetupChecks(this._gitHelper, this._bbClient, this._extContext, this._userRole);
             const requiredPassed = checks.filter(c => c.required).every(c => c.passed);
             const confirmed = this._extContext.workspaceState.get<boolean>(SETUP_CONFIRMED_KEY, false);
 
@@ -325,9 +328,10 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                 }
             }
             const timelines = storyId ? await getStoryTimelines(this._gitHelper, storyId) : {};
+            const deletionAckPending = (onFeature && storyId) ? await this._getDeletionAckPending(storyId) : null;
 
             this._view.webview.html = this._getWebviewHtml(
-                branch ?? "No branch", storyId, progress, behind, coverageBlockedEnv, repoOverride, signoffPassed, localChanges, timelines
+                branch ?? "No branch", storyId, progress, behind, coverageBlockedEnv, repoOverride, signoffPassed, localChanges, timelines, deletionAckPending
             );
             this._externalSwitchNotice = undefined; // one-shot: shown once, then cleared
 
@@ -377,6 +381,55 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         if (apex.length === 0) { return null; }
         const passed = await this._gitHelper.isCoveragePassed(storyId);
         return passed ? null : gateEnv.name;
+    }
+
+    /**
+     * Returns info about the first promotable env blocked by unacknowledged deleted files,
+     * or null if no block exists.
+     */
+    private async _getDeletionAckPending(storyId: string): Promise<{ env: string; envLabel: string; files: string[] } | null> {
+        if (!storyId) { return null; }
+        let preview: { path: string; change: "added" | "modified" | "deleted" }[];
+        try {
+            preview = await this._gitHelper.previewStoryFiles(storyId);
+        } catch {
+            return null;
+        }
+        const deleted = preview.filter(f => f.change === "deleted");
+        if (deleted.length === 0) { return null; }
+
+        const featureSha = await this._gitHelper.remoteHeadSha(featureBranchName(storyId));
+        if (!featureSha) { return null; }
+
+        for (const env of getPromotableEnvironments()) {
+            const ack = await this._gitHelper.getDeletionAcknowledgement(storyId, env.name);
+            if (!ack || ack.sha !== featureSha) {
+                return { env: env.name, envLabel: env.label, files: deleted.map(f => f.path) };
+            }
+        }
+        return null;
+    }
+
+    private async _recordDeletionAck(envName: string): Promise<void> {
+        const branch  = await this._gitHelper.currentBranch();
+        const storyId = extractStoryId(branch);
+        if (!storyId) { return; }
+        const featureSha = await this._gitHelper.remoteHeadSha(featureBranchName(storyId));
+        if (!featureSha) {
+            vscode.window.showWarningMessage("Could not determine the current feature branch SHA — push your branch first.");
+            return;
+        }
+        const env = getEnvironments().find(e => e.name === envName);
+        await this._gitHelper.setDeletionAcknowledgement(storyId, envName, featureSha);
+        await this._gitHelper.appendAudit({
+            operation: "acknowledgeDeletion",
+            storyId,
+            targetEnv: envName,
+            outcome: "success",
+            summary: `Deletion manually acknowledged for ${env?.label ?? envName} at SHA ${featureSha.slice(0, 8)}`,
+        });
+        vscode.window.showInformationMessage(`✅ Deletion acknowledged for ${env?.label ?? envName}. Promote/Validate is now unblocked.`);
+        this.refresh();
     }
 
     /**
@@ -498,7 +551,8 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         repoOverride: { workspace: string; repoSlug: string } | undefined,
         signoffPassed: Record<string, boolean>,
         localChanges: { staged: string[]; other: string[] } | null,
-        timelines: Record<string, EnvTimeline>
+        timelines: Record<string, EnvTimeline>,
+        deletionAckPending: { env: string; envLabel: string; files: string[] } | null = null
     ): string {
         const onFeatureBranch = isFeatureBranch(branch);
         const baseBranch      = getBaseBranch();
@@ -766,6 +820,10 @@ ${BUSY_BAR_HTML}
 
 ${externalSwitchNotice}
 ${syncWarning}
+${deletionAckPending ? `<div class="warning">
+  ⚠ ${escapeHtml(storyId)} deletes ${deletionAckPending.files.length} component(s) not yet manually removed from ${escapeHtml(deletionAckPending.envLabel)}.
+  <br>Remove them from the org, then: <a href="#" onclick="send('acknowledgeDeletion', '${deletionAckPending.env}')">✅ Acknowledge manual deletion for ${escapeHtml(deletionAckPending.envLabel)}</a>
+</div>` : ""}
 
 <div class="card">
   <div class="branch">${escapeHtml(branch)} ${branch !== "No branch" ? `<a href="#" onclick="send('viewBranchInBrowser')" title="View branch in browser">🔗</a>` : ""}</div>
