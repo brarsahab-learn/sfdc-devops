@@ -63,7 +63,7 @@ export interface AuditEntry {
     details?:   AuditDetails;
 }
 
-const OPERATION_LABELS: Record<AuditOperation, string> = {
+export const OPERATION_LABELS: Record<AuditOperation, string> = {
     startStory:       "Start New Story",
     resumeStory:      "Resume Previous Story",
     commitAndPublish: "Commit & Publish Feature Branch",
@@ -174,6 +174,21 @@ export function buildPackageXml(changedFiles: AuditChangedFile[]): { xml: string
     const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<Package xmlns="http://soap.sforce.com/2006/04/metadata">\n${typesXml}\n    <version>${DEFAULT_API_VERSION}</version>\n</Package>`;
 
     return { xml, unmapped };
+}
+
+/**
+ * Same as buildPackageXml but also returns a type→count map for PR description generation.
+ */
+export function buildPackageXmlWithGroups(
+    files: AuditChangedFile[]
+): { xml: string; unmapped: string[]; typeGroups: Record<string, number> } {
+    const { xml, unmapped } = buildPackageXml(files);
+    const typeGroups: Record<string, number> = {};
+    for (const f of files) {
+        const type = metadataTypeForPath(f.path);
+        if (type) { typeGroups[type] = (typeGroups[type] ?? 0) + 1; }
+    }
+    return { xml, unmapped, typeGroups };
 }
 
 function escapeXml(s: string): string {

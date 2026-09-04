@@ -118,6 +118,7 @@ export class DeploymentDashboardPanel {
             if (msg.command === "runAction") { await this._runAction(msg); }
             if (msg.command === "viewFileDiff") { await this._viewFileDiff(msg); }
             if (msg.command === "viewPendingFileDiff") { await this._viewPendingFileDiff(msg); }
+            if (msg.command === "rollback") { await this._handleRollback(msg); }
             // The one remaining cross-env navigation — "deploy succeeded, N stories ready in
             // the next stage" — rebinds this same panel to that env rather than switching a
             // pre-rendered tab, so it stays true to "bound to exactly what was requested,"
@@ -580,6 +581,91 @@ export class DeploymentDashboardPanel {
         vscode.window.showInformationMessage(`🧹 Deleted ${existing.length} promotion branch${existing.length > 1 ? "es" : ""}.`);
     }
 
+    /**
+     * Rollback to last-deployed SHA: checks out that exact commit locally, runs a full
+     * "Deploy ALL" against the env's org to restore it to the known-good state, then
+     * restores the working tree and cleans up the temp branch.
+     */
+    private async _handleRollback(msg: { env: string }) {
+        const publishEnv = getPublishEnvironment();
+        const promotable = getPromotableEnvironments();
+        const env = [publishEnv, ...promotable].find(e => e.name === msg.env);
+        if (!env) { return; }
+
+        if (!canPromote(this._userRole, env)) {
+            vscode.window.showWarningMessage(`Your role can't deploy to ${env.label}.`);
+            return;
+        }
+
+        const lastDeploy = await this._gitHelper.getDeployState(env.name);
+        if (!lastDeploy) {
+            vscode.window.showWarningMessage("No recorded deploy to roll back to.");
+            return;
+        }
+
+        const confirm = await vscode.window.showWarningMessage(
+            `Roll back ${env.label} (${env.orgAlias}) to the state at commit ${lastDeploy.sha.slice(0, 8)}?\n\n` +
+            `This redeploys the ENTIRE source folder at that snapshot to the org. Only use this to undo a bad promotion.`,
+            { modal: true },
+            "Yes, roll back"
+        );
+        if (!confirm) { return; }
+
+        const lockKey = `dashboard:${env.name}`;
+        if (!this._gitHelper.tryBeginOperation(lockKey)) {
+            vscode.window.showWarningMessage(`Already deploying to ${env.label} — wait for it to finish.`);
+            return;
+        }
+
+        let stashLabel: string | null = null;
+        if (await this._gitHelper.hasUncommittedChanges()) {
+            stashLabel = await warnUncommittedChanges(
+                this._gitHelper,
+                "Commit or stash your local changes before rolling back — this checks out a specific commit SHA.",
+                { offerStash: true }
+            );
+            if (!stashLabel) { this._gitHelper.endOperation(lockKey); return; }
+        }
+
+        const originalBranch = await this._gitHelper.currentBranch();
+        const tempBranch = `sf-devops-rollback/${env.name}`;
+
+        try {
+            await vscode.window.withProgress(
+                { location: vscode.ProgressLocation.Notification, title: `Rolling back ${env.label} to ${lastDeploy.sha.slice(0, 8)}…`, cancellable: false },
+                async (progress) => {
+                    progress.report({ message: `Checking out snapshot ${lastDeploy.sha.slice(0, 8)}…` });
+                    await this._gitHelper.createTempBranchAtSha(lastDeploy.sha, tempBranch);
+
+                    const result = await this._executeStep(
+                        env, "deploy",
+                        { mode: "all", storyIds: [], files: [] },
+                        [],
+                        `Rollback ${env.label} to ${lastDeploy.sha.slice(0, 8)}`,
+                        "NoTestRun",
+                        undefined,
+                        progress
+                    );
+
+                    if (result.success) {
+                        this._lastOutcome = { env: env.name, kind: "deploySucceeded", message: `✅ Rolled back ${env.label} to ${lastDeploy.sha.slice(0, 8)}` };
+                    } else {
+                        this._lastOutcome = { env: env.name, kind: "deployFailed", message: `❌ Rollback failed: ${result.error ?? "unknown error"}` };
+                    }
+                }
+            );
+        } finally {
+            // Always restore the working tree, regardless of deploy outcome.
+            if (originalBranch) {
+                await this._gitHelper.checkoutBranch(originalBranch).catch(() => {});
+            }
+            await this._gitHelper.deleteTempBranch(tempBranch);
+            this._gitHelper.endOperation(lockKey);
+            if (stashLabel) { await this._gitHelper.restoreStash(stashLabel).catch(() => {}); }
+            await this.refresh();
+        }
+    }
+
     /** Diff between two environment branches — used by the "diff vs next env" preview list. */
     private async _viewFileDiff(msg: { targetEnv: string; beforeRef: string; beforeLabel: string; afterRef: string; afterLabel: string; path: string }) {
         const before = await this._gitHelper.fileContentAtRef(msg.beforeRef, msg.path);
@@ -964,6 +1050,10 @@ ${envPane}
     send('viewPendingFileDiff', { env: env, path: path });
   }
 
+  function rollback(env) {
+    send('rollback', { env: env });
+  }
+
   function escapeHtmlJs(s) {
     return String(s).replace(/[<>&]/g, function (c) { return { '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]; });
   }
@@ -1282,6 +1372,7 @@ ${envPane}
     </label>
     <button class="btn btn-secondary" id="validateBtn-${env.name}" ${disabled} onclick="runAction('${env.name}','validate')">🔍 Validate</button>
     <button class="btn btn-primary" id="deployBtn-${env.name}" data-hard-disabled="${disabled ? "1" : "0"}" disabled title="Run Validate on this exact selection first">🚀 Deploy</button>
+    ${m.lastDeploy && m.canDeploy ? `<button class="btn btn-secondary" title="Redeploy the entire source at the last-deployed commit (${m.lastDeploy.sha.slice(0,8)}) to roll back a bad promotion" onclick="rollback('${env.name}')">↩ Rollback</button>` : ""}
   </div>
 </section>
 </div>`;

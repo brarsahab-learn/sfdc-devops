@@ -300,6 +300,31 @@ export class GitHelper {
     }
 
     /**
+     * Returns unique story IDs from commits on `origin/<branch>` since `fromSha`
+     * (or the last 50 commits when fromSha is not known). Used to annotate
+     * deployment-pending notifications with human-readable story context.
+     */
+    async groupChangesByStory(branch: string, fromSha?: string): Promise<string[]> {
+        try {
+            const range = fromSha ? `${fromSha}..origin/${branch}` : `origin/${branch}`;
+            const limitArgs = fromSha ? [] : ["-50"];
+            const format = "%s";
+            const raw = await this.git([
+                "log", "--no-merges", ...limitArgs, `--pretty=format:${format}`, range,
+            ]);
+            const pattern = getTicketKeyPattern();
+            const ids = new Set<string>();
+            for (const msg of raw.split("\n").filter(Boolean)) {
+                const id = storyIdFromMessage(msg, pattern);
+                if (id) { ids.add(id); }
+            }
+            return [...ids];
+        } catch {
+            return [];
+        }
+    }
+
+    /**
      * Like `commitLogBetween`, but takes raw refs with no `origin/` prefixing — needed
      * when `fromRef` is a bare commit SHA (e.g. a recorded last-deployed marker) rather
      * than a branch name. `--no-merges` for the same reason as `commitLogBetween`: a
@@ -1176,6 +1201,38 @@ export class GitHelper {
             .sort();
     }
 
+    /** Lists all remote feature branches (origin only). Fetches first to pick up newly-pushed branches. */
+    async listRemoteFeatureBranches(): Promise<string[]> {
+        try {
+            await this.git(["fetch", "origin", "--prune"]);
+            const out = await this.git(["branch", "-r", "--format=%(refname:short)"]);
+            return out
+                .split("\n")
+                .filter(Boolean)
+                .map(b => b.replace(/^origin\//, "").trim())
+                .filter(b => isFeatureBranchName(b))
+                .sort();
+        } catch {
+            return [];
+        }
+    }
+
+    /** ISO 8601 timestamp of the most recent commit on `origin/<branch>`, or null if the branch doesn't exist. */
+    async branchLastCommitTimestamp(branch: string): Promise<string | null> {
+        try {
+            return await this.git(["log", "-1", "--pretty=format:%aI", `origin/${branch}`]);
+        } catch {
+            return null;
+        }
+    }
+
+    /** Days since the last commit on `origin/<branch>` (fractional), or null if the branch has no commits / doesn't exist. */
+    async branchAgeDays(branch: string): Promise<number | null> {
+        const ts = await this.branchLastCommitTimestamp(branch);
+        if (!ts) { return null; }
+        return (Date.now() - new Date(ts).getTime()) / (1000 * 60 * 60 * 24);
+    }
+
     /** Checks out an existing branch */
     /**
      * Checks out a branch — creating it from `origin/<branch>` first if it doesn't exist
@@ -1396,6 +1453,16 @@ export class GitHelper {
     async createLocalBranchFrom(branchName: string, fromRef: string): Promise<void> {
         await this.git(["fetch", "origin", "--prune"]);
         await this.git(["checkout", "-B", branchName, `origin/${fromRef}`]);
+    }
+
+    /** Creates a local branch pointing at an exact commit SHA — used for rollback to check out a known-good snapshot. */
+    async createTempBranchAtSha(sha: string, branchName: string): Promise<void> {
+        await this.git(["checkout", "-B", branchName, sha]);
+    }
+
+    /** Deletes a local branch (force) — used to clean up after a rollback temp branch. */
+    async deleteTempBranch(branchName: string): Promise<void> {
+        await this.git(["branch", "-D", branchName]).catch(() => {});
     }
 
     /** Writes a file under the workspace root, creating parent directories as needed. */

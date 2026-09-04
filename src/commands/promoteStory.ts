@@ -21,9 +21,9 @@ import {
     isFeatureBranch, extractStoryId, getFeatureBranchPrefix,
     getCoverageGateEnvironment, promoBranchName, getBaseBranch, featureBranchName, getEnvironments,
     findEnvironment, getPromotableEnvironments, getSourceRootFolder, getDeployTimeoutSeconds,
-    ResolvedEnvironment,
+    ResolvedEnvironment, buildTicketUrl,
 } from "../config";
-import { buildPackageXml, AuditChangedFile } from "../AuditLog";
+import { buildPackageXml, buildPackageXmlWithGroups, AuditChangedFile } from "../AuditLog";
 import { log } from "../Log";
 import { buildDiffUris } from "../DiffContentProvider";
 
@@ -590,10 +590,20 @@ export async function openPromotionPR(
     await gitHelper.checkoutFeature(storyId);
 
     const changedFiles = await storyChangedFiles(gitHelper, storyId);
-    const { xml: packageXml, unmapped: unmappedFiles } = buildPackageXml(changedFiles);
+    const { xml: packageXml, unmapped: unmappedFiles, typeGroups } = buildPackageXmlWithGroups(changedFiles);
+
+    // Auto-generate PR description from available metadata
+    const ticketLink = buildTicketUrl(storyId);
+    const metadataLines = Object.entries(typeGroups).map(([type, count]) => `- ${type}: ${count}`).join("\n");
+    const prBody = [
+        `## ${storyId}`,
+        ticketLink ? `\n[View ticket](${ticketLink})` : "",
+        `\n### Metadata changed`,
+        metadataLines || "- (no metadata types detected)",
+    ].filter(Boolean).join("\n");
 
     const repoOverride = await gitHelper.resolveRepoIdentity(bbClient);
-    const prUrl = bbClient.buildPrUrl(promotionBranch, targetBranch, repoOverride);
+    const prUrl = bbClient.buildPrUrl(promotionBranch, targetBranch, repoOverride, prBody);
     if (!prUrl) {
         await gitHelper.appendAudit({
             operation: "promote", storyId, targetEnv, branch: promotionBranch, outcome: "success",
@@ -638,9 +648,13 @@ export async function reportOperationConflict(
     );
 
     if (choice === "Open Conflicts") {
-        if (conflicts[0]) {
-            const fileUri = vscode.Uri.joinPath(vscode.Uri.file(gitHelper.getWorkspaceRoot()), conflicts[0]);
-            await vscode.window.showTextDocument(fileUri).then(undefined, () => {});
+        const toOpen = conflicts.slice(0, 8);
+        for (const conflictedFile of toOpen) {
+            const fileUri = vscode.Uri.joinPath(vscode.Uri.file(gitHelper.getWorkspaceRoot()), conflictedFile);
+            await vscode.window.showTextDocument(fileUri, { preview: false }).then(undefined, () => {});
+        }
+        if (conflicts.length > 8) {
+            vscode.window.showInformationMessage(`…and ${conflicts.length - 8} more conflict(s) — see the Source Control view for the full list.`);
         }
         await vscode.commands.executeCommand("workbench.view.scm");
     }

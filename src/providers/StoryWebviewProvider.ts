@@ -9,7 +9,7 @@ import {
     extractStoryId, isFeatureBranch, getBaseBranch, getEnvironments, getPublishEnvironment,
     getPromotableEnvironments, canPromote, getTerminalStageMessage, promoBranchName, buildTicketUrl,
     getCoverageGateEnvironment, getOrgAliasSlots, setOrgAliasSlot, OrgAliasSlot,
-    ResolvedEnvironment, getFallbackRefreshSeconds, featureBranchName,
+    ResolvedEnvironment, getFallbackRefreshSeconds, featureBranchName, getStaleStoryThresholdDays,
 } from "../config";
 import { runSetupChecks, SetupCheckItem } from "../SetupCheck";
 import { getEffectiveRole, canAccessConfig } from "../RoleManager";
@@ -329,9 +329,10 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
             }
             const timelines = storyId ? await getStoryTimelines(this._gitHelper, storyId) : {};
             const deletionAckPending = (onFeature && storyId) ? await this._getDeletionAckPending(storyId) : null;
+            const staleAgeDays = (onFeature && branch) ? await this._gitHelper.branchAgeDays(branch) : null;
 
             this._view.webview.html = this._getWebviewHtml(
-                branch ?? "No branch", storyId, progress, behind, coverageBlockedEnv, repoOverride, signoffPassed, localChanges, timelines, deletionAckPending
+                branch ?? "No branch", storyId, progress, behind, coverageBlockedEnv, repoOverride, signoffPassed, localChanges, timelines, deletionAckPending, staleAgeDays
             );
             this._externalSwitchNotice = undefined; // one-shot: shown once, then cleared
 
@@ -552,7 +553,8 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         signoffPassed: Record<string, boolean>,
         localChanges: { staged: string[]; other: string[] } | null,
         timelines: Record<string, EnvTimeline>,
-        deletionAckPending: { env: string; envLabel: string; files: string[] } | null = null
+        deletionAckPending: { env: string; envLabel: string; files: string[] } | null = null,
+        staleAgeDays: number | null = null
     ): string {
         const onFeatureBranch = isFeatureBranch(branch);
         const baseBranch      = getBaseBranch();
@@ -824,6 +826,14 @@ ${deletionAckPending ? `<div class="warning">
   ⚠ ${escapeHtml(storyId)} deletes ${deletionAckPending.files.length} component(s) not yet manually removed from ${escapeHtml(deletionAckPending.envLabel)}.
   <br>Remove them from the org, then: <a href="#" onclick="send('acknowledgeDeletion', '${deletionAckPending.env}')">✅ Acknowledge manual deletion for ${escapeHtml(deletionAckPending.envLabel)}</a>
 </div>` : ""}
+${(() => {
+    const threshold = getStaleStoryThresholdDays();
+    if (staleAgeDays !== null && threshold > 0 && staleAgeDays > threshold) {
+        const days = Math.floor(staleAgeDays);
+        return `<div class="warning">⏳ This branch has had no new commits for <strong>${days} day${days === 1 ? "" : "s"}</strong> — it may be stale. Consider syncing with ${escapeHtml(getBaseBranch())} to stay current. <a href="#" onclick="send('syncBranch')">Sync now</a></div>`;
+    }
+    return "";
+})()}
 
 <div class="card">
   <div class="branch">${escapeHtml(branch)} ${branch !== "No branch" ? `<a href="#" onclick="send('viewBranchInBrowser')" title="View branch in browser">🔗</a>` : ""}</div>
@@ -1033,7 +1043,9 @@ ${forced ? `<button class="btn btn-secondary" onclick="send('closeSetupCheck')">
             : `${(pending.targetEnv ?? "").toUpperCase()} (${pending.mode === "validate" ? "validate" : "promote"})`;
         const unresolved = conflicts.length;
         const fileRows = conflicts.length
-            ? conflicts.map(f => `<div class="file">⚠ ${f}</div>`).join("")
+            ? conflicts.map(f =>
+                `<div class="file">⚠ <a href="#" onclick="openConflict('${escapeHtml(f)}')" title="Open in editor">${escapeHtml(f)}</a></div>`
+              ).join("")
             : `<div class="ok">✓ No unresolved conflicts left — click Resume.</div>`;
 
         const status = unresolved
@@ -1077,6 +1089,7 @@ ${BUSY_BAR_HTML}
   const vscode = acquireVsCodeApi();
   ${BUSY_BAR_JS}
   function send(cmd) { showBusy(); vscode.postMessage({ command: cmd }); }
+  function openConflict(path) { vscode.postMessage({ command: 'viewWorkingFileDiff', path: path }); }
 </script>
 </body>
 </html>`;

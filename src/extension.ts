@@ -16,6 +16,7 @@ import { GitHelper, warnUncommittedChanges } from "./GitHelper";
 import { GitRefContentProvider, SF_DEVOPS_DIFF_SCHEME } from "./DiffContentProvider";
 import { DeploymentDashboardPanel } from "./providers/DeploymentDashboardPanel";
 import { AuditTrailPanel } from "./providers/AuditTrailPanel";
+import { StoryPipelinePanel } from "./providers/StoryPipelinePanel";
 import {
     findEnvironment, canPromote, getRoles,
     isFeatureBranch, getBaseBranch, getStaleBranchThreshold, getPromotableEnvironments,
@@ -28,6 +29,24 @@ import { execSf } from "./SfCli";
 import { EnvItem } from "./providers/EnvironmentTreeProvider";
 
 let deployPoller:    NodeJS.Timeout | undefined;
+let _pollFailCount   = 0;
+let _pollIntervalMs  = 60_000;
+const POLL_MIN_MS    = 60_000;
+const POLL_MAX_MS    = 600_000;
+const POLL_FAIL_CAP  = 3;
+
+async function runPoll(gitHelper: GitHelper, context: vscode.ExtensionContext): Promise<void> {
+    try {
+        await checkPendingDeployments(gitHelper, context);
+        // Success — reset backoff toward minimum (step down one level).
+        _pollFailCount = 0;
+        _pollIntervalMs = POLL_MIN_MS;
+    } catch {
+        _pollFailCount = Math.min(_pollFailCount + 1, POLL_FAIL_CAP);
+        // Double the interval each failure, capped at POLL_MAX_MS.
+        _pollIntervalMs = Math.min(POLL_MIN_MS * Math.pow(2, _pollFailCount), POLL_MAX_MS);
+    }
+}
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log("Salesforce DevOps extension activated");
@@ -303,6 +322,17 @@ export async function activate(context: vscode.ExtensionContext) {
             await resetRolePasswordForce(context, gitHelper);
         }),
 
+        vscode.commands.registerCommand("sfDevops.openPipelineView", () => {
+            StoryPipelinePanel.createOrShow(gitHelper);
+        }),
+
+        // "Stories Pending My Action" — surfaced as a QuickPick so users can jump directly
+        // to whichever story is waiting for them (promote, sign off, deploy) without hunting
+        // through the sidebar or remembering which env each story is stuck in.
+        vscode.commands.registerCommand("sfDevops.viewPendingActions", async () => {
+            await viewPendingActions(gitHelper, context);
+        }),
+
         // Dedicated 2GP Release Gate — occasional, admin-triggered, separate from the
         // day-to-day sprint commands above. See PackagingEngine.ts.
         vscode.commands.registerCommand("sfDevops.prepare2gpBeta", async () => {
@@ -310,12 +340,18 @@ export async function activate(context: vscode.ExtensionContext) {
         })
     );
 
-    // ── Poll for merges pending deployment every 60 seconds ─────────────────
-    // No external CI/webhook — this is what notices a merge landed on an env branch and
-    // hasn't been deployed via the Deployment Dashboard yet.
-    deployPoller = setInterval(() => { checkPendingDeployments(gitHelper); }, 60_000);
+    // ── Poll for merges pending deployment — self-rescheduling with exponential backoff
+    // No external CI/webhook — this notices a merge landing on an env branch that
+    // hasn't been deployed yet. Backs off on repeated failures (offline / transient).
+    function schedulePoll() {
+        deployPoller = setTimeout(async () => {
+            await runPoll(gitHelper, context);
+            schedulePoll();
+        }, _pollIntervalMs);
+    }
+    schedulePoll();
     context.subscriptions.push({
-        dispose: () => { if (deployPoller) { clearInterval(deployPoller); } }
+        dispose: () => { if (deployPoller) { clearTimeout(deployPoller); } }
     });
 
     // ── Warn if feature branch is behind prod on startup ────────────────────
@@ -324,41 +360,116 @@ export async function activate(context: vscode.ExtensionContext) {
     envProvider.refresh();
 }
 
-async function checkPendingDeployments(gitHelper: GitHelper): Promise<void> {
-    try {
-        await gitHelper.fetchRemote();
-        // Ground rule: a promotion branch you're already tracking locally should never look
-        // stale just because it moved on the remote — keep every one of them current every
-        // tick, independent of whether anything merged this round.
-        await gitHelper.syncLocalPromotionBranches();
+async function checkPendingDeployments(gitHelper: GitHelper, context: vscode.ExtensionContext): Promise<void> {
+    // Deployment notifications are only relevant for roles that can act on them.
+    // Developers get no deploy access, so don't interrupt them with poller noise.
+    const role = getEffectiveRole(context);
+    const canDeploy = role === "Lead" || role === "Admin";
 
-        for (const env of getPromotableEnvironments()) {
-            const currentSha = await gitHelper.remoteHeadSha(env.branch);
-            if (!currentSha) { continue; }
-            const lastNotified = await gitHelper.getLastNotifiedSha(env.name);
-            if (lastNotified === currentSha) { continue; }  // already notified for this state
+    await gitHelper.fetchRemote();
+    // Ground rule: a promotion branch you're already tracking locally should never look
+    // stale just because it moved on the remote — keep every one of them current every
+    // tick, independent of whether anything merged this round.
+    await gitHelper.syncLocalPromotionBranches();
 
-            const lastDeploy = await gitHelper.getDeployState(env.name);
-            if (lastDeploy?.sha === currentSha) {
-                await gitHelper.setLastNotifiedSha(env.name, currentSha);  // caught up, nothing pending
-                continue;
-            }
+    for (const env of getPromotableEnvironments()) {
+        const currentSha = await gitHelper.remoteHeadSha(env.branch);
+        if (!currentSha) { continue; }
+        const lastNotified = await gitHelper.getLastNotifiedSha(env.name);
+        if (lastNotified === currentSha) { continue; }  // already notified for this state
 
-            await gitHelper.setLastNotifiedSha(env.name, currentSha);
-            // Ground rule: once a promotion merges, pull it on local too — a fast-forward-only
-            // sync of the env branch's own local ref, never touching anything you haven't
-            // committed (see GitHelper.syncLocalRef).
-            await gitHelper.syncLocalRef(env.branch);
-            const choice = await vscode.window.showInformationMessage(
-                `📦 New merge on ${env.label} — pending deployment.`,
-                "Open Dashboard"
-            );
-            if (choice === "Open Dashboard") {
-                await vscode.commands.executeCommand("sfDevops.openDeploymentDashboard", env.name);
-            }
-            DeploymentDashboardPanel.refreshIfOpen();
+        const lastDeploy = await gitHelper.getDeployState(env.name);
+        if (lastDeploy?.sha === currentSha) {
+            await gitHelper.setLastNotifiedSha(env.name, currentSha);  // caught up, nothing pending
+            continue;
         }
-    } catch { /* offline or transient — try again next tick */ }
+
+        await gitHelper.setLastNotifiedSha(env.name, currentSha);
+        // Ground rule: once a promotion merges, pull it on local too — a fast-forward-only
+        // sync of the env branch's own local ref, never touching anything you haven't
+        // committed (see GitHelper.syncLocalRef).
+        await gitHelper.syncLocalRef(env.branch);
+
+        DeploymentDashboardPanel.refreshIfOpen();
+
+        if (!canDeploy) { continue; }  // refresh open panels silently for non-deployers
+
+        // Build a summary: how many stories merged since last deploy.
+        const storyNames = await gitHelper.groupChangesByStory(env.branch, lastNotified ?? undefined);
+        const count = storyNames.length;
+        const label = count === 1
+            ? `${storyNames[0]}`
+            : count > 1 ? `${count} stories` : "changes";
+
+        const choice = await vscode.window.showInformationMessage(
+            `📦 ${env.label}: ${label} merged — pending deployment.`,
+            "Open Dashboard"
+        );
+        if (choice === "Open Dashboard") {
+            await vscode.commands.executeCommand("sfDevops.openDeploymentDashboard", env.name);
+        }
+    }
+}
+
+/**
+ * Shows a QuickPick of every remote feature branch that has a pending action for the
+ * current role: stories ready to promote (Lead/Admin), stories with pending deployment
+ * notifications, or stories awaiting a signoff. Selecting an item checks out that branch.
+ */
+async function viewPendingActions(
+    gitHelper: GitHelper,
+    context: vscode.ExtensionContext
+): Promise<void> {
+    const role        = getEffectiveRole(context);
+    const remoteBranches = await gitHelper.listRemoteFeatureBranches().catch(() => [] as string[]);
+
+    interface ActionItem extends vscode.QuickPickItem {
+        branch: string;
+    }
+
+    const items: ActionItem[] = [];
+    const envs = getPromotableEnvironments();
+
+    for (const branch of remoteBranches) {
+        const actions: string[] = [];
+
+        for (const env of envs) {
+            if (!canPromote(role, env)) { continue; }
+            const sha = await gitHelper.remoteHeadSha(env.branch).catch(() => null);
+            const lastDeploy = sha ? await gitHelper.getDeployState(env.name).catch(() => null) : null;
+            if (sha && lastDeploy?.sha !== sha) {
+                actions.push(`⚡ Pending deploy → ${env.label}`);
+            }
+        }
+
+        if (actions.length > 0) {
+            items.push({
+                label:       `$(git-branch) ${branch}`,
+                description: actions.join("  ·  "),
+                branch,
+            });
+        }
+    }
+
+    if (items.length === 0) {
+        vscode.window.showInformationMessage("No stories are currently waiting for your action.");
+        return;
+    }
+
+    const picked = await vscode.window.showQuickPick(items, {
+        title: "Stories Pending My Action",
+        placeHolder: "Select a story to check it out",
+    });
+    if (!picked) { return; }
+
+    if (await gitHelper.hasUncommittedChanges()) {
+        const { warnUncommittedChanges } = await import("./GitHelper");
+        await warnUncommittedChanges(gitHelper, `Commit or stash your changes before switching to ${picked.branch}.`);
+        return;
+    }
+    await gitHelper.checkoutBranch(picked.branch).catch(err => {
+        vscode.window.showErrorMessage(`Could not switch to ${picked.branch}: ${err}`);
+    });
 }
 
 async function checkBranchStaleness(
@@ -382,5 +493,5 @@ async function checkBranchStaleness(
 }
 
 export function deactivate() {
-    if (deployPoller) { clearInterval(deployPoller); }
+    if (deployPoller) { clearTimeout(deployPoller); }
 }

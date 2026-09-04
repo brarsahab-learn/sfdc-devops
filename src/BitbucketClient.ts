@@ -81,13 +81,15 @@ export class BitbucketClient implements IGitProviderClient {
     }
 
     /** Builds the "create pull request" URL for source -> destination, opened in the browser. */
-    buildPrUrl(sourceBranch: string, destinationBranch: string, repoOverride?: { workspace: string; repoSlug: string }): string {
+    buildPrUrl(sourceBranch: string, destinationBranch: string, repoOverride?: { workspace: string; repoSlug: string }, body?: string): string {
         const workspace = repoOverride?.workspace || this.workspace;
         const repoSlug  = repoOverride?.repoSlug  || this.repoSlug;
         if (!workspace || !repoSlug) { return ""; }
-        return `${BB_WEB}/${workspace}/${repoSlug}/pull-requests/new` +
+        let url = `${BB_WEB}/${workspace}/${repoSlug}/pull-requests/new` +
             `?source=${encodeURIComponent(sourceBranch)}` +
             `&dest=${encodeURIComponent(destinationBranch)}`;
+        if (body) { url += `&description=${encodeURIComponent(body)}`; }
+        return url;
     }
 
     /** Parses `https://bitbucket.org/ws/repo(.git)` or `git@bitbucket.org:ws/repo(.git)`. */
