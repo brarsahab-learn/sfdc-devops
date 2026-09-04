@@ -68,7 +68,11 @@ export class EnvItem extends vscode.TreeItem {
         const deployPart = shortSha ? `${shortSha}${pending ? " (behind)" : ""}` : "not deployed yet";
         this.description = `${orgPart} · ${env.branch} · ${deployPart}`;
 
-        if (!lastDeploy) {
+        if (env.locked) {
+            this.iconPath = new vscode.ThemeIcon("lock");
+            this.description = `🔴 Locked · ${orgPart} · ${env.branch}`;
+            this.tooltip = `⛔ This environment is locked by Admin — no promotions or deploys allowed.\nOrg: ${orgPart}\nBranch: ${env.branch}`;
+        } else if (!lastDeploy) {
             this.tooltip = `Org: ${orgPart}\nBranch: ${env.branch}\nNo deploy recorded for ${env.label} yet — run a Deploy from the Deployment Dashboard.`;
             this.iconPath = new vscode.ThemeIcon("circle-outline");
         } else {

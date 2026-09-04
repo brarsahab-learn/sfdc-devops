@@ -15,7 +15,9 @@ export type AuditOperation =
     | "runTests"
     | "deploy"
     | "deployValidate"
-    | "signoff";
+    | "signoff"
+    | "changeRole"
+    | "acknowledgeDeletion";
 
 export type AuditOutcome = "success" | "conflict" | "failure";
 
@@ -63,7 +65,7 @@ export interface AuditEntry {
     details?:   AuditDetails;
 }
 
-const OPERATION_LABELS: Record<AuditOperation, string> = {
+export const OPERATION_LABELS: Record<AuditOperation, string> = {
     startStory:       "Start New Story",
     resumeStory:      "Resume Previous Story",
     commitAndPublish: "Commit & Publish Feature Branch",
@@ -74,9 +76,11 @@ const OPERATION_LABELS: Record<AuditOperation, string> = {
     syncBranch:       "Sync Branch with Dev",
     prepare2gpBeta:   "Prepare 2GP Beta from UAT",
     runTests:         "Run Apex Tests",
-    deploy:           "Deploy to Environment",
-    deployValidate:   "Validate Deploy (dry-run)",
-    signoff:          "Manual Sign-off Recorded",
+    deploy:                "Deploy to Environment",
+    deployValidate:        "Validate Deploy (dry-run)",
+    signoff:               "Manual Sign-off Recorded",
+    changeRole:            "Role Change",
+    acknowledgeDeletion:   "Deletion Manually Acknowledged",
 };
 
 // Salesforce source-format folder name (under .../default/) → metadata API type.
@@ -172,6 +176,21 @@ export function buildPackageXml(changedFiles: AuditChangedFile[]): { xml: string
     const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<Package xmlns="http://soap.sforce.com/2006/04/metadata">\n${typesXml}\n    <version>${DEFAULT_API_VERSION}</version>\n</Package>`;
 
     return { xml, unmapped };
+}
+
+/**
+ * Same as buildPackageXml but also returns a type→count map for PR description generation.
+ */
+export function buildPackageXmlWithGroups(
+    files: AuditChangedFile[]
+): { xml: string; unmapped: string[]; typeGroups: Record<string, number> } {
+    const { xml, unmapped } = buildPackageXml(files);
+    const typeGroups: Record<string, number> = {};
+    for (const f of files) {
+        const type = metadataTypeForPath(f.path);
+        if (type) { typeGroups[type] = (typeGroups[type] ?? 0) + 1; }
+    }
+    return { xml, unmapped, typeGroups };
 }
 
 function escapeXml(s: string): string {

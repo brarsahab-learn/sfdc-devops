@@ -21,9 +21,10 @@ import {
     isFeatureBranch, extractStoryId, getFeatureBranchPrefix,
     getCoverageGateEnvironment, promoBranchName, getBaseBranch, featureBranchName, getEnvironments,
     findEnvironment, getPromotableEnvironments, getSourceRootFolder, getDeployTimeoutSeconds,
-    ResolvedEnvironment,
+    ResolvedEnvironment, buildTicketUrl,
 } from "../config";
-import { buildPackageXml, AuditChangedFile } from "../AuditLog";
+import { buildPackageXml, buildPackageXmlWithGroups, AuditChangedFile } from "../AuditLog";
+import { log } from "../Log";
 import { buildDiffUris } from "../DiffContentProvider";
 
 export type PromoteMode = "validate" | "promote";
@@ -139,11 +140,7 @@ async function runPromotionValidate(
     const deletedFiles = files.filter(f => f.change === "deleted");
     if (deletedFiles.length > 0) {
         files = files.filter(f => f.change !== "deleted");
-        vscode.window.showWarningMessage(
-            `${storyId}: ${deletedFiles.length} deleted file(s) can't be included in this validate/deploy yet ` +
-            `(${deletedFiles.slice(0, 3).map(f => f.path.split("/").pop()).join(", ")}${deletedFiles.length > 3 ? ", …" : ""}) — ` +
-            `delete them manually in ${targetEnv.toUpperCase()} for now.`
-        );
+        log(`${storyId}: ${deletedFiles.length} deleted file(s) excluded from validate/deploy — deletion acknowledged.`);
         if (files.length === 0) {
             return { ran: false, success: true, numberComponentsDeployed: 0 };
         }
@@ -368,6 +365,25 @@ export async function runPromotion(
         vscode.window.showInformationMessage(`${storyId} has nothing new to ${mode === "validate" ? "validate against" : "promote to"} ${envUpper} — it's already up to date there.`);
         return;
     }
+
+    // Deleted file gate — hard block until manually acknowledged in the Current Story panel.
+    // Deleted metadata can't be deployed automatically here (destructiveChanges.xml required);
+    // the developer must remove them from the target org manually and then acknowledge the deletion.
+    const deletedInPreview = preview.filter(f => f.change === "deleted");
+    if (deletedInPreview.length > 0) {
+        const currentSha = await gitHelper.remoteHeadSha(featureBranch);
+        const ack = currentSha ? await gitHelper.getDeletionAcknowledgement(storyId, targetEnv) : null;
+        if (!ack || ack.sha !== currentSha) {
+            const fileNames = deletedInPreview.slice(0, 5).map(f => f.path.split("/").pop()).join(", ");
+            const extra = deletedInPreview.length > 5 ? `, …and ${deletedInPreview.length - 5} more` : "";
+            vscode.window.showWarningMessage(
+                `❌ ${storyId} deletes ${deletedInPreview.length} metadata component(s) that cannot be deployed automatically yet: ${fileNames}${extra}.\n\nRemove them manually from the ${envUpper} org, then use "Acknowledge manual deletion" in the Current Story panel to unblock this promotion.`,
+                { modal: true }
+            );
+            return;
+        }
+    }
+
     const shown = preview.slice(0, 8).map(f => `  ${f.change === "added" ? "+" : f.change === "deleted" ? "-" : "~"} ${f.path}`);
     const more = preview.length > 8 ? `\n  ...and ${preview.length - 8} more` : "";
     const filesBlock = `\n\n${preview.length} file(s) (from origin/${featureBranch}):\n${shown.join("\n")}${more}`;
@@ -574,10 +590,20 @@ export async function openPromotionPR(
     await gitHelper.checkoutFeature(storyId);
 
     const changedFiles = await storyChangedFiles(gitHelper, storyId);
-    const { xml: packageXml, unmapped: unmappedFiles } = buildPackageXml(changedFiles);
+    const { xml: packageXml, unmapped: unmappedFiles, typeGroups } = buildPackageXmlWithGroups(changedFiles);
+
+    // Auto-generate PR description from available metadata
+    const ticketLink = buildTicketUrl(storyId);
+    const metadataLines = Object.entries(typeGroups).map(([type, count]) => `- ${type}: ${count}`).join("\n");
+    const prBody = [
+        `## ${storyId}`,
+        ticketLink ? `\n[View ticket](${ticketLink})` : "",
+        `\n### Metadata changed`,
+        metadataLines || "- (no metadata types detected)",
+    ].filter(Boolean).join("\n");
 
     const repoOverride = await gitHelper.resolveRepoIdentity(bbClient);
-    const prUrl = bbClient.buildPrUrl(promotionBranch, targetBranch, repoOverride);
+    const prUrl = bbClient.buildPrUrl(promotionBranch, targetBranch, repoOverride, prBody);
     if (!prUrl) {
         await gitHelper.appendAudit({
             operation: "promote", storyId, targetEnv, branch: promotionBranch, outcome: "success",
@@ -622,9 +648,13 @@ export async function reportOperationConflict(
     );
 
     if (choice === "Open Conflicts") {
-        if (conflicts[0]) {
-            const fileUri = vscode.Uri.joinPath(vscode.Uri.file(gitHelper.getWorkspaceRoot()), conflicts[0]);
-            await vscode.window.showTextDocument(fileUri).then(undefined, () => {});
+        const toOpen = conflicts.slice(0, 8);
+        for (const conflictedFile of toOpen) {
+            const fileUri = vscode.Uri.joinPath(vscode.Uri.file(gitHelper.getWorkspaceRoot()), conflictedFile);
+            await vscode.window.showTextDocument(fileUri, { preview: false }).then(undefined, () => {});
+        }
+        if (conflicts.length > 8) {
+            vscode.window.showInformationMessage(`…and ${conflicts.length - 8} more conflict(s) — see the Source Control view for the full list.`);
         }
         await vscode.commands.executeCommand("workbench.view.scm");
     }

@@ -45,7 +45,7 @@ export interface IGitProviderClient {
      * (e.g. derived from the `origin` remote URL when settings are unset). Returns ""
      * if no repo identity is available either way.
      */
-    buildPrUrl(sourceBranch: string, destinationBranch: string, repoOverride?: { workspace: string; repoSlug: string }): string;
+    buildPrUrl(sourceBranch: string, destinationBranch: string, repoOverride?: { workspace: string; repoSlug: string }, body?: string): string;
 
     /** Parses an `origin` remote URL for this provider; null if it doesn't match. */
     parseRemoteUrl(remoteUrl: string): { workspace: string; repoSlug: string } | null;

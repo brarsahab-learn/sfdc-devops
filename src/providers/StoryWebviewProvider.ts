@@ -9,7 +9,7 @@ import {
     extractStoryId, isFeatureBranch, getBaseBranch, getEnvironments, getPublishEnvironment,
     getPromotableEnvironments, canPromote, getTerminalStageMessage, promoBranchName, buildTicketUrl,
     getCoverageGateEnvironment, getOrgAliasSlots, setOrgAliasSlot, OrgAliasSlot,
-    ResolvedEnvironment, getFallbackRefreshSeconds, getDemoOrgAlias, setDemoOrgAlias,
+    ResolvedEnvironment, getFallbackRefreshSeconds,getDemoOrgAlias, setDemoOrgAlias
 } from "../config";
 import { runSetupChecks, SetupCheckItem } from "../SetupCheck";
 import { getEffectiveRole, canAccessConfig } from "../RoleManager";
@@ -149,6 +149,12 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                     vscode.commands.executeCommand("sfDevopsCoverageView.focus"); break;
                 case "recheckSetup":
                     this.refresh(); break;
+                case "openAdminPanel":
+                    vscode.commands.executeCommand("sfDevops.openAdminPanel"); break;
+                case "openPipelineView":
+                    vscode.commands.executeCommand("sfDevops.openPipelineView"); break;
+                case "viewPendingActions":
+                    vscode.commands.executeCommand("sfDevops.viewPendingActions"); break;
                 case "openSetupCheck":
                     this._forceShowSetup = true;
                     this.refresh();
@@ -207,6 +213,9 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                     break;
                 case "recordSignoff":
                     if (msg.env) { await this._recordSignoff(msg.env); }
+                    break;
+                case "acknowledgeDeletion":
+                    if (msg.env) { await this._recordDeletionAck(msg.env); }
                     break;
             }
         });
@@ -299,7 +308,7 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         try {
             // Basic setup must be validated (and, the first time, explicitly confirmed)
             // before anything else in this panel is shown.
-            const checks = await runSetupChecks(this._gitHelper, this._bbClient, this._extContext);
+            const checks = await runSetupChecks(this._gitHelper, this._bbClient, this._extContext, this._userRole);
             const requiredPassed = checks.filter(c => c.required).every(c => c.passed);
             const confirmed = this._extContext.workspaceState.get<boolean>(SETUP_CONFIRMED_KEY, false);
 
@@ -351,9 +360,11 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                 }
             }
             const timelines = storyId ? await getStoryTimelines(this._gitHelper, storyId) : {};
+            const deletionAckPending = (onFeature && storyId) ? await this._getDeletionAckPending(storyId) : null;
+            const staleAgeDays = (onFeature && branch) ? await this._gitHelper.branchAgeDays(branch) : null;
 
             this._view.webview.html = this._getWebviewHtml(
-                branch ?? "No branch", storyId, progress, behind, coverageBlockedEnv, repoOverride, signoffPassed, localChanges, timelines
+                branch ?? "No branch", storyId, progress, behind, coverageBlockedEnv, repoOverride, signoffPassed, localChanges, timelines, deletionAckPending, staleAgeDays
             );
             this._externalSwitchNotice = undefined; // one-shot: shown once, then cleared
 
@@ -403,6 +414,55 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         if (apex.length === 0) { return null; }
         const passed = await this._gitHelper.isCoveragePassed(storyId);
         return passed ? null : gateEnv.name;
+    }
+
+    /**
+     * Returns info about the first promotable env blocked by unacknowledged deleted files,
+     * or null if no block exists.
+     */
+    private async _getDeletionAckPending(storyId: string): Promise<{ env: string; envLabel: string; files: string[] } | null> {
+        if (!storyId) { return null; }
+        let preview: { path: string; change: "added" | "modified" | "deleted" }[];
+        try {
+            preview = await this._gitHelper.previewStoryFiles(storyId);
+        } catch {
+            return null;
+        }
+        const deleted = preview.filter(f => f.change === "deleted");
+        if (deleted.length === 0) { return null; }
+
+        const featureSha = await this._gitHelper.remoteHeadSha(featureBranchName(storyId));
+        if (!featureSha) { return null; }
+
+        for (const env of getPromotableEnvironments()) {
+            const ack = await this._gitHelper.getDeletionAcknowledgement(storyId, env.name);
+            if (!ack || ack.sha !== featureSha) {
+                return { env: env.name, envLabel: env.label, files: deleted.map(f => f.path) };
+            }
+        }
+        return null;
+    }
+
+    private async _recordDeletionAck(envName: string): Promise<void> {
+        const branch  = await this._gitHelper.currentBranch();
+        const storyId = extractStoryId(branch);
+        if (!storyId) { return; }
+        const featureSha = await this._gitHelper.remoteHeadSha(featureBranchName(storyId));
+        if (!featureSha) {
+            vscode.window.showWarningMessage("Could not determine the current feature branch SHA — push your branch first.");
+            return;
+        }
+        const env = getEnvironments().find(e => e.name === envName);
+        await this._gitHelper.setDeletionAcknowledgement(storyId, envName, featureSha);
+        await this._gitHelper.appendAudit({
+            operation: "acknowledgeDeletion",
+            storyId,
+            targetEnv: envName,
+            outcome: "success",
+            summary: `Deletion manually acknowledged for ${env?.label ?? envName} at SHA ${featureSha.slice(0, 8)}`,
+        });
+        vscode.window.showInformationMessage(`✅ Deletion acknowledged for ${env?.label ?? envName}. Promote/Validate is now unblocked.`);
+        this.refresh();
     }
 
     /**
@@ -524,7 +584,9 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         repoOverride: { workspace: string; repoSlug: string } | undefined,
         signoffPassed: Record<string, boolean>,
         localChanges: { staged: string[]; other: string[] } | null,
-        timelines: Record<string, EnvTimeline>
+        timelines: Record<string, EnvTimeline>,
+        deletionAckPending: { env: string; envLabel: string; files: string[] } | null = null,
+        staleAgeDays: number | null = null
     ): string {
         const onFeatureBranch = isFeatureBranch(branch);
         const baseBranch      = getBaseBranch();
@@ -792,6 +854,18 @@ ${BUSY_BAR_HTML}
 
 ${externalSwitchNotice}
 ${syncWarning}
+${deletionAckPending ? `<div class="warning">
+  ⚠ ${escapeHtml(storyId)} deletes ${deletionAckPending.files.length} component(s) not yet manually removed from ${escapeHtml(deletionAckPending.envLabel)}.
+  <br>Remove them from the org, then: <a href="#" onclick="send('acknowledgeDeletion', '${deletionAckPending.env}')">✅ Acknowledge manual deletion for ${escapeHtml(deletionAckPending.envLabel)}</a>
+</div>` : ""}
+${(() => {
+    const threshold = getStaleStoryThresholdDays();
+    if (staleAgeDays !== null && threshold > 0 && staleAgeDays > threshold) {
+        const days = Math.floor(staleAgeDays);
+        return `<div class="warning">⏳ This branch has had no new commits for <strong>${days} day${days === 1 ? "" : "s"}</strong> — it may be stale. Consider syncing with ${escapeHtml(getBaseBranch())} to stay current. <a href="#" onclick="send('syncBranch')">Sync now</a></div>`;
+    }
+    return "";
+})()}
 
 <div class="card">
   <div class="branch">${escapeHtml(branch)} ${branch !== "No branch" ? `<a href="#" onclick="send('viewBranchInBrowser')" title="View branch in browser">🔗</a>` : ""}</div>
@@ -801,7 +875,9 @@ ${syncWarning}
 <div class="toolbar">
   <a class="tbtn" href="#" onclick="send('changeRole')" title="Change Role">👤 ${escapeHtml(this._userRole)}</a>
   <a class="tbtn" href="#" onclick="send('viewAuditLog')" title="Audit Trail">📋 Audit</a>
-  <a class="tbtn" href="#" onclick="send('openSetupCheck')" title="Setup Check">⚙ Setup</a>
+  <a class="tbtn" href="#" onclick="send('openAdminPanel')" title="Admin / Setup Panel">⚙ Setup</a>
+  <a class="tbtn" href="#" onclick="send('openPipelineView')" title="Story Pipeline">🗂 Pipeline</a>
+  <a class="tbtn" href="#" onclick="send('viewPendingActions')" title="Stories Pending My Action">⚡ Actions</a>
   <a class="tbtn" href="#" onclick="send('refresh')" title="Refresh"><span>↻ Refresh</span> <span id="countdown" class="countdown"></span></a>
 </div>
 
@@ -1081,7 +1157,9 @@ ${forced ? `<button class="btn btn-secondary" onclick="send('closeSetupCheck')">
             : `${(pending.targetEnv ?? "").toUpperCase()} (${pending.mode === "validate" ? "validate" : "promote"})`;
         const unresolved = conflicts.length;
         const fileRows = conflicts.length
-            ? conflicts.map(f => `<div class="file">⚠ ${f}</div>`).join("")
+            ? conflicts.map(f =>
+                `<div class="file">⚠ <a href="#" onclick="openConflict('${escapeHtml(f)}')" title="Open in editor">${escapeHtml(f)}</a></div>`
+              ).join("")
             : `<div class="ok">✓ No unresolved conflicts left — click Resume.</div>`;
 
         const status = unresolved
@@ -1125,6 +1203,7 @@ ${BUSY_BAR_HTML}
   const vscode = acquireVsCodeApi();
   ${BUSY_BAR_JS}
   function send(cmd) { showBusy(); vscode.postMessage({ command: cmd }); }
+  function openConflict(path) { vscode.postMessage({ command: 'viewWorkingFileDiff', path: path }); }
 </script>
 </body>
 </html>`;

@@ -12,7 +12,7 @@ import { GitHelper } from "./GitHelper";
 import { IGitProviderClient } from "./GitProviderClient";
 import {
     getBaseBranch, getEnvironments, getSourceRootFolder, getRepoWorkspace, getRepoSlug,
-    getOrgAliasSlots,
+    getOrgAliasSlots, getRoles,
 } from "./config";
 
 export interface SetupCheckItem {
@@ -36,7 +36,8 @@ const PROVIDER_TOKEN_SECRET: Record<string, string> = {
 export async function runSetupChecks(
     gitHelper: GitHelper,
     providerClient: IGitProviderClient,
-    context: vscode.ExtensionContext
+    context: vscode.ExtensionContext,
+    effectiveRole: string = "Developer"
 ): Promise<SetupCheckItem[]> {
     const items: SetupCheckItem[] = [];
 
@@ -131,7 +132,7 @@ export async function runSetupChecks(
         ],
     });
 
-    items.push(await checkOrgAuthentication(gitHelper.getWorkspaceRoot()));
+    items.push(await checkOrgAuthentication(gitHelper.getWorkspaceRoot(), effectiveRole));
 
     const tokenKey = PROVIDER_TOKEN_SECRET[provider];
     const hasToken = tokenKey ? Boolean(await context.secrets.get(tokenKey)) : false;
@@ -150,21 +151,42 @@ export async function runSetupChecks(
 }
 
 /**
- * Required: every environment actually configured in sfDevops.environments (see
- * config.getOrgAliasSlots — one slot per configured stage, not a fixed dev/qa/uat/prod
- * list) must have an org alias set AND be currently authenticated. The Setup Check
- * panel lets a user fill in and authenticate each one inline rather than hand-editing
- * settings.json.
- *
- * Checks each slot individually via `sf org display --target-org <alias>` (run in
- * parallel) rather than `sf org list` + set-membership: an org can carry more than one
- * alias, and `sf org list` only ever reports one of them per org, so a slot configured
- * with that org's "other" alias would show as never-authenticated even though it is.
- * Per-slot display also resolves in a couple of seconds regardless of how many orgs
- * you've ever authenticated, where `sf org list` scales with your entire org history.
+ * Returns the set of environment slot keys that MUST be authenticated for the given role.
+ * Developer: only the first (publish/dev) environment.
+ * Lead: first env + any env whose requiredRole rank ≤ Lead's rank.
+ * Admin: all environments.
  */
-async function checkOrgAuthentication(workspaceRoot: string): Promise<SetupCheckItem> {
+function getRequiredOrgSlotKeys(effectiveRole: string): Set<string> {
+    const envs = getEnvironments();
+    const roles = getRoles();
+    const roleRank = roles.indexOf(effectiveRole);
+    const required = new Set<string>();
+
+    envs.forEach((env, idx) => {
+        if (idx === 0) {
+            required.add(env.name);
+            return;
+        }
+        if (!env.requiredRole) {
+            required.add(env.name);
+            return;
+        }
+        const reqRank = roles.indexOf(env.requiredRole);
+        if (reqRank === -1 || roleRank >= reqRank) {
+            required.add(env.name);
+        }
+    });
+
+    return required;
+}
+
+/**
+ * Required: org aliases needed for the given role must have an alias set AND be currently
+ * authenticated. Checks each slot individually via `sf org display` (run in parallel).
+ */
+async function checkOrgAuthentication(workspaceRoot: string, effectiveRole: string = "Developer"): Promise<SetupCheckItem> {
     const slots = getOrgAliasSlots();
+    const requiredKeys = getRequiredOrgSlotKeys(effectiveRole);
     const slotNames = slots.map(s => s.label).join("/");
     const base = { key: "orgAuthentication", label: `Configured org aliases authenticated (${slotNames})`, required: true };
 
@@ -175,23 +197,29 @@ async function checkOrgAuthentication(workspaceRoot: string): Promise<SetupCheck
     const connectedAliases: Record<string, boolean> = {};
     for (const s of slots) { connectedAliases[s.key] = s.alias ? Boolean(results.find(r => r.slot.key === s.key)?.connected) : false; }
 
-    const notAuthenticated = results.filter(r => !r.connected).map(r => r.slot);
-    const passed = unset.length === 0 && notAuthenticated.length === 0;
+    const requiredUnset     = unset.filter(s => requiredKeys.has(s.key));
+    const requiredNotAuthed = results.filter(r => requiredKeys.has(r.slot.key) && !r.connected).map(r => r.slot);
+    const passed = requiredUnset.length === 0 && requiredNotAuthed.length === 0;
 
     const problems: string[] = [
-        ...unset.map(s => `${s.label}: no alias set`),
-        ...notAuthenticated.map(s => `${s.label} (${s.alias}): not authenticated`),
+        ...requiredUnset.map(s => `${s.label}: no alias set (required for ${effectiveRole})`),
+        ...requiredNotAuthed.map(s => `${s.label} (${s.alias}): not authenticated (required for ${effectiveRole})`),
+    ];
+
+    const infoProblems = [
+        ...unset.filter(s => !requiredKeys.has(s.key)).map(s => `${s.label}: no alias set (optional for ${effectiveRole})`),
+        ...results.filter(r => !requiredKeys.has(r.slot.key) && !r.connected).map(r => `${r.slot.label}: not authenticated (optional for ${effectiveRole})`),
     ];
 
     return {
         ...base,
         passed,
         detail: passed
-            ? `All ${slots.length} org alias(es) configured and authenticated: ${slots.map(s => `${s.label}=${s.alias}`).join(", ")}.`
+            ? `Required org alias(es) configured and authenticated for ${effectiveRole}.${infoProblems.length > 0 ? ` (Optional: ${infoProblems.join("; ")})` : ""}`
             : problems.join("; "),
         fixSteps: passed ? [] : [
-            "Fill in and authenticate each org below (Setup Check panel), or",
-            ...notAuthenticated.map(s => `Run: sf org login web --alias ${s.alias}`),
+            "Fill in and authenticate each required org below (Setup Check panel), or",
+            ...requiredNotAuthed.map(s => `Run: sf org login web --alias ${s.alias}`),
         ],
         connectedAliases,
     };

@@ -64,11 +64,13 @@ export class GitHubClient implements IGitProviderClient {
     }
 
     /** Builds the "Open a pull request" compare URL, prefilled — used as a fallback when no token is available. */
-    buildPrUrl(sourceBranch: string, destinationBranch: string, repoOverride?: { workspace: string; repoSlug: string }): string {
+    buildPrUrl(sourceBranch: string, destinationBranch: string, repoOverride?: { workspace: string; repoSlug: string }, body?: string): string {
         const owner = repoOverride?.workspace || this.owner;
         const repo  = repoOverride?.repoSlug  || this.repo;
         if (!owner || !repo) { return ""; }
-        return `${GH_WEB}/${owner}/${repo}/compare/${encodeURIComponent(destinationBranch)}...${encodeURIComponent(sourceBranch)}?expand=1`;
+        let url = `${GH_WEB}/${owner}/${repo}/compare/${encodeURIComponent(destinationBranch)}...${encodeURIComponent(sourceBranch)}?expand=1`;
+        if (body) { url += `&body=${encodeURIComponent(body)}`; }
+        return url;
     }
 
     /** Parses `https://github.com/owner/repo(.git)` or `git@github.com:owner/repo(.git)`. */
