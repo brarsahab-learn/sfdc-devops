@@ -83,6 +83,23 @@ export class GitHelper {
         }
     }
 
+    // ── Fetch helpers ─────────────────────────────────────────────────────────
+
+    /** Fetches origin silently — never throws (offline / no remote is treated as a cache hit). */
+    async fetchOriginQuiet(): Promise<void> {
+        try { await this.git(["fetch", "origin", "--prune"]); } catch { /* offline — use cached refs */ }
+    }
+
+    /** Returns true if a ref exists on origin (i.e. has been pushed). */
+    private async _refExistsOnOrigin(ref: string): Promise<boolean> {
+        try {
+            await this.git(["rev-parse", "--verify", `origin/${ref}`]);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
     // ── Branch operations ─────────────────────────────────────────────────────
 
     async currentBranch(): Promise<string | null> {
@@ -1494,8 +1511,10 @@ export class GitHelper {
 
     /** Every file path at a remote ref, optionally restricted to `pathspec` — used to find candidate test classes without needing a local checkout. */
     async listFilesAtRef(ref: string, pathspec?: string): Promise<string[]> {
+        const onOrigin = await this._refExistsOnOrigin(ref);
+        const treeRef  = onOrigin ? `origin/${ref}` : ref;
         try {
-            const args = ["ls-tree", "-r", "--name-only", `origin/${ref}`];
+            const args = ["ls-tree", "-r", "--name-only", treeRef];
             if (pathspec) { args.push("--", pathspec); }
             const out = await this.git(args);
             return out ? out.split("\n").filter(Boolean) : [];
@@ -1504,24 +1523,37 @@ export class GitHelper {
         }
     }
 
-    /** File content at a remote ref, or null if it doesn't exist there. */
+    /** File content at a remote ref, or null if it doesn't exist there. Falls back to local ref when branch hasn't been pushed. */
     async fileContentAtRef(ref: string, filePath: string): Promise<string | null> {
+        const onOrigin = await this._refExistsOnOrigin(ref);
+        const treeRef  = onOrigin ? `origin/${ref}` : ref;
         try {
-            return await this.git(["show", `origin/${ref}:${filePath}`]);
+            return await this.git(["show", `${treeRef}:${filePath}`]);
         } catch {
             return null;
         }
     }
 
-    /** Changed files between two remote branch refs, with rename detection — used by the visual Diff Viewer panel. */
+    /** Changed files between two branch refs, with rename detection — used by the visual Diff Viewer panel.
+     *  Falls back to local refs for branches that haven't been pushed yet; throws with a descriptive
+     *  message when neither origin nor local has the ref (allows callers to surface it to the user). */
     async filesChangedBetween(
         fromRef: string,
         toRef:   string
-    ): Promise<{ path: string; oldPath?: string; status: string }[]> {
+    ): Promise<{ path: string; oldPath?: string; status: string; _warning?: string }[]> {
+        const [fromOnOrigin, toOnOrigin] = await Promise.all([
+            this._refExistsOnOrigin(fromRef),
+            this._refExistsOnOrigin(toRef),
+        ]);
+        const from = fromOnOrigin ? `origin/${fromRef}` : fromRef;
+        const to   = toOnOrigin   ? `origin/${toRef}`   : toRef;
+        const warning = (!fromOnOrigin || !toOnOrigin)
+            ? `Branch "${!fromOnOrigin ? fromRef : toRef}" hasn't been pushed — showing local comparison.`
+            : undefined;
         try {
-            const raw = await this.git(["diff", "--name-status", "-M", `origin/${fromRef}`, `origin/${toRef}`]);
-            if (!raw) { return []; }
-            return raw.split("\n").filter(Boolean).map(line => {
+            const raw = await this.git(["diff", "--name-status", "-M", from, to]);
+            if (!raw) { return warning ? [{ path: "", status: "", _warning: warning }].slice(0, 0) : []; }
+            const files = raw.split("\n").filter(Boolean).map(line => {
                 const parts = line.split("\t");
                 const code  = parts[0].trim();
                 const s0    = code.charAt(0).toUpperCase();
@@ -1531,6 +1563,8 @@ export class GitHelper {
                 }
                 return { path: (parts[1] ?? parts[0]).trim(), status };
             });
+            if (warning && files.length > 0) { (files[0] as any)._warning = warning; }
+            return files;
         } catch {
             return [];
         }

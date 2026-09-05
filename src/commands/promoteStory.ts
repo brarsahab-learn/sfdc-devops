@@ -65,7 +65,8 @@ export async function reviewStoryDiff(
 async function storyChangedFiles(gitHelper: GitHelper, storyId: string): Promise<AuditChangedFile[]> {
     try {
         return await gitHelper.diffNameStatusBetween(getBaseBranch(), featureBranchName(storyId));
-    } catch {
+    } catch (err) {
+        log(`[warn] storyChangedFiles: could not diff ${featureBranchName(storyId)} — audit will have empty file list. (${err})`);
         return [];
     }
 }

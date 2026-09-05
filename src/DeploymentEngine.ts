@@ -139,9 +139,14 @@ export async function runDeploy(
     } else {
         args.push("--source-dir", sourceRoot);
     }
-    args.push("--target-org", orgAlias, "--test-level", testLevel);
-    if (testLevel === "RunSpecifiedTests") {
-        for (const t of specifiedTests!) { args.push("--tests", t); }
+    args.push("--target-org", orgAlias);
+    // "NoTestRun" is our internal sentinel meaning "omit the flag entirely" — the CLI
+    // does not accept NoTestRun as a --test-level value; omitting the flag achieves the same.
+    if (testLevel !== "NoTestRun") {
+        args.push("--test-level", testLevel);
+        if (testLevel === "RunSpecifiedTests") {
+            for (const t of specifiedTests!) { args.push("--tests", t); }
+        }
     }
     // Only `deploy start` exposes this flag (not `deploy validate`, which never actually
     // touches the org). Without it, the CLI's own source-tracking conflict check can block a
@@ -156,7 +161,8 @@ export async function runDeploy(
     const verb = mode === "deploy" ? "Deploying" : "Validating";
     const scope = sourceDirs.length > 0 ? `${sourceDirs.length} file(s)` : "all files";
     const testsPart = testLevel === "RunSpecifiedTests" ? ` — tests: ${specifiedTests!.join(", ")}` : "";
-    revealLog(`${verb} ${scope} to ${orgAlias} (${testLevel})${testsPart}`);
+    const testLevelDisplay = testLevel === "NoTestRun" ? "NoTestRun (tests omitted)" : testLevel;
+    revealLog(`${verb} ${scope} to ${orgAlias} (${testLevelDisplay})${testsPart}`);
 
     // Real deploy only — see checkDeployConflicts' own comment for why this never blocks:
     // logged up front, before the deploy itself, so it's visible even though --ignore-conflicts

@@ -784,7 +784,7 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                         stageLinks += ` <a href="#" title="Open Dev in the Deployment Dashboard to deploy it to the Dev org" onclick="send('openDeploymentDashboard', '${envCfg.name}')">🚀</a>`;
                     }
                 } else {
-                    stageLinks += ` <a href="#" title="Promote a story to ${envCfg.label} (pick from a list — opens a PR)" onclick="send('promote', '${envCfg.name}')">⬆</a>`;
+                    if (isLead) { stageLinks += ` <a href="#" title="Promote a story to ${envCfg.label} (pick from a list — opens a PR)" onclick="send('promote', '${envCfg.name}')">⬆</a>`; }
                     if (isLead) {
                         stageLinks += ` <a href="#" title="Open ${envCfg.label} in the Deployment Dashboard" onclick="send('openDeploymentDashboard', '${envCfg.name}')">🚀</a>`;
                     }

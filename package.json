@@ -1,8 +1,8 @@
 {
 	"name": "sf-devops",
 	"displayName": "Salesforce DevOps",
-	"description": "Generic, settings-driven Salesforce CI/CD workflow — 1-click story management, pipeline status, environment promotion, and an org-per-branch 2GP packaging release gate",
-	"version": "4.7.0",
+	"description": "Generic, settings-driven Salesforce CI/CD workflow \u2014 1-click story management, pipeline status, environment promotion, and an org-per-branch 2GP packaging release gate",
+	"version": "4.8.0",
 	"publisher": "your-company",
 	"engines": {
 		"vscode": "^1.85.0"
@@ -125,7 +125,7 @@
 			},
 			{
 				"command": "sfDevops.openEnvOrgDeployStatus",
-				"title": "Open Org — Deployment Status",
+				"title": "Open Org \u2014 Deployment Status",
 				"icon": "$(link-external)",
 				"category": "Salesforce DevOps"
 			},
@@ -168,6 +168,12 @@
 				"title": "Compare Branches (Diff Viewer)",
 				"icon": "$(diff)",
 				"category": "Salesforce DevOps"
+			},
+			{
+				"command": "sfDevops.runCoverage",
+				"title": "Run Apex Code Coverage",
+				"icon": "$(beaker)",
+				"category": "Salesforce DevOps"
 			}
 		],
 		"menus": {
@@ -203,13 +209,13 @@
 				},
 				"sfDevops.bitbucketWorkspace": {
 					"type": "string",
-					"description": "Deprecated — use sfDevops.repoWorkspace instead. Kept for backward compatibility.",
+					"description": "Deprecated \u2014 use sfDevops.repoWorkspace instead. Kept for backward compatibility.",
 					"default": "",
 					"deprecationMessage": "Use sfDevops.repoWorkspace instead."
 				},
 				"sfDevops.bitbucketRepoSlug": {
 					"type": "string",
-					"description": "Deprecated — use sfDevops.repoSlug instead. Kept for backward compatibility.",
+					"description": "Deprecated \u2014 use sfDevops.repoSlug instead. Kept for backward compatibility.",
 					"default": "",
 					"deprecationMessage": "Use sfDevops.repoSlug instead."
 				},
@@ -227,7 +233,7 @@
 				},
 				"sfDevops.role": {
 					"type": "string",
-					"description": "Deprecated bootstrap default only — the real, in-effect role is managed via the \"Change Role\" action in the Current Story panel (password-gated for Lead/Admin, stored outside this setting). This value is just the starting role before anyone has ever changed it that way.",
+					"description": "Deprecated bootstrap default only \u2014 the real, in-effect role is managed via the \"Change Role\" action in the Current Story panel (password-gated for Lead/Admin, stored outside this setting). This value is just the starting role before anyone has ever changed it that way.",
 					"default": "Developer"
 				},
 				"sfDevops.baseBranch": {
@@ -237,7 +243,7 @@
 				},
 				"sfDevops.devBranch": {
 					"type": "string",
-					"description": "Deprecated — the first entry of sfDevops.environments now defines this branch. Kept for backward compatibility with 1.x settings.",
+					"description": "Deprecated \u2014 the first entry of sfDevops.environments now defines this branch. Kept for backward compatibility with 1.x settings.",
 					"default": "dev",
 					"deprecationMessage": "Set the branch on the first entry of sfDevops.environments instead."
 				},
@@ -258,7 +264,7 @@
 				},
 				"sfDevops.environments": {
 					"type": "array",
-					"description": "The full deployment pipeline, in order. The FIRST entry is published straight from the feature branch (no PR) — e.g. \"dev\". Every later entry is reached via a promotion/validate branch + pull request. Each entry may be a plain environment name (legacy shorthand) or an object: { name, label?, branch? (defaults to name), icon? (a VS Code codicon id), requiredRole? (role name from sfDevops.roles needed to run Promote into this environment — Validate Only is always unrestricted), coverageGate? (true = the Apex coverage check must pass before promoting into this environment) }.",
+					"description": "The full deployment pipeline, in order. The FIRST entry is published straight from the feature branch (no PR) \u2014 e.g. \"dev\". Every later entry is reached via a promotion/validate branch + pull request. Each entry may be a plain environment name (legacy shorthand) or an object: { name, label?, branch? (defaults to name), icon? (a VS Code codicon id), requiredRole? (role name from sfDevops.roles needed to run Promote into this environment \u2014 Validate Only is always unrestricted), coverageGate? (true = the Apex coverage check must pass before promoting into this environment) }.",
 					"items": {
 						"anyOf": [
 							{
@@ -296,7 +302,7 @@
 									},
 									"orgAlias": {
 										"type": "string",
-										"description": "sf CLI alias/username of the org this environment deploys to. Purely informational/reference today — day-to-day deploys still happen via the CI pipeline triggered by the PR merge."
+										"description": "sf CLI alias/username of the org this environment deploys to. Purely informational/reference today \u2014 day-to-day deploys still happen via the CI pipeline triggered by the PR merge."
 									},
 									"deployTestLevel": {
 										"type": "string",
@@ -307,15 +313,15 @@
 											"RunAllTestsInOrg",
 											"RunRelevantTests"
 										],
-										"description": "Apex test level used by the Deployment Dashboard's Deploy/Validate actions for this environment. Defaults to RunRelevantTests (only tests Salesforce determines relevant to the deployed components — pairs naturally with the Dashboard's file-selection-based deploys)."
+										"description": "Apex test level used by the Deployment Dashboard's Deploy/Validate actions for this environment. Defaults to RunRelevantTests (only tests Salesforce determines relevant to the deployed components \u2014 pairs naturally with the Dashboard's file-selection-based deploys)."
 									},
 									"signoffGate": {
 										"type": "boolean",
-										"description": "True = a human sign-off must be recorded on THIS environment (via the Current Story panel) before the story can be promoted to whatever comes after it — e.g. QA sign-off before UAT."
+										"description": "True = a human sign-off must be recorded on THIS environment (via the Current Story panel) before the story can be promoted to whatever comes after it \u2014 e.g. QA sign-off before UAT."
 									},
 									"isProd": {
 										"type": "boolean",
-										"description": "Marks this environment as Prod for safety gates (e.g. the Deployment Dashboard's auto-deploy-after-validate never applies here, regardless of the checkbox). Defaults to true when name is \"prod\" — set this explicitly if your production environment uses a different name."
+										"description": "Marks this environment as Prod for safety gates (e.g. the Deployment Dashboard's auto-deploy-after-validate never applies here, regardless of the checkbox). Defaults to true when name is \"prod\" \u2014 set this explicitly if your production environment uses a different name."
 									},
 									"locked": {
 										"type": "boolean",
@@ -383,7 +389,7 @@
 				},
 				"sfDevops.prodOrgAlias": {
 					"type": "string",
-					"description": "sf CLI alias/username of the production org (the \"main\" branch target). Reference/informational only — prod is deployed by a separate DevOps team, not by this extension.",
+					"description": "sf CLI alias/username of the production org (the \"main\" branch target). Reference/informational only \u2014 prod is deployed by a separate DevOps team, not by this extension.",
 					"default": ""
 				},
 				"sfDevops.coverageThreshold": {
@@ -403,7 +409,7 @@
 				},
 				"sfDevops.enableVerboseLogs": {
 					"type": "boolean",
-					"description": "When enabled, the 'Salesforce DevOps' output channel also prints every raw git/sf command this extension runs (with its full arguments), the raw CLI JSON response, and job/deploy/test-run IDs with their status — on top of the normal plain-language narration. Off by default: much noisier, meant for troubleshooting.",
+					"description": "When enabled, the 'Salesforce DevOps' output channel also prints every raw git/sf command this extension runs (with its full arguments), the raw CLI JSON response, and job/deploy/test-run IDs with their status \u2014 on top of the normal plain-language narration. Off by default: much noisier, meant for troubleshooting.",
 					"default": false
 				},
 				"sfDevops.sourceRootFolder": {
@@ -428,7 +434,7 @@
 				},
 				"sfDevops.fallbackRefreshSeconds": {
 					"type": "number",
-					"description": "How often the Story Progress sidebar re-checks state on its own, in seconds. This is only a safety net — real branch switches and file changes are already picked up live, so you rarely need to lower this; raise it (or set it very high) to reduce background work.",
+					"description": "How often the Story Progress sidebar re-checks state on its own, in seconds. This is only a safety net \u2014 real branch switches and file changes are already picked up live, so you rarely need to lower this; raise it (or set it very high) to reduce background work.",
 					"default": 180
 				},
 				"sfDevops.packageBaselineBranch": {
@@ -448,7 +454,7 @@
 				},
 				"sfDevops.packaging": {
 					"type": "object",
-					"description": "Settings for the 2GP Packaging Release Gate — how changed metadata between sfDevops.packagingSourceBranch and sfDevops.packageBaselineBranch is segregated and packaged.",
+					"description": "Settings for the 2GP Packaging Release Gate \u2014 how changed metadata between sfDevops.packagingSourceBranch and sfDevops.packageBaselineBranch is segregated and packaged.",
 					"properties": {
 						"packageName": {
 							"type": "string",
@@ -475,18 +481,18 @@
 							"items": {
 								"type": "string"
 							},
-							"description": "Glob patterns (relative to sourceBase) for components that must go to unmanagedTarget instead of managedTarget — patch overrides, server-error workarounds, custom configs."
+							"description": "Glob patterns (relative to sourceBase) for components that must go to unmanagedTarget instead of managedTarget \u2014 patch overrides, server-error workarounds, custom configs."
 						},
 						"excludedMetadata": {
 							"type": "array",
 							"items": {
 								"type": "string"
 							},
-							"description": "Glob patterns (relative to sourceBase) for components excluded from the 2GP beta entirely — copied to neither bucket."
+							"description": "Glob patterns (relative to sourceBase) for components excluded from the 2GP beta entirely \u2014 copied to neither bucket."
 						},
 						"devHubOrgAlias": {
 							"type": "string",
-							"description": "sf CLI alias/username of the Dev Hub used for this package. Reference setting — not yet invoked by \"Prepare 2GP Beta from UAT\" itself."
+							"description": "sf CLI alias/username of the Dev Hub used for this package. Reference setting \u2014 not yet invoked by \"Prepare 2GP Beta from UAT\" itself."
 						}
 					},
 					"default": {

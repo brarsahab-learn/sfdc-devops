@@ -34,13 +34,18 @@ export function initOrgAliasStore(context: vscode.ExtensionContext): void {
 
 const ORG_ALIASES_KEY = "sfDevops.orgAliases";
 
+// In-memory guard prevents concurrent calls from racing before the async write lands.
+let _orgAliasesMigrationDone = false;
+
 /**
  * Migrate org alias data from globalState to workspaceState on first use,
  * so each workspace/project has independent org alias mappings.
  */
 function _migrateOrgAliasesIfNeeded(): void {
     if (!_extContext) { return; }
+    if (_orgAliasesMigrationDone) { return; }
     const alreadyMigrated = _extContext.workspaceState.get<boolean>("sfDevops.orgAliasesMigrated");
+    _orgAliasesMigrationDone = true; // set immediately so concurrent calls bail out
     if (alreadyMigrated) { return; }
     const legacy = _extContext.globalState.get<Record<string, string>>(ORG_ALIASES_KEY);
     if (legacy && Object.keys(legacy).length > 0) {

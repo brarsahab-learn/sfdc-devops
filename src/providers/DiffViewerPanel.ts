@@ -51,14 +51,18 @@ export class DiffViewerPanel {
         this._panel.webview.onDidReceiveMessage(
             async (msg: { command: string; fromRef?: string; toRef?: string; filePath?: string; pairs?: Array<{from:string;to:string}> }) => {
                 if (msg.command === "loadDiff" && msg.fromRef && msg.toRef) {
+                    await gitHelper.fetchOriginQuiet();
                     const files = await gitHelper.filesChangedBetween(msg.fromRef, msg.toRef).catch(() => []);
+                    const warning = (files[0] as any)?._warning as string | undefined;
                     this._panel.webview.postMessage({
                         command: "diffLoaded",
                         files,
                         fromRef: msg.fromRef,
                         toRef: msg.toRef,
+                        warning,
                     });
                 } else if (msg.command === "loadPipeline" && msg.pairs) {
+                    await gitHelper.fetchOriginQuiet();
                     const results = await Promise.all(
                         msg.pairs.map(async p => ({
                             from: p.from,
@@ -203,6 +207,7 @@ export class DiffViewerPanel {
     <div class="legend-item"><span class="status-badge badge-renamed">R</span> Renamed</div>
   </div>
   <div class="status-line" id="statusLine"></div>
+  <div id="warningLine" style="display:none;font-size:11px;color:var(--vscode-notificationsWarningIcon-foreground);margin-bottom:6px;padding:4px 8px;background:var(--vscode-inputValidation-warningBackground);border-radius:3px;"></div>
   <ul id="fileList" class="file-list" style="display:none"></ul>
 </div>
 
@@ -242,11 +247,12 @@ export class DiffViewerPanel {
     return REFS.map(r => '<option value="' + esc(r.ref) + '">' + esc(r.label) + '</option>').join('');
   }
 
-  const fromEl   = document.getElementById('fromRef');
-  const toEl     = document.getElementById('toRef');
-  const listEl   = document.getElementById('fileList');
-  const statusEl = document.getElementById('statusLine');
-  const legendEl = document.getElementById('legend');
+  const fromEl    = document.getElementById('fromRef');
+  const toEl      = document.getElementById('toRef');
+  const listEl    = document.getElementById('fileList');
+  const statusEl  = document.getElementById('statusLine');
+  const legendEl  = document.getElementById('legend');
+  const warnEl    = document.getElementById('warningLine');
 
   function renderSelects() {
     fromEl.innerHTML = buildOptions();
@@ -273,10 +279,11 @@ export class DiffViewerPanel {
     _currentTo   = toEl.value;
     listEl.style.display = 'none';
     legendEl.style.display = 'none';
+    warnEl.style.display = 'none';
     listEl.innerHTML = '';
     if (!_currentFrom || !_currentTo) { statusEl.textContent = 'Select both branches.'; return; }
     if (_currentFrom === _currentTo)  { statusEl.textContent = 'Select two different branches.'; return; }
-    statusEl.textContent = '⏳ Loading changed files…';
+    statusEl.textContent = '⏳ Fetching latest refs and loading changed files…';
     vscode.postMessage({ command: 'loadDiff', fromRef: _currentFrom, toRef: _currentTo });
   }
 
@@ -332,6 +339,10 @@ export class DiffViewerPanel {
     const msg = e.data;
     if (msg.command === 'diffLoaded') {
       const files = msg.files || [];
+      if (msg.warning) {
+        warnEl.textContent = '⚠ ' + msg.warning;
+        warnEl.style.display = 'block';
+      }
       if (files.length === 0) {
         statusEl.textContent = '';
         listEl.innerHTML = '<li class="empty">No changed files between these two branches.</li>';
