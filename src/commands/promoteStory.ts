@@ -124,7 +124,14 @@ async function runPromotionValidate(
     progress?.report({ message: `Switching local checkout to origin/${promotionBranch} and pulling latest...` });
     await gitHelper.createLocalBranchFrom(promotionBranch, promotionBranch);
 
-    let files = await gitHelper.diffNameStatusBetween(targetBranch, promotionBranch);
+    // Scoped to the configured source root (matches DeploymentDashboardPanel's equivalent
+    // diff) — an unscoped diff picks up EVERY changed file in the whole repo, including
+    // anything outside force-app (docs, CI config, stray files at the repo root) that was
+    // never meant to be deployable Salesforce metadata at all. Sending one of those straight
+    // to `sf project deploy --source-dir` doesn't just skip it — it fails the CLI invocation
+    // outright ("File or folder not found" or an invalid-metadata error), taking the whole
+    // validate down with it even though the actual story content is fine.
+    let files = await gitHelper.diffNameStatusBetween(targetBranch, promotionBranch, getSourceRootFolder());
     if (files.length === 0) {
         // Nothing actually differs from the target branch (e.g. re-validating a no-op
         // reuse) — nothing to check-only deploy, so there's nothing to fail either.
