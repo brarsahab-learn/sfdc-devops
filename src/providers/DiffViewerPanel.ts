@@ -219,8 +219,12 @@ export class DiffViewerPanel {
 
 <script>
   const vscode = acquireVsCodeApi();
-  const REFS         = JSON.parse('${optionsJson}');
-  const PIPELINE_PAIRS = JSON.parse('${pairsJson}');
+  // JSON.stringify's own escaping is already valid JS as a direct literal (JSON syntax is
+  // a subset of JS expression syntax) — embedded with no surrounding quotes and no
+  // JSON.parse(), so a branch/ref name containing a literal ' can't prematurely close an
+  // outer string literal the way a JSON.parse('...') wrapper's single quotes would.
+  const REFS         = ${optionsJson};
+  const PIPELINE_PAIRS = ${pairsJson};
   const DEFAULT_FROM = ${JSON.stringify(defaultFrom)};
   const DEFAULT_TO   = ${JSON.stringify(defaultTo)};
 

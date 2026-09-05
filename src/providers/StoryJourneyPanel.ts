@@ -304,10 +304,15 @@ ${events.length === 0
 
 <script>
   const vscode = acquireVsCodeApi();
-  // Unicode-escape < > & so the JSON literal can never contain </script> and close this block.
-  const VALID_IDS = new Set(JSON.parse('${
+  // JSON.stringify's own escaping is already valid JS as a direct array literal (JSON
+  // syntax is a subset of JS expression syntax) — embedded with no surrounding quotes and
+  // no JSON.parse(), so a story ID containing a literal ' can't prematurely close an outer
+  // string literal the way a JSON.parse('...') wrapper's single quotes would. Unicode-
+  // escaping < > & still guards against a "</script>" (or an entity-sensitive character)
+  // inside a story ID ending this script block early.
+  const VALID_IDS = new Set(${
       JSON.stringify(allStoryIds).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026")
-  }'));
+  });
   function send(cmd, extra) { vscode.postMessage({ command: cmd, ...extra }); }
   // selectStory fires on commit (blur or Enter via datalist selection) — not on every keystroke,
   // which would navigate away mid-typing when a partial input matches a shorter story ID.

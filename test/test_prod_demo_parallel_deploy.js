@@ -54,16 +54,26 @@ function makeGitHelper() {
         fakeVscode._extContextForConfig = undefined;
         // config.ts's readOrgAliases/writeOrgAlias are keyed off an internal _extContext set via
         // initOrgAliasStore — simulate that exactly the way dev/prod aliases already rely on it.
-        const fakeContext = { globalState: {
-            get: (key) => (key === "sfDevops.orgAliases" ? store.data : undefined),
-            update: async (key, value) => { if (key === "sfDevops.orgAliases") { store.data = value; } },
-        } };
+        // Org aliases now live in workspaceState (migrated from globalState — see
+        // _migrateOrgAliasesIfNeeded, which also touches workspaceState directly, so both
+        // the alias data itself and the "already migrated" flag need a real store here).
+        const migratedFlag = { value: undefined };
+        const fakeContext = {
+            globalState: { get: () => undefined, update: async () => {} },
+            workspaceState: {
+                get: (key) => (key === "sfDevops.orgAliases" ? store.data : key === "sfDevops.orgAliasesMigrated" ? migratedFlag.value : undefined),
+                update: async (key, value) => {
+                    if (key === "sfDevops.orgAliases") { store.data = value; }
+                    else if (key === "sfDevops.orgAliasesMigrated") { migratedFlag.value = value; }
+                },
+            },
+        };
         config.initOrgAliasStore(fakeContext);
 
         check("no alias set initially", config.getDemoOrgAlias() === "", config.getDemoOrgAlias());
         await config.setDemoOrgAlias("ib@demo1");
         check("getDemoOrgAlias reads back what setDemoOrgAlias wrote", config.getDemoOrgAlias() === "ib@demo1", config.getDemoOrgAlias());
-        check("stored in the SAME machine-local store dev/prod use (not a separate key)", store.data && store.data.demo === "ib@demo1", JSON.stringify(store.data));
+        check("stored in the SAME org-alias store dev/prod use (not a separate key)", store.data && store.data.demo === "ib@demo1", JSON.stringify(store.data));
     }
 
     // ---- 2. Dashboard: Demo checkbox only renders on the Prod pane, only when configured ----

@@ -53,8 +53,17 @@ async function findPromotionCandidates(prevBranch, targetBranch) {
     const uatCandidates = await findPromotionCandidates("qa", "uat");
     console.log("uat candidates:", uatCandidates);
     check("uat candidates is a real list", Array.isArray(uatCandidates));
-    // TEST_2 is on qa but not uat (per earlier progress readout) -> should appear here
-    check("uat candidates include TEST_2 (on qa, not on uat)", uatCandidates.includes("TEST_2"));
+    // Real-repo invariant, checked dynamically rather than hardcoding a specific story's
+    // current promotion state (which drifts as real work keeps happening in this shared
+    // repo — TEST_2 specifically has since been merged into uat itself, which is exactly
+    // the kind of live-state drift that made an earlier hardcoded assumption here go
+    // stale): NOTHING findPromotionCandidates("qa", "uat") returns should already have a
+    // commit on uat — that's the one thing the function is actually promising.
+    let noCandidateAlreadyOnUat = true;
+    for (const storyId of uatCandidates) {
+        if (await gh.storyCommitShaOnBranch("uat", storyId)) { noCandidateAlreadyOnUat = false; break; }
+    }
+    check("no returned UAT candidate is already on uat", noCandidateAlreadyOnUat, JSON.stringify(uatCandidates));
     // TEST-INITIAL is already on uat -> should NOT appear
     check("uat candidates exclude TEST-INITIAL (already promoted)", !uatCandidates.includes("TEST-INITIAL"));
 

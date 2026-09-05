@@ -189,10 +189,10 @@ export class StoryPipelinePanel {
             const link = card.ticketUrl
                 ? `<a href="${escapeHtml(card.ticketUrl)}" class="ticket-link">${escapeHtml(card.storyId)}</a>`
                 : `<span class="story-id">${escapeHtml(card.storyId)}</span>`;
-            const journeyBtn  = `<a class="card-action" href="#" onclick="openJourney('${escapeHtml(card.storyId)}')" title="View full journey">📜</a>`;
+            const journeyBtn  = `<a class="card-action" href="#" onclick="openJourney('${escapeForOnclickArg(card.storyId)}')" title="View full journey">📜</a>`;
             const inactiveBtn = card.isInactive
-                ? `<a class="card-action" href="#" onclick="markActive('${escapeHtml(card.storyId)}')" title="Restore to active tracking">↩</a>`
-                : `<a class="card-action" href="#" onclick="markInactive('${escapeHtml(card.storyId)}')" title="Mark as inactive (hide from default view)">💤</a>`;
+                ? `<a class="card-action" href="#" onclick="markActive('${escapeForOnclickArg(card.storyId)}')" title="Restore to active tracking">↩</a>`
+                : `<a class="card-action" href="#" onclick="markInactive('${escapeForOnclickArg(card.storyId)}')" title="Mark as inactive (hide from default view)">💤</a>`;
             const cls = [
                 "card",
                 card.isStale    ? "stale"    : "",
@@ -317,8 +317,16 @@ export class StoryPipelinePanel {
 
 <script>
   const vscode = acquireVsCodeApi();
-  // safeJson: JSON.stringify + escape </script> so the literal can never close this block.
-  const CARDS = JSON.parse('${
+  // JSON.stringify's own escaping already makes this valid JS to embed DIRECTLY as an
+  // array literal (JSON syntax is a subset of JS expression syntax) — no surrounding
+  // quotes, no JSON.parse() needed, so there's no outer string literal for a stray
+  // apostrophe in a story ID or branch name to prematurely close. (A previous version
+  // wrapped this in JSON.parse('...') — single-quoted — which broke outright the moment
+  // any field contained a literal ' character, since only </script>-relevant characters
+  // were escaped, never the quote the whole thing was wrapped in.) Escaping <, >, & still
+  // guards against a "</script>" (or an HTML-entity-sensitive character) inside a string
+  // value ending this script block early.
+  const CARDS = ${
       JSON.stringify(cards.map(c => ({
           id: c.storyId,
           branch: c.branch,
@@ -327,7 +335,7 @@ export class StoryPipelinePanel {
           inactive: c.isInactive,
           lastActivity: c.lastActivity ?? "",
       }))).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026")
-  }');
+  };
 
   let showComplete = false;
   let showInactive = false;
@@ -408,4 +416,23 @@ export class StoryPipelinePanel {
 
 function escapeHtml(s: string): string {
     return s.replace(/[<>&"]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c] ?? c));
+}
+
+/**
+ * Safe for embedding inside a single-quoted JS string literal that itself sits inside a
+ * double-quoted HTML attribute — the `onclick="fn('${...}')"` pattern used below.
+ * escapeHtml alone doesn't cover this: it escapes `"` for the HTML *attribute*, but a raw
+ * `'` in the value still closes the inline JS string early. Story IDs here can be a raw
+ * branch name (extractStoryId falls back to the whole branch when it doesn't match the
+ * configured ticket-key pattern — see below), not always something that went through
+ * sanitizeStoryId, so this can't be assumed quote-free.
+ *
+ * Order matters: escape for the JS-string layer FIRST (backslash, then single quote —
+ * backslash first so it isn't itself re-escaped by the quote step), THEN escapeHtml for
+ * the HTML-attribute layer. The browser reverses this when parsing: it decodes the HTML
+ * attribute first (turning `&quot;`/`&lt;`/`&gt;` back into literal `"`/`<`/`>`, which are
+ * harmless *inside* a JS string), leaving valid JS with the `\'` still doing its job.
+ */
+function escapeForOnclickArg(s: string): string {
+    return escapeHtml(s.replace(/\\/g, "\\\\").replace(/'/g, "\\'"));
 }
