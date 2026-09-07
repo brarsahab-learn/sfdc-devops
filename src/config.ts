@@ -319,6 +319,17 @@ export function getEnvironments(): ResolvedEnvironment[] {
         });
 }
 
+/**
+ * Writes the environments array back to workspace settings (`.vscode/settings.json`).
+ * Falls back to global settings if no workspace folder is open.
+ */
+export async function saveEnvironments(envs: EnvironmentSetting[]): Promise<void> {
+    const target = vscode.workspace.workspaceFolders?.length
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global;
+    await vscode.workspace.getConfiguration("sfDevops").update("environments", envs, target);
+}
+
 /** The first configured environment — published directly from the feature branch, no PR. */
 export function getPublishEnvironment(): ResolvedEnvironment {
     return getEnvironments()[0];

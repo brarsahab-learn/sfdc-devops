@@ -6,7 +6,7 @@ import * as vscode from "vscode";
 import { GitHelper } from "../GitHelper";
 import { IGitProviderClient } from "../GitProviderClient";
 import { runSetupChecks, SetupCheckItem } from "../SetupCheck";
-import { getOrgAliasSlots, setOrgAliasSlot, OrgAliasSlot, getAuditLogRetentionDays } from "../config";
+import { getOrgAliasSlots, setOrgAliasSlot, OrgAliasSlot, getAuditLogRetentionDays, getEnvironments, saveEnvironments, EnvironmentSetting } from "../config";
 import { canAccessConfig } from "../RoleManager";
 import { getEffectiveRole } from "../RoleManager";
 
@@ -50,8 +50,9 @@ export class AdminPanel {
                 case "resetPwdForce": await vscode.commands.executeCommand("sfDevops.resetRolePasswordForce"); break;
                 case "openSettings": await vscode.commands.executeCommand("sfDevops.openSettings"); break;
                 case "viewAudit":    await vscode.commands.executeCommand("sfDevops.viewAuditLog"); break;
-                case "trimAudit":    await this._trimAudit(msg.days); break;
-                case "clearAudit":   await this._clearAudit(); break;
+                case "trimAudit":       await this._trimAudit(msg.days); break;
+                case "clearAudit":      await this._clearAudit(); break;
+                case "saveEnvironments": await this._saveEnvironments(msg.envs); break;
                 case "openTerminal":
                     vscode.window.createTerminal("Salesforce-DevOps").show();
                     break;
@@ -67,14 +68,25 @@ export class AdminPanel {
         while (this._disposables.length) { this._disposables.pop()?.dispose(); }
     }
 
+    private async _saveEnvironments(envs: EnvironmentSetting[]): Promise<void> {
+        try {
+            await saveEnvironments(envs);
+            vscode.window.showInformationMessage("Pipeline branch configuration saved.");
+            await this._refresh();
+        } catch (err) {
+            vscode.window.showErrorMessage(`Could not save environments: ${err}`);
+        }
+    }
+
     private async _refresh(): Promise<void> {
         try {
             const role   = getEffectiveRole(this._ctx);
             const checks = await runSetupChecks(this._git, this._bb, this._ctx, role);
             const slots  = getOrgAliasSlots();
+            const envs   = getEnvironments();
             const sizeKb = Math.round(await this._git.getAuditLogSizeBytes() / 1024);
             const retentionDays = getAuditLogRetentionDays();
-            this._panel.webview.html = this._renderHtml(checks, slots, role, sizeKb, retentionDays);
+            this._panel.webview.html = this._renderHtml(checks, slots, envs, role, sizeKb, retentionDays);
         } catch (err) {
             this._panel.webview.html = `<body style="padding:20px;font-family:sans-serif;color:#f48771">Error: ${String(err)}</body>`;
         }
@@ -114,12 +126,26 @@ export class AdminPanel {
     private _renderHtml(
         checks:        SetupCheckItem[],
         slots:         OrgAliasSlot[],
+        envs:          ReturnType<typeof getEnvironments>,
         role:          string,
         auditSizeKb:   number,
         retentionDays: number,
     ): string {
         const isAdmin  = canAccessConfig(role);
         const failing  = checks.filter(c => c.required && !c.passed).length;
+
+        // Serialize environments for the webview (strip resolved-only fields; keep editable ones)
+        const envData = JSON.stringify(envs.map(e => ({
+            name:            e.name,
+            label:           e.label,
+            branch:          e.branch,
+            requiredRole:    e.requiredRole ?? "",
+            deployTestLevel: e.deployTestLevel,
+            coverageGate:    e.coverageGate,
+            signoffGate:     e.signoffGate,
+            isProd:          e.isProd,
+            locked:          e.locked,
+        }))).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
         const statusBanner = failing > 0
             ? `<div class="banner warn">⚠ ${failing} required check(s) failing — fix them below.</div>`
             : `<div class="banner ok">✅ All required checks pass.</div>`;
@@ -183,6 +209,24 @@ export class AdminPanel {
   .slot-input { font-size: 12px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--fg); flex: 1; max-width: 280px; }
   .slot-val { font-size: 12px; color: var(--fg); }
 
+  /* Branch / pipeline config table */
+  .env-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 10px; }
+  .env-table th { text-align: left; padding: 5px 8px; font-size: 11px; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  .env-table td { padding: 5px 6px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  .env-table tr:last-child td { border-bottom: none; }
+  .env-table tr:hover td { background: var(--card); }
+  .et-input { font-size: 12px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 3px; background: var(--bg); color: var(--fg); width: 100%; min-width: 60px; }
+  .et-select { font-size: 12px; padding: 3px 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--bg); color: var(--fg); }
+  .order-btn { font-size: 11px; padding: 1px 5px; border: 1px solid var(--border); border-radius: 3px; cursor: pointer; background: transparent; color: var(--fg); line-height: 1.4; }
+  .order-btn:hover { background: var(--card); }
+  .del-btn { font-size: 11px; padding: 2px 6px; border: 1px solid var(--err); border-radius: 3px; cursor: pointer; background: transparent; color: var(--err); }
+  .del-btn:hover { background: color-mix(in srgb, var(--err) 10%, transparent); }
+  .env-actions { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; flex-wrap: wrap; }
+  .save-btn { background: #0078d4; color: #fff; border: none; padding: 5px 16px; border-radius: 5px; cursor: pointer; font-size: 12px; }
+  .save-btn:hover { background: #005a9e; }
+  .cb-cell { display: flex; gap: 10px; align-items: center; }
+  .cb-label { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 3px; white-space: nowrap; }
+
   .role-box { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .role-name { font-weight: 600; font-size: 15px; }
   .audit-box { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; }
@@ -212,6 +256,45 @@ ${checkRows}
 </p>
 ${slotRows}
 
+<h2>Pipeline / Branch Setup</h2>
+<p style="font-size:12px;color:var(--muted);margin:0 0 10px">
+  Define the promotion pipeline in order. The first stage is where feature branches publish directly; all later stages require a promotion PR.
+  ${isAdmin ? "Changes save to <code>.vscode/settings.json</code>." : "<strong>Admin access required to edit.</strong>"}
+</p>
+${isAdmin ? `
+<table class="env-table" id="envTable">
+  <thead><tr>
+    <th style="width:44px"></th>
+    <th>Name <span style="font-weight:normal;color:var(--muted)">(ID)</span></th>
+    <th>Label</th>
+    <th>Branch</th>
+    <th>Required Role</th>
+    <th>Test Level</th>
+    <th>Gates</th>
+    <th>Flags</th>
+    <th style="width:32px"></th>
+  </tr></thead>
+  <tbody id="envBody"></tbody>
+</table>
+<div class="env-actions">
+  <button class="btn" onclick="addRow()">+ Add Stage</button>
+  <button class="save-btn" onclick="saveEnvs()">💾 Save Pipeline</button>
+  <span id="saveMsg" style="font-size:11px;color:var(--ok);display:none">Saved ✓</span>
+</div>` : `
+<table class="env-table">
+  <thead><tr><th>Name</th><th>Label</th><th>Branch</th><th>Required Role</th><th>Test Level</th><th>Gates</th><th>Flags</th></tr></thead>
+  <tbody>${envs.map(e => `<tr>
+    <td>${escapeHtml(e.name)}</td>
+    <td>${escapeHtml(e.label)}</td>
+    <td><code>${escapeHtml(e.branch)}</code></td>
+    <td>${escapeHtml(e.requiredRole ?? "Any")}</td>
+    <td style="font-size:11px">${escapeHtml(e.deployTestLevel)}</td>
+    <td style="font-size:11px">${[e.coverageGate && "Coverage", e.signoffGate && "Sign-off"].filter(Boolean).join(", ") || "—"}</td>
+    <td style="font-size:11px">${[e.isProd && "Production", e.locked && "Locked"].filter(Boolean).join(", ") || "—"}</td>
+  </tr>`).join("")}
+  </tbody>
+</table>`}
+
 <h2>Role</h2>
 <div class="role-box">
   <span>Current role:</span>
@@ -240,6 +323,78 @@ ${slotRows}
     var val = document.getElementById('alias-' + key).value;
     vscode.postMessage({ command: 'setOrgAlias', key: key, alias: val });
   }
+
+  /* ── Pipeline / Branch editor ── */
+  const ENV_DATA = JSON.parse('${envData}');
+  let envs = ENV_DATA.map(e => Object.assign({}, e));
+
+  const ROLES        = ['', 'Lead', 'Admin'];
+  const TEST_LEVELS  = ['RunLocalTests', 'RunAllTestsInOrg', 'RunSpecifiedTests'];
+
+  function esc(s) {
+    return String(s ?? '').replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function renderTable() {
+    const body = document.getElementById('envBody');
+    if (!body) { return; }
+    body.innerHTML = envs.map((e, i) => {
+      const upBtn   = i > 0 ? '<button class="order-btn" onclick="moveRow('+i+',-1)" title="Move up">▲</button>' : '<button class="order-btn" style="opacity:0.2" disabled>▲</button>';
+      const downBtn = i < envs.length-1 ? '<button class="order-btn" onclick="moveRow('+i+',1)" title="Move down">▼</button>' : '<button class="order-btn" style="opacity:0.2" disabled>▼</button>';
+      const roleOpts = ROLES.map(r => '<option value="'+esc(r)+'"'+(e.requiredRole===r?' selected':'')+'>'+esc(r||'Any')+'</option>').join('');
+      const testOpts = TEST_LEVELS.map(t => '<option value="'+esc(t)+'"'+(e.deployTestLevel===t?' selected':'')+'>'+esc(t)+'</option>').join('');
+      return '<tr id="erow'+i+'">'
+        +'<td style="white-space:nowrap">'+upBtn+' '+downBtn+'</td>'
+        +'<td><input class="et-input" style="min-width:70px" value="'+esc(e.name)+'" oninput="setF('+i+',\'name\',this.value)" placeholder="dev"></td>'
+        +'<td><input class="et-input" style="min-width:70px" value="'+esc(e.label)+'" oninput="setF('+i+',\'label\',this.value)" placeholder="DEV"></td>'
+        +'<td><input class="et-input" style="min-width:80px" value="'+esc(e.branch)+'" oninput="setF('+i+',\'branch\',this.value)" placeholder="dev"></td>'
+        +'<td><select class="et-select" onchange="setF('+i+',\'requiredRole\',this.value)">'+roleOpts+'</select></td>'
+        +'<td><select class="et-select" onchange="setF('+i+',\'deployTestLevel\',this.value)">'+testOpts+'</select></td>'
+        +'<td><span class="cb-cell">'
+          +'<label class="cb-label"><input type="checkbox"'+(e.coverageGate?' checked':'')+' onchange="setF('+i+',\'coverageGate\',this.checked)"> Coverage</label>'
+          +'<label class="cb-label"><input type="checkbox"'+(e.signoffGate?' checked':'')+' onchange="setF('+i+',\'signoffGate\',this.checked)"> Sign-off</label>'
+        +'</span></td>'
+        +'<td><span class="cb-cell">'
+          +'<label class="cb-label"><input type="checkbox"'+(e.isProd?' checked':'')+' onchange="setF('+i+',\'isProd\',this.checked)"> Prod</label>'
+          +'<label class="cb-label"><input type="checkbox"'+(e.locked?' checked':'')+' onchange="setF('+i+',\'locked\',this.checked)"> Locked</label>'
+        +'</span></td>'
+        +'<td><button class="del-btn" onclick="delRow('+i+')" title="Remove stage">✕</button></td>'
+        +'</tr>';
+    }).join('');
+  }
+
+  function setF(i, field, val) { envs[i][field] = val; }
+  function moveRow(i, dir) {
+    const tmp = envs[i]; envs[i] = envs[i+dir]; envs[i+dir] = tmp;
+    renderTable();
+  }
+  function delRow(i) {
+    if (envs.length <= 1) { return; }
+    envs.splice(i, 1);
+    renderTable();
+  }
+  function addRow() {
+    envs.push({ name: '', label: '', branch: '', requiredRole: '', deployTestLevel: 'RunLocalTests', coverageGate: false, signoffGate: false, isProd: false, locked: false });
+    renderTable();
+    // scroll new row into view
+    const body = document.getElementById('envBody');
+    if (body) { body.lastElementChild?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+  }
+  function saveEnvs() {
+    // Validate: each row needs a name and branch
+    for (let i = 0; i < envs.length; i++) {
+      if (!envs[i].name.trim()) { alert('Stage ' + (i+1) + ' is missing a Name.'); return; }
+      if (!envs[i].branch.trim()) { alert('Stage "' + envs[i].name + '" is missing a Branch name.'); return; }
+    }
+    // Fill label from name if blank
+    const toSave = envs.map(e => Object.assign({}, e, { name: e.name.trim(), branch: e.branch.trim(), label: (e.label||'').trim() || e.name.trim().toUpperCase() }));
+    vscode.postMessage({ command: 'saveEnvironments', envs: toSave });
+    const msg = document.getElementById('saveMsg');
+    if (msg) { msg.style.display = 'inline'; setTimeout(() => { msg.style.display = 'none'; }, 2500); }
+  }
+
+  // Init
+  if (document.getElementById('envBody')) { renderTable(); }
 </script>
 </body>
 </html>`;
