@@ -1,4 +1,4 @@
-// extension.ts — Main entry point for the Salesforce DevOps VS Code Extension
+// extension.ts — Main entry point for the Salesforce-DevOps VS Code Extension
 
 import * as vscode from "vscode";
 import { StoryWebviewProvider, StoryStatusInfo }   from "./providers/StoryWebviewProvider";
@@ -52,7 +52,7 @@ async function runPoll(gitHelper: GitHelper, context: vscode.ExtensionContext): 
 }
 
 export async function activate(context: vscode.ExtensionContext) {
-    console.log("Salesforce DevOps extension activated");
+    console.log("Salesforce-DevOps extension activated");
     initLog(context);
     initOrgAliasStore(context);
     await migrateRolePasswordIfNeeded(context);
@@ -64,7 +64,7 @@ export async function activate(context: vscode.ExtensionContext) {
     if (retentionDays > 0) {
         const trimmed = await gitHelper.trimAuditLog(retentionDays * 24 * 60 * 60 * 1000);
         if (trimmed > 0) {
-            console.log(`SF DevOps: auto-trimmed ${trimmed} audit entries older than ${retentionDays} days.`);
+            console.log(`Salesforce-DevOps: auto-trimmed ${trimmed} audit entries older than ${retentionDays} days.`);
         }
     }
 
@@ -102,7 +102,7 @@ export async function activate(context: vscode.ExtensionContext) {
     const updateStatusBar = (info: StoryStatusInfo | null) => {
         if (!info) {
             statusBarItem.text = "$(circle-slash) No active story";
-            statusBarItem.tooltip = "Salesforce DevOps — no feature branch checked out";
+            statusBarItem.tooltip = "Salesforce-DevOps — no feature branch checked out";
             statusBarItem.backgroundColor = undefined;
             return;
         }
@@ -258,7 +258,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
         vscode.commands.registerCommand("sfDevops.openSettings", () => {
             if (!canAccessConfig(getEffectiveRole(context))) {
-                vscode.window.showWarningMessage("Only Admins can open Salesforce DevOps configuration.");
+                vscode.window.showWarningMessage("Only Admins can open Salesforce-DevOps configuration.");
                 return;
             }
             vscode.commands.executeCommand("workbench.action.openSettings", "sfDevops");

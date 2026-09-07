@@ -22,7 +22,7 @@ export class AuditTrailPanel {
         }
         const panel = vscode.window.createWebviewPanel(
             "sfDevopsAuditTrail",
-            "SF DevOps Audit Trail",
+            "Salesforce-DevOps Audit Trail",
             vscode.ViewColumn.One,
             { enableScripts: true, retainContextWhenHidden: true }
         );

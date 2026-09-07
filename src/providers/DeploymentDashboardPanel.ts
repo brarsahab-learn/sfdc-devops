@@ -92,7 +92,7 @@ export class DeploymentDashboardPanel {
         }
         const panel = vscode.window.createWebviewPanel(
             "sfDevopsDeploymentDashboard",
-            "SF DevOps Deployments",
+            "Salesforce-DevOps Deployments",
             vscode.ViewColumn.One,
             { enableScripts: true, retainContextWhenHidden: true }
         );
@@ -167,7 +167,7 @@ export class DeploymentDashboardPanel {
             const prevEnv = idx > 0 ? envs[idx - 1] : undefined;
             const model = await this._buildViewModel(envs[idx], envs[idx + 1], prevEnv);
             if (token !== this._refreshToken) { return; } // stale by the time the view model finished building
-            this._panel.title = `SF DevOps Deployments — ${model.env.label}`;
+            this._panel.title = `Salesforce-DevOps Deployments — ${model.env.label}`;
             this._panel.webview.html = this._renderHtml(model);
         } catch (err) {
             if (token !== this._refreshToken) { return; }
@@ -852,8 +852,8 @@ export class DeploymentDashboardPanel {
     background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid var(--accent);
     color: var(--fg); display: flex; align-items: center; gap: 8px;
   }
-  .busy-bar .spin { display: inline-block; animation: sf-devops-spin 1s linear infinite; }
-  @keyframes sf-devops-spin { to { transform: rotate(360deg); } }
+  .busy-bar .spin { display: inline-block; animation: salesforce-devops-spin 1s linear infinite; }
+  @keyframes salesforce-devops-spin { to { transform: rotate(360deg); } }
   .deploy-row { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
   .auto-deploy-label { font-size: 12px; display: flex; align-items: center; gap: 6px; }
   .auto-deploy-label .meta { margin: 0; }
@@ -896,7 +896,7 @@ export class DeploymentDashboardPanel {
 </style>
 </head>
 <body>
-<h1>SF DevOps Deployments — ${escapeHtml(model.env.label)}</h1>
+<h1>Salesforce-DevOps Deployments — ${escapeHtml(model.env.label)}</h1>
 <div class="sub">Everything merged into ${escapeHtml(model.env.label)}'s branch, not yet deployed by this extension. Deploys and validations run <code>sf project deploy</code> directly — no external CI involved.</div>
 
 ${notice}

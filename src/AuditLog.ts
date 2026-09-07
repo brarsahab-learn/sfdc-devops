@@ -322,7 +322,7 @@ export function renderAuditHtml(entries: AuditEntry[]): string {
 <html>
 <head>
 <meta charset="utf-8">
-<title>SF DevOps Audit Trail</title>
+<title>Salesforce-DevOps Audit Trail</title>
 <style>
   :root {
     --bg: #ffffff; --fg: #1a1a1a; --card: #f5f5f5; --border: #ddd; --muted: #777;
@@ -417,7 +417,7 @@ export function renderAuditHtml(entries: AuditEntry[]): string {
 </style>
 </head>
 <body>
-<h1>SF DevOps Audit Trail <span id="count"></span></h1>
+<h1>Salesforce-DevOps Audit Trail <span id="count"></span></h1>
 
 <div class="toolbar">
   <input id="q" type="search" placeholder="Search summary, story, branch, error…  ( / to focus )" autocomplete="off">

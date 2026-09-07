@@ -1,4 +1,4 @@
-// Log.ts — a single shared Output Channel ("Salesforce DevOps") that narrates what every
+// Log.ts — a single shared Output Channel ("Salesforce-DevOps") that narrates what every
 // promotion/deployment/validation is actually doing, in plain language — which files are
 // being picked up, what succeeded or failed and why — rather than a silent spinner, and
 // deliberately NOT a raw dump of every git/sf command or CLI JSON output (unreadable noise).
@@ -9,7 +9,7 @@ import { isVerboseLogsEnabled } from "./config";
 let channel: vscode.OutputChannel | undefined;
 
 function getChannel(): vscode.OutputChannel {
-    if (!channel) { channel = vscode.window.createOutputChannel("Salesforce DevOps"); }
+    if (!channel) { channel = vscode.window.createOutputChannel("Salesforce-DevOps"); }
     return channel;
 }
 

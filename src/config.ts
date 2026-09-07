@@ -490,7 +490,7 @@ export function getDeployTimeoutSeconds(): number {
     return cfg().get<number>("deployTimeoutSeconds") ?? 900;
 }
 
-/** When true, the "Salesforce DevOps" output channel also prints every raw git/sf command this extension runs, the full CLI arguments, and job/deploy IDs with their live status — on top of the normal plain-language narration. Off by default: noisy, meant for debugging. */
+/** When true, the "Salesforce-DevOps" output channel also prints every raw git/sf command this extension runs, the full CLI arguments, and job/deploy IDs with their live status — on top of the normal plain-language narration. Off by default: noisy, meant for debugging. */
 export function isVerboseLogsEnabled(): boolean {
     return cfg().get<boolean>("enableVerboseLogs") ?? false;
 }

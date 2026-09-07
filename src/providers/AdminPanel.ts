@@ -26,7 +26,7 @@ export class AdminPanel {
         }
         const panel = vscode.window.createWebviewPanel(
             "sfDevopsAdmin",
-            "SF DevOps — Admin / Setup",
+            "Salesforce-DevOps — Admin / Setup",
             vscode.ViewColumn.Two,
             { enableScripts: true, retainContextWhenHidden: true }
         );
@@ -53,7 +53,7 @@ export class AdminPanel {
                 case "trimAudit":    await this._trimAudit(msg.days); break;
                 case "clearAudit":   await this._clearAudit(); break;
                 case "openTerminal":
-                    vscode.window.createTerminal("SF DevOps").show();
+                    vscode.window.createTerminal("Salesforce-DevOps").show();
                     break;
             }
         }, null, this._disposables);

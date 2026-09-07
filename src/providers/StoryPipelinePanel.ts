@@ -31,7 +31,7 @@ export class StoryPipelinePanel {
         }
         const panel = vscode.window.createWebviewPanel(
             "sfDevopsPipeline",
-            "SF DevOps — Story Pipeline",
+            "Salesforce-DevOps — Story Pipeline",
             vscode.ViewColumn.One,
             { enableScripts: true, retainContextWhenHidden: true }
         );
