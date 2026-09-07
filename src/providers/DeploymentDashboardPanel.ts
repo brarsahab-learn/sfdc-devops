@@ -15,6 +15,7 @@ import { buildPackageXml, AuditChangedFile, metadataTypeForPath } from "../Audit
 import { getPromotableEnvironments, getPublishEnvironment, getSourceRootFolder, getDeployTimeoutSeconds, canPromote, getBaseBranch, ResolvedEnvironment, getDemoOrgAlias } from "../config";
 import { getEffectiveRole } from "../RoleManager";
 import { log } from "../Log";
+import { sharedCss, cspMeta, loadingHtml } from "../ui/shared";
 
 function escapeHtml(s: string): string {
     return String(s).replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]!));
@@ -114,18 +115,17 @@ export class DeploymentDashboardPanel {
         this._boundEnv = env;
         this._panel.onDidDispose(() => this.dispose(), null, this._disposables);
         this._panel.webview.onDidReceiveMessage(async (msg) => {
-            if (msg.command === "refresh") { await this.refresh(); }
-            if (msg.command === "runAction") { await this._runAction(msg); }
-            if (msg.command === "viewFileDiff") { await this._viewFileDiff(msg); }
-            if (msg.command === "viewPendingFileDiff") { await this._viewPendingFileDiff(msg); }
-            if (msg.command === "rollback") { await this._handleRollback(msg); }
-            // The one remaining cross-env navigation — "deploy succeeded, N stories ready in
-            // the next stage" — rebinds this same panel to that env rather than switching a
-            // pre-rendered tab, so it stays true to "bound to exactly what was requested,"
-            // even though that request now originates from inside the panel itself.
-            if (msg.command === "rebind" && msg.env) {
-                this._boundEnv = msg.env;
-                await this.refresh();
+            switch (msg.command) {
+                case "refresh": await this.refresh(); break;
+                case "runAction": await this._runAction(msg); break;
+                case "viewFileDiff": await this._viewFileDiff(msg); break;
+                case "viewPendingFileDiff": await this._viewPendingFileDiff(msg); break;
+                case "rollback": await this._handleRollback(msg); break;
+                // The one remaining cross-env navigation — "deploy succeeded, N stories ready in
+                // the next stage" — rebinds this same panel to that env rather than switching a
+                // pre-rendered tab, so it stays true to "bound to exactly what was requested,"
+                // even though that request now originates from inside the panel itself.
+                case "rebind": if (msg.env) { this._boundEnv = msg.env; await this.refresh(); } break;
             }
         }, null, this._disposables);
 
@@ -252,7 +252,7 @@ export class DeploymentDashboardPanel {
         summary: string,
         testLevel: string,
         tests?: string[],
-        progress?: vscode.Progress<{ message?: string }>
+        onProgress?: (status: string) => void
     ): Promise<DeployResult> {
         const { xml: packageXml, unmapped } = buildPackageXml(files);
 
@@ -265,7 +265,7 @@ export class DeploymentDashboardPanel {
             getDeployTimeoutSeconds(),
             mode,
             tests,
-            status => progress?.report({ message: status })
+            onProgress
         );
 
         if (result.success && mode === "deploy") {
@@ -303,7 +303,7 @@ export class DeploymentDashboardPanel {
         summary: string,
         testLevel: string,
         tests?: string[],
-        progress?: vscode.Progress<{ message?: string }>
+        onProgress?: (status: string) => void
     ): Promise<DeployResult> {
         const demoAlias = getDemoOrgAlias();
         const { xml: packageXml, unmapped } = buildPackageXml(files);
@@ -317,7 +317,7 @@ export class DeploymentDashboardPanel {
             getDeployTimeoutSeconds(),
             "deploy",
             tests,
-            status => progress?.report({ message: `[Demo] ${status}` })
+            onProgress ? (status => onProgress(`[Demo] ${status}`)) : undefined
         );
 
         await this._gitHelper.appendAudit({
@@ -501,12 +501,74 @@ export class DeploymentDashboardPanel {
         // actually assigns it), so this uses a wrapper object instead of relying on that.
         const cleanupPrompt: { value: { env: ResolvedEnvironment; storyIds: string[] } | null } = { value: null };
 
+        // Build the ordered step list so the webview stepper knows what's coming.
+        // Steps vary by mode (conflicts only on real deploy) and whether there's Apex to test.
+        const hasApexFiles = tests && tests.length > 0;
+        const jobSteps = [
+            { id: 'checkout',   label: 'Branch ready' },
+            ...(requestedMode === "deploy" ? [{ id: 'conflicts', label: 'Conflicts' }] : []),
+            { id: 'submit',     label: 'Job submitted' },
+            { id: 'components', label: 'Components' },
+            ...(hasApexFiles || testLevel !== "NoTestRun" ? [{ id: 'tests', label: 'Tests' }] : []),
+            { id: 'done',       label: 'Done' },
+        ];
+
+        /** Sends a progress snapshot to the webview — drives the step stepper + progress bar. */
+        const broadcastProgress = (activeStep: string, message: string, done: number, total: number, completedSteps: string[]) => {
+            this._panel.webview.postMessage({
+                command: 'progressUpdate',
+                env: env.name,
+                steps: jobSteps,
+                activeStep,
+                message,
+                done,
+                total,
+                completedSteps: [...completedSteps],
+            });
+        };
+
+        /** Wraps the string-based onProgress callback from runDeploy into structured step events. */
+        const buildOnProgress = (vsProgress: vscode.Progress<{ message?: string }>, completedStepsRef: { list: string[] }, currentStepRef: { value: string }) =>
+            (status: string) => {
+                vsProgress.report({ message: status });
+                let step = currentStepRef.value;
+                const m = status.match(/(\d+)\/(\d+)/g);
+                const firstPair = status.match(/(\d+)\/(\d+)/);
+                const done  = firstPair ? parseInt(firstPair[1], 10) : 0;
+                const total = firstPair ? parseInt(firstPair[2], 10) : 0;
+
+                if (/conflict/i.test(status)) {
+                    step = 'conflicts';
+                } else if (/Starting/i.test(status) || /Pending/i.test(status)) {
+                    if (!completedStepsRef.list.includes('conflicts')) { completedStepsRef.list.push('conflicts'); }
+                    step = 'submit';
+                } else if (/component/i.test(status)) {
+                    if (!completedStepsRef.list.includes('submit')) { completedStepsRef.list.push('submit'); }
+                    step = 'components';
+                } else if (/test/i.test(status)) {
+                    if (!completedStepsRef.list.includes('components')) { completedStepsRef.list.push('components'); }
+                    step = 'tests';
+                } else if (/Succeeded|Failed|Canceled/i.test(status)) {
+                    step = 'done';
+                }
+                currentStepRef.value = step;
+                broadcastProgress(step, status, done, total, completedStepsRef.list);
+            };
+
         await vscode.window.withProgress(
             { location: vscode.ProgressLocation.Notification, title: `${requestedMode === "deploy" ? "Deploying" : "Validating"} against ${env.label}...`, cancellable: false },
             async (progress) => {
                 try {
+                    const completedSteps: { list: string[] } = { list: [] };
+                    const currentStep: { value: string } = { value: 'checkout' };
+
+                    broadcastProgress('checkout', `Switching to origin/${env.branch}…`, 0, 0, []);
                     progress.report({ message: `Switching local checkout to origin/${env.branch} and pulling latest...` });
                     await this._gitHelper.createLocalBranchFrom(env.branch, env.branch);
+                    completedSteps.list.push('checkout');
+                    broadcastProgress('submit', 'Branch ready — submitting job…', 0, 0, completedSteps.list);
+
+                    const onProg = buildOnProgress(progress, completedSteps, currentStep);
 
                     // Parallel Prod+Demo deploy: genuinely concurrent (Promise.all), not one
                     // after the other — both real `sf project deploy` processes running at
@@ -515,8 +577,8 @@ export class DeploymentDashboardPanel {
                     // already forces auto-deploy off regardless of this checkbox).
                     const runDemoInParallel = requestedMode === "deploy" && env.isProd && Boolean(msg.deployToDemo) && Boolean(getDemoOrgAlias());
                     const [first, demoResult] = await Promise.all([
-                        this._executeStep(env, requestedMode, selection, files, summary, testLevel, tests, progress),
-                        runDemoInParallel ? this._executeDemoStep(selection, files, summary, testLevel, tests, progress) : Promise.resolve(null),
+                        this._executeStep(env, requestedMode, selection, files, summary, testLevel, tests, onProg),
+                        runDemoInParallel ? this._executeDemoStep(selection, files, summary, testLevel, tests, onProg) : Promise.resolve(null),
                     ]);
 
                     // Reported independently of Prod's own outcome below — a Demo failure
@@ -536,7 +598,10 @@ export class DeploymentDashboardPanel {
 
                     if (requestedMode === "validate" && first.success && autoDeployRequested) {
                         log(`Validate passed — auto-deploying to ${env.label} (auto-deploy enabled)…`);
-                        const second = await this._executeStep(env, "deploy", selection, files, summary, testLevel, tests, progress);
+                        completedSteps.list = ['checkout', 'conflicts', 'submit', 'components'].filter(s => jobSteps.some(j => j.id === s));
+                        const deployProg = buildOnProgress(progress, completedSteps, currentStep);
+                        broadcastProgress('submit', 'Validate passed — starting deploy…', 0, 0, completedSteps.list);
+                        const second = await this._executeStep(env, "deploy", selection, files, summary, testLevel, tests, deployProg);
                         if (second.success) { this._validatedSelections.delete(env.name); }
                         this._lastOutcome = second.success
                             ? {
@@ -705,7 +770,22 @@ export class DeploymentDashboardPanel {
                 { location: vscode.ProgressLocation.Notification, title: `Rolling back ${env.label} to ${lastDeploy.sha.slice(0, 8)}…`, cancellable: false },
                 async (progress) => {
                     progress.report({ message: `Checking out snapshot ${lastDeploy.sha.slice(0, 8)}…` });
+                    this._panel.webview.postMessage({ command: 'progressUpdate', env: env.name,
+                        steps: [{ id: 'checkout', label: 'Snapshot' }, { id: 'components', label: 'Components' }, { id: 'done', label: 'Done' }],
+                        activeStep: 'checkout', message: `Checking out ${lastDeploy.sha.slice(0, 8)}…`, done: 0, total: 0, completedSteps: [] });
                     await this._gitHelper.createTempBranchAtSha(lastDeploy.sha, tempBranch);
+
+                    const rollbackCompleted: { list: string[] } = { list: ['checkout'] };
+                    const rollbackCurrent: { value: string } = { value: 'components' };
+                    const rollbackOnProg = (status: string) => {
+                        progress.report({ message: status });
+                        const m = status.match(/(\d+)\/(\d+)/);
+                        const done = m ? parseInt(m[1], 10) : 0;
+                        const total = m ? parseInt(m[2], 10) : 0;
+                        this._panel.webview.postMessage({ command: 'progressUpdate', env: env.name,
+                            steps: [{ id: 'checkout', label: 'Snapshot' }, { id: 'components', label: 'Components' }, { id: 'done', label: 'Done' }],
+                            activeStep: 'components', message: status, done, total, completedSteps: rollbackCompleted.list });
+                    };
 
                     const result = await this._executeStep(
                         env, "deploy",
@@ -714,7 +794,7 @@ export class DeploymentDashboardPanel {
                         `Rollback ${env.label} to ${lastDeploy.sha.slice(0, 8)}`,
                         "NoTestRun",
                         undefined,
-                        progress
+                        rollbackOnProg
                     );
 
                     if (result.success) {
@@ -773,7 +853,7 @@ export class DeploymentDashboardPanel {
     }
 
     private _loadingHtml(): string {
-        return `<!DOCTYPE html><html><body style="font-family:sans-serif;padding:24px;color:#888">Loading deployment status…</body></html>`;
+        return loadingHtml("Loading deployment dashboard…");
     }
 
     private _renderHtml(model: EnvViewModel): string {
@@ -790,109 +870,139 @@ export class DeploymentDashboardPanel {
 <html>
 <head>
 <meta charset="utf-8">
+${cspMeta(this._panel.webview)}
 <style>
-  :root { --bg:#1e1e1e; --fg:#e0e0e0; --card:#252526; --border:#3c3c3c; --muted:#999; --accent:#4fc3f7; --err:#ff6b6b; --ok:#7cd992; }
-  @media (prefers-color-scheme: light) {
-    :root { --bg:#ffffff; --fg:#1a1a1a; --card:#f5f5f5; --border:#ddd; --muted:#666; --accent:#0078d4; --err:#c62828; --ok:#1b6b2f; }
-  }
+${sharedCss()}
   * { box-sizing: border-box; }
-  body { background: var(--bg); color: var(--fg); font-family: -apple-system, Segoe UI, sans-serif; font-size: 13px; margin: 0; padding: 0 24px 60px; max-width: 1500px; }
+  body { background: var(--vscode-editor-background); color: var(--vscode-foreground); font-family: -apple-system, Segoe UI, sans-serif; font-size: 13px; margin: 0; padding: 0 24px 60px; max-width: 1500px; }
   h1 { font-size: 20px; margin: 0; padding: 20px 0 4px; }
   h2 { font-size: 16px; margin: 0 0 8px; display: flex; align-items: center; gap: 8px; }
-  .sub { color: var(--muted); font-size: 12px; margin-bottom: 16px; }
-  .notice { background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; font-size: 13px; }
-  .notice.muted { border-left-color: var(--muted); color: var(--muted); }
+  .sub { color: var(--vscode-descriptionForeground); font-size: 12px; margin-bottom: 16px; }
+  .notice { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-left: 3px solid var(--vscode-button-background); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; font-size: 13px; }
+  .notice.muted { border-left-color: var(--vscode-descriptionForeground); color: var(--vscode-descriptionForeground); }
 
   .pane { display: block; }
-  section.env { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; margin-bottom: 24px; }
-  .meta { color: var(--muted); font-size: 12px; margin-bottom: 12px; }
+  section.env { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 10px; padding: 16px 20px; margin-bottom: 24px; }
+  .meta { color: var(--vscode-descriptionForeground); font-size: 12px; margin-bottom: 12px; }
 
-  .outcome { border-radius: 6px; padding: 8px 12px; margin: 8px 0; font-size: 13px; border: 1px solid var(--border); }
+  .outcome { border-radius: 6px; padding: 8px 12px; margin: 8px 0; font-size: 13px; border: 1px solid var(--vscode-panel-border); }
   .outcome a { color: inherit; font-weight: 600; text-decoration: underline; margin-left: 4px; cursor: pointer; }
-  .outcome-validatePassed, .outcome-deploySucceeded { background: #2e7d3222; border-color: var(--ok); color: var(--ok); }
-  .outcome-validateFailed, .outcome-deployFailed { background: #c6282822; border-color: var(--err); color: var(--err); }
+  .outcome-validatePassed, .outcome-deploySucceeded { background: #2e7d3222; border-color: var(--vscode-charts-green,#4caf50); color: var(--vscode-charts-green,#4caf50); }
+  .outcome-validateFailed, .outcome-deployFailed { background: #c6282822; border-color: var(--vscode-errorForeground,#f44747); color: var(--vscode-errorForeground,#f44747); }
 
   .split { display: flex; gap: 16px; margin-top: 12px; }
   .split-left { flex: 0 0 35%; min-width: 260px; max-height: 62vh; overflow-y: auto; padding-right: 4px; }
-  .split-right { flex: 1 1 65%; min-width: 320px; max-height: 62vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+  .split-right { flex: 1 1 65%; min-width: 320px; max-height: 62vh; overflow-y: auto; border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px; }
 
-  .story-filter { width: 100%; font-size: 12px; padding: 5px 6px; margin-bottom: 8px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; }
+  .story-filter { width: 100%; font-size: 12px; padding: 5px 6px; margin-bottom: 8px; background: var(--vscode-editor-background); color: var(--vscode-foreground); border: 1px solid var(--vscode-panel-border); border-radius: 4px; }
   .select-row { font-size: 11px; margin-bottom: 6px; }
-  .select-row a { color: var(--accent); cursor: pointer; text-decoration: none; }
+  .select-row a { color: var(--vscode-button-background); cursor: pointer; text-decoration: none; }
   .select-row a:hover { text-decoration: underline; }
-  .tree-controls { display: flex; align-items: center; justify-content: space-between; font-size: 11px; margin-bottom: 8px; color: var(--muted); gap: 8px; }
+  .tree-controls { display: flex; align-items: center; justify-content: space-between; font-size: 11px; margin-bottom: 8px; color: var(--vscode-descriptionForeground); gap: 8px; }
   .tree-controls label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
-  .sort-select { font-size: 11px; padding: 2px 4px; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 3px; }
+  .sort-select { font-size: 11px; padding: 2px 4px; background: var(--vscode-editor-background); color: var(--vscode-foreground); border: 1px solid var(--vscode-panel-border); border-radius: 3px; }
   .tree.hide-meta .meta-file { display: none; }
-  .selection-summary { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+  .selection-summary { font-size: 11px; color: var(--vscode-descriptionForeground); margin-bottom: 8px; }
 
   .type-group { margin-bottom: 6px; }
   .type-group summary { cursor: pointer; font-weight: 600; font-size: 12px; padding: 3px 0; }
   ul.files { list-style: none; margin: 4px 0 4px 8px; padding: 0; font-size: 12px; }
   ul.files li { padding: 2px 0; display: flex; align-items: center; gap: 6px; }
   ul.files li.clickable { cursor: pointer; }
-  ul.files li.clickable:hover { color: var(--accent); }
+  ul.files li.clickable:hover { color: var(--vscode-button-background); }
   .tree-row input[type=checkbox] { flex-shrink: 0; }
   .file-path { flex: 1; word-break: break-all; }
   .file-path.clickable { cursor: pointer; }
-  .file-path.clickable:hover { color: var(--accent); text-decoration: underline; }
-  .story-badge { font-size: 10px; color: var(--muted); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; flex-shrink: 0; }
+  .file-path.clickable:hover { color: var(--vscode-button-background); text-decoration: underline; }
+  .story-badge { font-size: 10px; color: var(--vscode-descriptionForeground); border: 1px solid var(--vscode-panel-border); border-radius: 3px; padding: 0 4px; flex-shrink: 0; }
 
   .change { font-size: 10px; text-transform: uppercase; border-radius: 3px; padding: 1px 5px; flex-shrink: 0; opacity: 0.8; }
   .change.added { background: #2e7d3222; color: #4caf50; }
   .change.modified { background: #f9a82522; color: #ffa726; }
-  .change.deleted { background: #c6282822; color: var(--err); }
+  .change.deleted { background: #c6282822; color: var(--vscode-errorForeground,#f44747); }
 
-  .group { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; }
+  .group { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; }
   .group-head { display: flex; align-items: center; gap: 8px; font-weight: 600; }
-  .shared { font-size: 11px; color: var(--err); margin-left: 6px; font-weight: normal; }
+  .shared { font-size: 11px; color: var(--vscode-errorForeground,#f44747); margin-left: 6px; font-weight: normal; }
 
-  .busy-bar {
-    margin-top: 14px; padding: 8px 12px; border-radius: 6px; font-size: 12.5px;
-    background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid var(--accent);
-    color: var(--fg); display: flex; align-items: center; gap: 8px;
+  /* ── Step stepper ── */
+  .stepper { display: flex; align-items: center; gap: 0; margin-top: 14px; flex-wrap: wrap; }
+  .step { display: flex; align-items: center; gap: 0; }
+  .step-box {
+    display: flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 500;
+    padding: 5px 11px; border-radius: 5px; border: 1px solid var(--vscode-panel-border);
+    background: var(--vscode-editor-background); color: var(--vscode-descriptionForeground); white-space: nowrap;
+    transition: background 0.2s, color 0.2s, border-color 0.2s;
   }
-  .busy-bar .spin { display: inline-block; animation: salesforce-devops-spin 1s linear infinite; }
+  .step-box.done { border-color: var(--vscode-charts-green,#4caf50); background: color-mix(in srgb, var(--vscode-charts-green,#4caf50) 10%, var(--vscode-editor-background)); color: var(--vscode-charts-green,#4caf50); }
+  .step-box.active {
+    border-color: var(--vscode-button-background); background: color-mix(in srgb, var(--vscode-button-background) 15%, var(--vscode-editor-background));
+    color: var(--vscode-foreground); font-weight: 600; box-shadow: 0 0 0 2px color-mix(in srgb, var(--vscode-button-background) 25%, transparent);
+  }
+  .step-box.pending { opacity: 0.5; }
+  .step-icon { font-size: 13px; flex-shrink: 0; }
+  .step-arrow { color: var(--vscode-descriptionForeground); padding: 0 5px; font-size: 12px; flex-shrink: 0; }
+  .step-pct { font-size: 10px; font-variant-numeric: tabular-nums; color: var(--vscode-charts-green,#4caf50); margin-left: 2px; }
+
+  /* ── Progress bar (inside active step) ── */
+  .step-bar-wrap { margin-top: 6px; }
+  .step-bar-track { height: 3px; background: var(--vscode-panel-border); border-radius: 2px; overflow: hidden; }
+  .step-bar-fill { height: 100%; background: var(--vscode-button-background); border-radius: 2px; transition: width 0.7s cubic-bezier(.4,0,.2,1); min-width: 0; }
+  .step-bar-label { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 3px; }
+
+  .busy-wrap { margin-top: 14px; }
+  .busy-bar {
+    padding: 9px 14px; border-radius: 6px 6px 0 0; font-size: 12.5px;
+    background: color-mix(in srgb, var(--vscode-button-background) 12%, transparent); border: 1px solid var(--vscode-button-background);
+    border-bottom: none;
+    color: var(--vscode-foreground); display: flex; align-items: center; gap: 8px;
+  }
+  .busy-bar .spin { display: inline-block; animation: salesforce-devops-spin 1s linear infinite; flex-shrink: 0; }
   @keyframes salesforce-devops-spin { to { transform: rotate(360deg); } }
+  .busy-bar .busy-msg { flex: 1; font-weight: 500; }
+  .busy-bar .busy-pct { flex-shrink: 0; font-variant-numeric: tabular-nums; font-size: 12px; opacity: 0.8; min-width: 36px; text-align: right; }
+  .busy-track { height: 4px; background: var(--vscode-panel-border); border-radius: 0 0 6px 6px; border: 1px solid var(--vscode-button-background); border-top: none; overflow: hidden; }
+  .busy-fill { height: 100%; background: var(--vscode-button-background); border-radius: 0 0 6px 6px; transition: width 0.7s cubic-bezier(.4,0,.2,1); }
+  .busy-detail { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 4px; padding: 0 2px; min-height: 15px; }
   .deploy-row { display: flex; align-items: center; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
   .auto-deploy-label { font-size: 12px; display: flex; align-items: center; gap: 6px; }
   .auto-deploy-label .meta { margin: 0; }
 
-  .tests-panel { border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin-top: 14px; background: color-mix(in srgb, var(--accent) 6%, var(--card)); }
+  .tests-panel { border: 1px solid var(--vscode-panel-border); border-radius: 8px; padding: 10px 14px; margin-top: 14px; background: color-mix(in srgb, var(--vscode-button-background) 6%, var(--vscode-editor-background)); }
   .tests-panel-head { font-weight: 600; font-size: 12.5px; margin-bottom: 6px; }
   .tests-mode-row { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; margin-bottom: 6px; }
   .tests-mode-row label { display: flex; align-items: center; gap: 5px; cursor: pointer; }
-  .tests-detail { font-size: 12px; color: var(--muted); }
-  .tests-detail .test-chip { display: inline-block; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; margin: 2px 4px 2px 0; font-size: 11px; color: var(--ok); }
-  .tests-detail .test-missing { color: var(--err); }
+  .tests-detail { font-size: 12px; color: var(--vscode-descriptionForeground); }
+  .tests-detail .test-chip { display: inline-block; background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 10px; padding: 1px 8px; margin: 2px 4px 2px 0; font-size: 11px; color: var(--vscode-charts-green,#4caf50); }
+  .tests-detail .test-missing { color: var(--vscode-errorForeground,#f44747); }
 
   .actions { display: flex; gap: 8px; margin-top: 12px; }
   .btn { font-size: 12px; padding: 7px 14px; border-radius: 6px; border: none; cursor: pointer; }
-  .btn-primary { background: #0078d4; color: white; }
-  .btn-primary.btn-highlight { box-shadow: 0 0 0 2px var(--ok); }
-  .btn-secondary { background: transparent; border: 1px solid var(--border); color: var(--fg); }
+  .btn-primary { background: var(--vscode-button-background); color: white; }
+  .btn-primary.btn-highlight { box-shadow: 0 0 0 2px var(--vscode-charts-green,#4caf50); }
+  .btn-secondary { background: transparent; border: 1px solid var(--vscode-panel-border); color: var(--vscode-foreground); }
   .btn:disabled { opacity: 0.4; cursor: default; }
   .warn { color: #ffab70; font-size: 12px; margin-top: 8px; }
   details.diff { margin-top: 14px; }
   details.diff summary { cursor: pointer; font-weight: 600; }
-  pre.manifest { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; overflow-x: auto; font-size: 11px; max-height: 220px; }
+  pre.manifest { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 8px; overflow-x: auto; font-size: 11px; max-height: 220px; }
 
   .diffTitle { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
   .diffMeta { margin-bottom: 6px; }
   .diffStat { font-size: 12px; margin: 2px 0 10px; }
-  .diffStat .plus { color: var(--ok); }
-  .diffStat .minus { color: var(--err); }
+  .diffStat .plus { color: var(--vscode-charts-green,#4caf50); }
+  .diffStat .minus { color: var(--vscode-errorForeground,#f44747); }
   .diffBody { font-family: var(--vscode-editor-font-family, "SF Mono", Consolas, monospace); font-size: 12px; }
   .diffline { display: flex; white-space: pre; }
-  .diffline .gutter { flex: 0 0 88px; text-align: right; padding: 0 10px; color: var(--muted); opacity: 0.7; user-select: none; border-right: 1px solid var(--border); }
+  .diffline .gutter { flex: 0 0 88px; text-align: right; padding: 0 10px; color: var(--vscode-descriptionForeground); opacity: 0.7; user-select: none; border-right: 1px solid var(--vscode-panel-border); }
   .diffline .marker { flex: 0 0 18px; text-align: center; opacity: 0.8; user-select: none; }
   .diffline .txt { flex: 1; padding-right: 12px; overflow-x: visible; }
   .diffline.diff-add { background: #2e7d3222; }
   .diffline.diff-add .marker, .diffline.diff-add .txt { color: #4caf50; }
   .diffline.diff-del { background: #c6282822; }
-  .diffline.diff-del .marker, .diffline.diff-del .txt { color: var(--err); }
-  .diffline.diff-same .txt { color: var(--fg); opacity: 0.85; }
-  .diffline.diff-context { justify-content: center; color: var(--muted); padding: 2px 0; font-size: 11px; }
+  .diffline.diff-del .marker, .diffline.diff-del .txt { color: var(--vscode-errorForeground,#f44747); }
+  .diffline.diff-same .txt { color: var(--vscode-foreground); opacity: 0.85; }
+  .diffline.diff-context { justify-content: center; color: var(--vscode-descriptionForeground); padding: 2px 0; font-size: 11px; }
 </style>
 </head>
 <body>
@@ -1080,17 +1190,44 @@ ${envPane}
   // timeout only guards the pathological case where that refresh never arrives at all.
   var BUSY_TIMEOUT_MS = 20 * 60 * 1000;
   var busyTimeouts = {};
+
+  function parsePct(msg) {
+    if (/succeeded|complete/i.test(msg)) { return 100; }
+    var m = msg.match(/(\d+)\/(\d+)/);
+    if (!m) { return -1; }
+    var done = parseInt(m[1], 10), total = parseInt(m[2], 10);
+    return total > 0 ? Math.min(95, Math.round(done / total * 100)) : -1;
+  }
+
   function showBusy(env, label) {
-    var bar = document.getElementById('busyBar-' + env);
-    if (bar) { bar.hidden = false; bar.innerHTML = '<span class="spin">&#9696;</span> ' + escapeHtmlJs(label); }
+    var wrap = document.getElementById('busyWrap-' + env);
+    var stepperEl = document.getElementById('stepper-' + env);
+    var barWrapEl = document.getElementById('stepBarWrap-' + env);
+    var msgEl = document.getElementById('busyMsg-' + env);
+    var pctEl = document.getElementById('busyPct-' + env);
+    var fillEl = document.getElementById('busyFill-' + env);
+    var detailEl = document.getElementById('busyDetail-' + env);
+    if (wrap) { wrap.hidden = false; }
+    // Stepper and bar will appear once the first progressUpdate message arrives
+    if (stepperEl) { stepperEl.innerHTML = ''; stepperEl.hidden = true; }
+    if (barWrapEl) { barWrapEl.hidden = true; }
+    if (msgEl) { msgEl.textContent = label; }
+    if (pctEl) { pctEl.textContent = ''; }
+    if (fillEl) { fillEl.style.width = '4%'; }
+    if (detailEl) { detailEl.textContent = ''; }
     var validateBtn = document.getElementById('validateBtn-' + env);
     var deployBtn = document.getElementById('deployBtn-' + env);
+    var rollbackBtn = document.getElementById('rollbackBtn-' + env);
     if (validateBtn) { validateBtn.disabled = true; }
     if (deployBtn) { deployBtn.disabled = true; }
+    if (rollbackBtn) { rollbackBtn.disabled = true; }
     clearTimeout(busyTimeouts[env]);
     busyTimeouts[env] = setTimeout(function () {
-      if (bar) { bar.hidden = true; }
+      if (wrap) { wrap.hidden = true; }
+      if (stepperEl) { stepperEl.hidden = true; }
+      if (barWrapEl) { barWrapEl.hidden = true; }
       if (validateBtn) { validateBtn.disabled = false; }
+      if (rollbackBtn) { rollbackBtn.disabled = false; }
       updateDeployButtonState(env);
     }, BUSY_TIMEOUT_MS);
   }
@@ -1204,8 +1341,68 @@ ${envPane}
 
   function splitLines(text) { return text.length ? text.split('\\n') : []; }
 
+  function renderStepper(env, steps, activeStep, completedSteps) {
+    var el = document.getElementById('stepper-' + env);
+    if (!el) { return; }
+    var html = '<div class="stepper">';
+    steps.forEach(function (step, i) {
+      var isDone = completedSteps.indexOf(step.id) !== -1;
+      var isActive = step.id === activeStep && !isDone;
+      var cls = isDone ? 'done' : (isActive ? 'active' : 'pending');
+      var icon = isDone ? '✅' : (isActive ? '▶' : '○');
+      html += '<div class="step">';
+      if (i > 0) { html += '<span class="step-arrow">›</span>'; }
+      html += '<div class="step-box ' + cls + '"><span class="step-icon">' + icon + '</span>' + escapeHtmlJs(step.label) + '</div>';
+      html += '</div>';
+    });
+    html += '</div>';
+    el.innerHTML = html;
+    el.hidden = false;
+  }
+
   window.addEventListener('message', function (event) {
     const msg = event.data;
+
+    if (msg.command === 'progressUpdate') {
+      var env = msg.env;
+      var steps = msg.steps || [];
+      var activeStep = msg.activeStep || '';
+      var completedSteps = msg.completedSteps || [];
+      var done = msg.done || 0;
+      var total = msg.total || 0;
+
+      // Render step stepper
+      renderStepper(env, steps, activeStep, completedSteps);
+
+      // Progress bar
+      var barWrap = document.getElementById('stepBarWrap-' + env);
+      var barFill = document.getElementById('stepBarFill-' + env);
+      var barLabel = document.getElementById('stepBarLabel-' + env);
+      if (barWrap) { barWrap.hidden = false; }
+      if (barFill && total > 0) {
+        var pct = Math.min(95, Math.round(done / total * 100));
+        barFill.style.width = pct + '%';
+        if (barLabel) {
+          barLabel.textContent = done + ' / ' + total + ' (' + pct + '%) — ' + msg.message;
+        }
+      } else if (barFill) {
+        barFill.style.width = '4%';
+        if (barLabel) { barLabel.textContent = msg.message; }
+      }
+
+      // Update busy bar text too
+      var msgEl = document.getElementById('busyMsg-' + env);
+      if (msgEl) {
+        var parts = msg.message.split(' — ');
+        msgEl.textContent = parts[0];
+      }
+      var detailEl = document.getElementById('busyDetail-' + env);
+      if (detailEl && msg.message.indexOf(' — ') !== -1) {
+        detailEl.textContent = msg.message.split(' — ').slice(1).join(' — ');
+      }
+      return;
+    }
+
     if (msg.command === 'fileDiffResult') {
       var titleEl = document.getElementById('diffTitle-' + msg.targetEnv);
       var metaEl  = document.getElementById('diffMeta-' + msg.targetEnv);
@@ -1437,7 +1634,23 @@ ${envPane}
 
   ${testsPanel}
 
-  <div class="busy-bar" id="busyBar-${env.name}" hidden></div>
+  <div id="stepper-${env.name}" hidden></div>
+  <div id="stepBarWrap-${env.name}" hidden>
+    <div class="step-bar-wrap">
+      <div class="step-bar-track"><div class="step-bar-fill" id="stepBarFill-${env.name}" style="width:4%"></div></div>
+      <div class="step-bar-label" id="stepBarLabel-${env.name}"></div>
+    </div>
+  </div>
+
+  <div class="busy-wrap" id="busyWrap-${env.name}" hidden>
+    <div class="busy-bar">
+      <span class="spin">&#9696;</span>
+      <span class="busy-msg" id="busyMsg-${env.name}">Working…</span>
+      <span class="busy-pct" id="busyPct-${env.name}"></span>
+    </div>
+    <div class="busy-track"><div class="busy-fill" id="busyFill-${env.name}" style="width:4%"></div></div>
+    <div class="busy-detail" id="busyDetail-${env.name}"></div>
+  </div>
 
   <div class="deploy-row">
     <label class="auto-deploy-label" title="${env.isProd ? "Prod always requires a manual Deploy click, regardless of this checkbox." : "If Validate succeeds, immediately run a real Deploy with the same selection."}">
@@ -1451,7 +1664,7 @@ ${envPane}
     </label>` : ""}
     <button class="btn btn-secondary" id="validateBtn-${env.name}" ${disabled} onclick="runAction('${env.name}','validate')">🔍 Validate</button>
     <button class="btn btn-primary" id="deployBtn-${env.name}" data-hard-disabled="${disabled ? "1" : "0"}" disabled title="Run Validate on this exact selection first">🚀 Deploy</button>
-    ${m.lastDeploy && m.canDeploy ? `<button class="btn btn-secondary" title="Redeploy the entire source at the last-deployed commit (${m.lastDeploy.sha.slice(0,8)}) to roll back a bad promotion" onclick="rollback('${env.name}')">↩ Rollback</button>` : ""}
+    ${m.lastDeploy && m.canDeploy ? `<button class="btn btn-secondary" id="rollbackBtn-${env.name}" title="Redeploy the entire source at the last-deployed commit (${m.lastDeploy.sha.slice(0,8)}) to roll back a bad promotion" onclick="rollback('${env.name}')">↩ Rollback</button>` : ""}
   </div>
 </section>
 </div>`;

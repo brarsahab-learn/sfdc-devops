@@ -7,6 +7,7 @@ import * as vscode from "vscode";
 import { GitHelper } from "../GitHelper";
 import { getPromotableEnvironments, getPublishEnvironment, buildTicketUrl, getStaleStoryThresholdDays, extractStoryId, getTicketKeyPattern } from "../config";
 import { storyIdFromMessage } from "../DeploymentPlanner";
+import { sharedCss, cspMeta, loadingHtml } from "../ui/shared";
 
 interface StoryCard {
     storyId:      string;
@@ -88,9 +89,16 @@ export class StoryPipelinePanel {
         while (this._disposables.length) { this._disposables.pop()?.dispose(); }
     }
 
+    private _refreshing = false;
     private async _refresh(): Promise<void> {
-        const cards = await this._buildCards();
-        this._panel.webview.html = this._renderHtml(cards);
+        if (this._refreshing) { return; }
+        this._refreshing = true;
+        try {
+            const cards = await this._buildCards();
+            this._panel.webview.html = this._renderHtml(cards);
+        } finally {
+            this._refreshing = false;
+        }
     }
 
     private async _buildCards(): Promise<StoryCard[]> {
@@ -155,7 +163,7 @@ export class StoryPipelinePanel {
     }
 
     private _loadingHtml(): string {
-        return `<!DOCTYPE html><html><body style="font-family:sans-serif;padding:24px;color:#888">Loading pipeline…</body></html>`;
+        return loadingHtml("Loading pipeline…");
     }
 
     private _renderHtml(cards: StoryCard[]): string {
@@ -227,55 +235,53 @@ export class StoryPipelinePanel {
 <html>
 <head>
 <meta charset="utf-8">
+${cspMeta(this._panel.webview)}
 <style>
-  :root { --bg:#1e1e1e; --fg:#e0e0e0; --card:#252526; --border:#3c3c3c; --muted:#999; --accent:#4fc3f7; --ok:#7cd992; --warn:#ffab70; }
-  @media (prefers-color-scheme: light) {
-    :root { --bg:#ffffff; --fg:#1a1a1a; --card:#f5f5f5; --border:#ddd; --muted:#666; --accent:#0078d4; --ok:#1b6b2f; --warn:#a05000; }
-  }
+  ${sharedCss()}
   * { box-sizing: border-box; }
-  body { background: var(--bg); color: var(--fg); font-family: -apple-system, Segoe UI, sans-serif; font-size: 13px; margin: 0; padding: 16px 24px 60px; }
+  body { background: var(--vscode-editor-background); color: var(--vscode-foreground); font-family: -apple-system, Segoe UI, sans-serif; font-size: 13px; margin: 0; padding: 16px 24px 60px; }
   h1 { font-size: 18px; margin: 0 0 4px; }
   .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
-  .view-btn { font-size: 12px; padding: 4px 12px; border-radius: 5px; border: 1px solid var(--border); cursor: pointer; background: transparent; color: var(--fg); }
-  .view-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-  .refresh-btn { font-size: 12px; padding: 4px 10px; border-radius: 5px; border: 1px solid var(--border); cursor: pointer; background: transparent; color: var(--muted); }
-  .muted { color: var(--muted); font-size: 12px; }
-  .count { font-size: 11px; background: var(--border); border-radius: 8px; padding: 1px 6px; }
+  .view-btn { font-size: 12px; padding: 4px 12px; border-radius: 5px; border: 1px solid var(--vscode-panel-border); cursor: pointer; background: transparent; color: var(--vscode-foreground); }
+  .view-btn.active { background: var(--vscode-button-background); color: #fff; border-color: var(--vscode-button-background); }
+  .refresh-btn { font-size: 12px; padding: 4px 10px; border-radius: 5px; border: 1px solid var(--vscode-panel-border); cursor: pointer; background: transparent; color: var(--vscode-descriptionForeground); }
+  .muted { color: var(--vscode-descriptionForeground); font-size: 12px; }
+  .count { font-size: 11px; background: var(--vscode-panel-border); border-radius: 8px; padding: 1px 6px; }
   .filter-row { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
-  .filter-row input, .filter-row select { background: var(--card); color: var(--fg); border: 1px solid var(--border); border-radius: 5px; padding: 5px 10px; font-size: 12px; }
+  .filter-row input, .filter-row select { background: var(--vscode-editor-background); color: var(--vscode-foreground); border: 1px solid var(--vscode-panel-border); border-radius: 5px; padding: 5px 10px; font-size: 12px; }
   .filter-row input { flex: 1; min-width: 120px; }
   .hidden { display: none !important; }
 
   /* Swimlane */
-  .swimlane { margin-bottom: 12px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-  .lane-label { padding: 7px 12px; font-weight: 600; font-size: 12px; background: color-mix(in srgb, var(--accent) 10%, var(--card)); border-bottom: 1px solid var(--border); }
+  .swimlane { margin-bottom: 12px; border: 1px solid var(--vscode-panel-border); border-radius: 8px; overflow: hidden; }
+  .lane-label { padding: 7px 12px; font-weight: 600; font-size: 12px; background: color-mix(in srgb, var(--vscode-button-background) 10%, var(--vscode-editor-background)); border-bottom: 1px solid var(--vscode-panel-border); }
   .lane-cards { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 12px; min-height: 52px; }
 
   /* Kanban */
   .kanban { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 8px; }
-  .kol { flex: 0 0 200px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-  .kol-head { padding: 7px 10px; font-weight: 600; font-size: 12px; background: color-mix(in srgb, var(--accent) 10%, var(--card)); border-bottom: 1px solid var(--border); }
+  .kol { flex: 0 0 200px; border: 1px solid var(--vscode-panel-border); border-radius: 8px; overflow: hidden; }
+  .kol-head { padding: 7px 10px; font-weight: 600; font-size: 12px; background: color-mix(in srgb, var(--vscode-button-background) 10%, var(--vscode-editor-background)); border-bottom: 1px solid var(--vscode-panel-border); }
   .kol-body { padding: 8px; min-height: 80px; display: flex; flex-direction: column; gap: 6px; }
 
   /* Card */
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 7px 10px; font-size: 12px; min-width: 140px; }
-  .card.stale { border-color: var(--warn); }
+  .card { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 7px 10px; font-size: 12px; min-width: 140px; }
+  .card.stale { border-color: var(--vscode-notificationsWarningIcon-foreground,#e6a817); }
   .card-head { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
-  .card-meta { color: var(--muted); font-size: 11px; margin-top: 3px; word-break: break-all; }
-  .story-id { font-weight: 600; color: var(--accent); }
-  .ticket-link { font-weight: 600; color: var(--accent); text-decoration: none; }
+  .card-meta { color: var(--vscode-descriptionForeground); font-size: 11px; margin-top: 3px; word-break: break-all; }
+  .story-id { font-weight: 600; color: var(--vscode-button-background); }
+  .ticket-link { font-weight: 600; color: var(--vscode-button-background); text-decoration: none; }
   .ticket-link:hover { text-decoration: underline; }
-  .stale-badge    { font-size: 10px; background: var(--warn); color: #1a1a1a; border-radius: 3px; padding: 0 4px; }
-  .complete-badge { font-size: 10px; background: var(--ok);   color: #1a1a1a; border-radius: 3px; padding: 0 4px; }
-  .inactive-badge { font-size: 10px; background: var(--border); color: var(--muted); border-radius: 3px; padding: 0 4px; }
-  .card.complete  { border-color: var(--ok); opacity: 0.85; }
-  .card.inactive  { border-color: var(--border); opacity: 0.6; border-style: dashed; }
-  .age { font-size: 10px; color: var(--muted); margin-left: 4px; }
+  .stale-badge    { font-size: 10px; background: var(--vscode-notificationsWarningIcon-foreground,#e6a817); color: #1a1a1a; border-radius: 3px; padding: 0 4px; }
+  .complete-badge { font-size: 10px; background: var(--vscode-charts-green,#4caf50);   color: #1a1a1a; border-radius: 3px; padding: 0 4px; }
+  .inactive-badge { font-size: 10px; background: var(--vscode-panel-border); color: var(--vscode-descriptionForeground); border-radius: 3px; padding: 0 4px; }
+  .card.complete  { border-color: var(--vscode-charts-green,#4caf50); opacity: 0.85; }
+  .card.inactive  { border-color: var(--vscode-panel-border); opacity: 0.6; border-style: dashed; }
+  .age { font-size: 10px; color: var(--vscode-descriptionForeground); margin-left: 4px; }
   .card-actions { display: flex; gap: 6px; margin-top: 4px; }
   .card-action  { font-size: 12px; text-decoration: none; opacity: 0.55; }
   .card-action:hover { opacity: 1; }
-  .toggle-btn { font-size: 11px; padding: 3px 8px; border-radius: 4px; border: 1px solid var(--border); cursor: pointer; background: transparent; color: var(--muted); }
-  .toggle-btn.on { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); border-color: var(--accent); }
+  .toggle-btn { font-size: 11px; padding: 3px 8px; border-radius: 4px; border: 1px solid var(--vscode-panel-border); cursor: pointer; background: transparent; color: var(--vscode-descriptionForeground); }
+  .toggle-btn.on { background: color-mix(in srgb, var(--vscode-button-background) 15%, transparent); color: var(--vscode-button-background); border-color: var(--vscode-button-background); }
   #swimlaneView, #kanbanView { display: none; }
   #swimlaneView.active, #kanbanView.active { display: block; }
   #kanbanView.active { display: flex; }

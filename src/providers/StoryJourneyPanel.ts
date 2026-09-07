@@ -12,6 +12,7 @@ import {
     getPromotableEnvironments, getPublishEnvironment, extractStoryId,
     promoBranchName, buildTicketUrl, isFeatureBranch,
 } from "../config";
+import { sharedCss, cspMeta, loadingHtml } from "../ui/shared";
 
 interface JourneyEvent {
     timestamp: string;            // ISO 8601 — used for sort
@@ -55,6 +56,7 @@ export class StoryJourneyPanel {
 
     private readonly _disposables: vscode.Disposable[] = [];
     private _storyId: string;
+    private _refreshing = false;
 
     private constructor(
         private readonly _panel:     vscode.WebviewPanel,
@@ -91,6 +93,8 @@ export class StoryJourneyPanel {
     }
 
     private async _refresh(): Promise<void> {
+        if (this._refreshing) { return; }
+        this._refreshing = true;
         try {
             const allBranches = await this._gitHelper.listRemoteFeatureBranches();
             const storyIds = allBranches.map(b => extractStoryId(b) || b).filter(Boolean);
@@ -113,6 +117,8 @@ export class StoryJourneyPanel {
             this._panel.webview.html = this._renderHtml(this._storyId, events, pipeline, storyIds);
         } catch (err) {
             this._panel.webview.html = `<body style="padding:20px;color:#f48771;font-family:sans-serif">Error: ${String(err)}</body>`;
+        } finally {
+            this._refreshing = false;
         }
     }
 
@@ -180,7 +186,7 @@ export class StoryJourneyPanel {
     // ── HTML rendering ───────────────────────────────────────────────────────
 
     private _loadingHtml(): string {
-        return `<!DOCTYPE html><html><body style="font-family:sans-serif;padding:24px;color:#888">Loading story journey…</body></html>`;
+        return loadingHtml("Loading story journey…");
     }
 
     private _noStoriesHtml(): string {
@@ -214,73 +220,72 @@ export class StoryJourneyPanel {
 <html>
 <head>
 <meta charset="utf-8">
+${cspMeta(this._panel.webview)}
 <style>
-  :root { --bg:#1e1e1e; --fg:#e0e0e0; --card:#252526; --border:#3c3c3c; --muted:#888; --accent:#4fc3f7; --ok:#7cd992; --warn:#ffab70; --err:#f48771; --conflict:#e89d3f; }
-  @media (prefers-color-scheme: light) {
-    :root { --bg:#fff; --fg:#1a1a1a; --card:#f5f5f5; --border:#ddd; --muted:#666; --accent:#0078d4; --ok:#1b6b2f; --warn:#a05000; --err:#c62828; --conflict:#b45309; }
-  }
+${sharedCss()}
+  :root { --conflict: #e89d3f; }
   * { box-sizing: border-box; }
-  body { background: var(--bg); color: var(--fg); font-family: -apple-system, Segoe UI, sans-serif; font-size: 13px; margin: 0; padding: 20px 32px 60px; max-width: 860px; }
+  body { background: var(--vscode-editor-background); color: var(--vscode-foreground); font-family: -apple-system, Segoe UI, sans-serif; font-size: 13px; margin: 0; padding: 20px 32px 60px; max-width: 860px; }
 
   .header { margin-bottom: 16px; }
   h1 { font-size: 20px; margin: 0 0 6px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .story-link { color: var(--accent); text-decoration: none; }
+  .story-link { color: var(--vscode-button-background); text-decoration: none; }
   .story-link:hover { text-decoration: underline; }
 
   .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
-  select, input[type="text"] { background: var(--card); color: var(--fg); border: 1px solid var(--border); padding: 5px 10px; border-radius: 5px; font-size: 12px; }
+  select, input[type="text"] { background: var(--vscode-editor-background); color: var(--vscode-foreground); border: 1px solid var(--vscode-panel-border); padding: 5px 10px; border-radius: 5px; font-size: 12px; }
   input[type="text"] { min-width: 180px; }
-  .btn { font-size: 12px; padding: 5px 12px; border-radius: 5px; border: 1px solid var(--border); cursor: pointer; background: transparent; color: var(--fg); }
+  .btn { font-size: 12px; padding: 5px 12px; border-radius: 5px; border: 1px solid var(--vscode-panel-border); cursor: pointer; background: transparent; color: var(--vscode-foreground); }
   .btn:hover { opacity: 0.8; }
 
   /* Pipeline bar */
-  .pipeline { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin-bottom: 18px; font-size: 12px; }
+  .pipeline { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 8px; padding: 10px 14px; margin-bottom: 18px; font-size: 12px; }
   .pipe-step { display: flex; align-items: center; gap: 3px; padding: 2px 6px; border-radius: 4px; }
-  .pipe-step.reached { background: color-mix(in srgb, var(--ok) 15%, var(--bg)); }
-  .pipe-arrow { color: var(--muted); padding: 0 2px; }
+  .pipe-step.reached { background: color-mix(in srgb, var(--vscode-charts-green,#4caf50) 15%, var(--vscode-editor-background)); }
+  .pipe-arrow { color: var(--vscode-descriptionForeground); padding: 0 2px; }
 
   /* Timeline */
-  .day-sep { font-size: 11px; color: var(--muted); font-weight: 600; letter-spacing: .05em; text-transform: uppercase; margin: 18px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+  .day-sep { font-size: 11px; color: var(--vscode-descriptionForeground); font-weight: 600; letter-spacing: .05em; text-transform: uppercase; margin: 18px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--vscode-panel-border); }
   .timeline { position: relative; }
-  .timeline::before { content: ""; position: absolute; left: 22px; top: 0; bottom: 0; width: 2px; background: var(--border); }
+  .timeline::before { content: ""; position: absolute; left: 22px; top: 0; bottom: 0; width: 2px; background: var(--vscode-panel-border); }
 
   .event { display: flex; gap: 12px; margin-bottom: 10px; position: relative; }
-  .event-icon { width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; flex-shrink: 0; margin-top: 2px; z-index: 1; border: 2px solid var(--bg); }
-  .icon-success  { background: var(--ok); }
-  .icon-failure  { background: var(--err); }
+  .event-icon { width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 11px; flex-shrink: 0; margin-top: 2px; z-index: 1; border: 2px solid var(--vscode-editor-background); }
+  .icon-success  { background: var(--vscode-charts-green,#4caf50); }
+  .icon-failure  { background: var(--vscode-errorForeground,#f44747); }
   .icon-conflict { background: var(--conflict); }
-  .icon-info     { background: var(--accent); }
+  .icon-info     { background: var(--vscode-button-background); }
 
-  .event-body { flex: 1; background: var(--card); border: 1px solid var(--border); border-radius: 7px; padding: 9px 13px; }
+  .event-body { flex: 1; background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 7px; padding: 9px 13px; }
   .event-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 3px; }
   .op-label { font-weight: 600; font-size: 13px; }
-  .env-badge { font-size: 10px; background: color-mix(in srgb, var(--accent) 15%, var(--card)); color: var(--accent); border-radius: 4px; padding: 1px 6px; }
-  .git-badge { font-size: 10px; background: color-mix(in srgb, var(--muted) 15%, var(--card)); color: var(--muted); border-radius: 4px; padding: 1px 6px; }
-  .ts { font-size: 11px; color: var(--muted); margin-left: auto; white-space: nowrap; }
+  .env-badge { font-size: 10px; background: color-mix(in srgb, var(--vscode-button-background) 15%, var(--vscode-editor-background)); color: var(--vscode-button-background); border-radius: 4px; padding: 1px 6px; }
+  .git-badge { font-size: 10px; background: color-mix(in srgb, var(--vscode-descriptionForeground) 15%, var(--vscode-editor-background)); color: var(--vscode-descriptionForeground); border-radius: 4px; padding: 1px 6px; }
+  .ts { font-size: 11px; color: var(--vscode-descriptionForeground); margin-left: auto; white-space: nowrap; }
   .outcome-badge { font-size: 10px; border-radius: 3px; padding: 1px 6px; }
-  .badge-success  { background: color-mix(in srgb, var(--ok) 20%, transparent); color: var(--ok); }
-  .badge-failure  { background: color-mix(in srgb, var(--err) 20%, transparent); color: var(--err); }
+  .badge-success  { background: color-mix(in srgb, var(--vscode-charts-green,#4caf50) 20%, transparent); color: var(--vscode-charts-green,#4caf50); }
+  .badge-failure  { background: color-mix(in srgb, var(--vscode-errorForeground,#f44747) 20%, transparent); color: var(--vscode-errorForeground,#f44747); }
   .badge-conflict { background: color-mix(in srgb, var(--conflict) 20%, transparent); color: var(--conflict); }
 
-  .event-summary { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .event-summary { color: var(--vscode-descriptionForeground); font-size: 12px; margin-bottom: 4px; }
 
   .details { margin-top: 6px; }
-  .toggle-link { font-size: 11px; color: var(--accent); cursor: pointer; text-decoration: none; }
+  .toggle-link { font-size: 11px; color: var(--vscode-button-background); cursor: pointer; text-decoration: none; }
   .toggle-link:hover { text-decoration: underline; }
-  .detail-block { display: none; margin-top: 6px; font-size: 11px; color: var(--muted); }
+  .detail-block { display: none; margin-top: 6px; font-size: 11px; color: var(--vscode-descriptionForeground); }
   .detail-block.open { display: block; }
   .file-list { list-style: none; margin: 4px 0; padding: 0; max-height: 200px; overflow-y: auto; }
   .file-list li { padding: 2px 0; word-break: break-all; }
-  .file-list li.added    { color: var(--ok); }
-  .file-list li.modified { color: var(--accent); }
-  .file-list li.deleted  { color: var(--err); }
+  .file-list li.added    { color: var(--vscode-charts-green,#4caf50); }
+  .file-list li.modified { color: var(--vscode-button-background); }
+  .file-list li.deleted  { color: var(--vscode-errorForeground,#f44747); }
   .test-row { display: flex; gap: 8px; margin-bottom: 3px; }
-  .test-ok  { color: var(--ok); }
-  .test-fail{ color: var(--err); }
-  .sha-tag  { font-family: monospace; font-size: 10px; background: var(--border); padding: 1px 5px; border-radius: 3px; }
-  .error-box { background: color-mix(in srgb, var(--err) 10%, var(--card)); border: 1px solid var(--err); border-radius: 4px; padding: 6px 10px; color: var(--err); margin-top: 4px; word-break: break-word; }
+  .test-ok  { color: var(--vscode-charts-green,#4caf50); }
+  .test-fail{ color: var(--vscode-errorForeground,#f44747); }
+  .sha-tag  { font-family: monospace; font-size: 10px; background: var(--vscode-panel-border); padding: 1px 5px; border-radius: 3px; }
+  .error-box { background: color-mix(in srgb, var(--vscode-errorForeground,#f44747) 10%, var(--vscode-editor-background)); border: 1px solid var(--vscode-errorForeground,#f44747); border-radius: 4px; padding: 6px 10px; color: var(--vscode-errorForeground,#f44747); margin-top: 4px; word-break: break-word; }
 
-  .empty { color: var(--muted); padding: 32px; text-align: center; font-size: 14px; }
+  .empty { color: var(--vscode-descriptionForeground); padding: 32px; text-align: center; font-size: 14px; }
 </style>
 </head>
 <body>

@@ -3,6 +3,7 @@
 // Shows story progress across all environments + action buttons.
 
 import * as vscode from "vscode";
+import * as path from "path";
 import { IGitProviderClient } from "../GitProviderClient";
 import { GitHelper, PendingOp } from "../GitHelper";
 import {
@@ -292,7 +293,13 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
     /** Opens VS Code's own diff editor for a working-tree file against HEAD — reuses the built-in diff view instead of the Dashboard's custom renderer, since this is a quick "what did I actually change" look, not a file-selection UI. */
     private async _viewWorkingFileDiff(relPath: string): Promise<void> {
         const root = this._gitHelper.getWorkspaceRoot();
-        const fileUri = vscode.Uri.file(`${root}/${relPath}`);
+        const resolvedRoot = path.resolve(root);
+        const absPath = path.resolve(root, relPath);
+        if (!absPath.startsWith(resolvedRoot + path.sep)) {
+            vscode.window.showErrorMessage(`Blocked: "${relPath}" resolves outside the workspace root.`);
+            return;
+        }
+        const fileUri = vscode.Uri.file(absPath);
         const headUri = fileUri.with({ scheme: "git", query: JSON.stringify({ path: fileUri.fsPath, ref: "HEAD" }) });
         await vscode.commands.executeCommand("vscode.diff", headUri, fileUri, `${relPath} (Working Tree)`);
     }
@@ -1213,7 +1220,7 @@ ${forced ? `<button class="btn btn-secondary" onclick="send('closeSetupCheck')">
     }
 
     private _getLoadingHtml(): string {
-        return `<html><body style="font-family:var(--vscode-font-family);padding:16px">Loading...</body></html>`;
+        return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><style>body{font-family:var(--vscode-font-family,-apple-system,sans-serif);padding:24px;color:var(--vscode-descriptionForeground,#888);background:var(--vscode-editor-background);}</style></head><body>Loading…</body></html>`;
     }
 
     private _getErrorHtml(err: string): string {

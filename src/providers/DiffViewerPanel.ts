@@ -6,6 +6,7 @@ import * as vscode from "vscode";
 import { GitHelper } from "../GitHelper";
 import { getEnvironments, getPublishEnvironment } from "../config";
 import { buildDiffUris } from "../DiffContentProvider";
+import { cspMeta } from "../ui/shared";
 
 function escHtml(s: string): string {
     return String(s).replace(/[<>&"]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]!));
@@ -137,6 +138,8 @@ export class DiffViewerPanel {
         return `<!DOCTYPE html>
 <html>
 <head>
+<meta charset="utf-8">
+${cspMeta(this._panel.webview)}
 <style>
   body { font-family: var(--vscode-font-family); font-size: 12px; padding: 16px; color: var(--vscode-foreground); }
   h2 { font-size: 14px; margin: 0 0 10px; }

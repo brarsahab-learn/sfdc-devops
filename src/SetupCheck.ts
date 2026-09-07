@@ -7,6 +7,7 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
+import { execFile } from "child_process";
 import { isOrgConnected } from "./SfCli";
 import { GitHelper } from "./GitHelper";
 import { IGitProviderClient } from "./GitProviderClient";
@@ -144,6 +145,79 @@ export async function runSetupChecks(
             : "No token stored yet. Pull request creation still works by opening a prefilled browser page; live PR/pipeline status needs a token.",
         fixSteps: hasToken ? [] : [
             "Run any action that talks to the provider API (e.g. Promote & Deploy) — you'll be prompted to enter a token once, then it's stored securely.",
+        ],
+    });
+
+    // --- Salesforce CLI (sf) check ---
+    const sfCliPassed = await new Promise<boolean>((resolve) => {
+        execFile("sf", ["version", "--json"], (err) => { resolve(!err); });
+    });
+    items.push({
+        key: "sfCli", label: "Salesforce CLI (sf)", required: true,
+        passed: sfCliPassed,
+        detail: sfCliPassed ? "sf CLI is installed and accessible." : "The `sf` CLI was not found on your PATH.",
+        fixSteps: sfCliPassed ? [] : [
+            "Install the Salesforce CLI: https://developer.salesforce.com/tools/salesforcecli",
+            "Restart VS Code after installation.",
+        ],
+    });
+
+    // --- sfdx-project.json check ---
+    const workspaceRoot = gitHelper.getWorkspaceRoot();
+    const sfdxProjectPath = path.join(workspaceRoot, "sfdx-project.json");
+    const sfdxProjectExists = fs.existsSync(sfdxProjectPath);
+    let sfdxPassed = sfdxProjectExists;
+    let sfdxRequired = true;
+    let sfdxDetail: string;
+    let sfdxFixSteps: string[];
+
+    if (!sfdxProjectExists) {
+        sfdxDetail = "sfdx-project.json was not found in the workspace root.";
+        sfdxFixSteps = [
+            "Create an sfdx-project.json in your workspace root.",
+            "Run: sf project generate --name <project> to scaffold one.",
+        ];
+    } else {
+        try {
+            const parsed = JSON.parse(fs.readFileSync(sfdxProjectPath, "utf8"));
+            if (!Array.isArray(parsed.packageDirectories) || parsed.packageDirectories.length === 0) {
+                sfdxPassed = false;
+                sfdxRequired = false;
+                sfdxDetail = "sfdx-project.json exists but packageDirectories is missing or empty.";
+                sfdxFixSteps = ["Add at least one entry to packageDirectories in sfdx-project.json."];
+            } else {
+                sfdxDetail = `sfdx-project.json found with ${parsed.packageDirectories.length} package director${parsed.packageDirectories.length === 1 ? "y" : "ies"}.`;
+                sfdxFixSteps = [];
+            }
+        } catch {
+            sfdxPassed = false;
+            sfdxRequired = false;
+            sfdxDetail = "sfdx-project.json exists but could not be parsed as valid JSON.";
+            sfdxFixSteps = ["Ensure sfdx-project.json is valid JSON."];
+        }
+    }
+    items.push({
+        key: "sfdxProject", label: "sfdx-project.json", required: sfdxRequired,
+        passed: sfdxPassed,
+        detail: sfdxDetail,
+        fixSteps: sfdxFixSteps,
+    });
+
+    // --- Git user identity check ---
+    const gitUserEmail = await new Promise<string>((resolve) => {
+        execFile("git", ["config", "user.email"], { cwd: workspaceRoot }, (err, stdout) => {
+            resolve(err ? "" : stdout.trim());
+        });
+    });
+    items.push({
+        key: "gitUserIdentity", label: "Git user identity", required: false,
+        passed: Boolean(gitUserEmail),
+        detail: gitUserEmail
+            ? `Git user email is set to: ${gitUserEmail}`
+            : "No git user.email configured — commits may be anonymous.",
+        fixSteps: gitUserEmail ? [] : [
+            "Run: git config --global user.email 'you@example.com'",
+            "Run: git config --global user.name 'Your Name'",
         ],
     });
 

@@ -9,10 +9,12 @@ import { runSetupChecks, SetupCheckItem } from "../SetupCheck";
 import { getOrgAliasSlots, setOrgAliasSlot, OrgAliasSlot, getAuditLogRetentionDays, getEnvironments, saveEnvironments, EnvironmentSetting } from "../config";
 import { canAccessConfig } from "../RoleManager";
 import { getEffectiveRole } from "../RoleManager";
+import { sharedCss, cspMeta, loadingHtml } from "../ui/shared";
 
 export class AdminPanel {
     private static _current: AdminPanel | undefined;
     private readonly _disposables: vscode.Disposable[] = [];
+    private _refreshing = false;
 
     static createOrShow(
         gitHelper:  GitHelper,
@@ -79,6 +81,8 @@ export class AdminPanel {
     }
 
     private async _refresh(): Promise<void> {
+        if (this._refreshing) { return; }
+        this._refreshing = true;
         try {
             const role   = getEffectiveRole(this._ctx);
             const checks = await runSetupChecks(this._git, this._bb, this._ctx, role);
@@ -89,6 +93,8 @@ export class AdminPanel {
             this._panel.webview.html = this._renderHtml(checks, slots, envs, role, sizeKb, retentionDays);
         } catch (err) {
             this._panel.webview.html = `<body style="padding:20px;font-family:sans-serif;color:#f48771">Error: ${String(err)}</body>`;
+        } finally {
+            this._refreshing = false;
         }
     }
 
@@ -120,7 +126,7 @@ export class AdminPanel {
     }
 
     private _loadingHtml(): string {
-        return `<!DOCTYPE html><html><body style="font-family:sans-serif;padding:24px;color:#888">Loading…</body></html>`;
+        return loadingHtml("Checking setup…");
     }
 
     private _renderHtml(
@@ -176,62 +182,38 @@ export class AdminPanel {
 <html>
 <head>
 <meta charset="utf-8">
+${cspMeta(this._panel.webview)}
 <style>
-  :root { --bg:#1e1e1e; --fg:#e0e0e0; --card:#252526; --border:#3c3c3c; --muted:#888; --accent:#4fc3f7; --ok:#7cd992; --warn:#ffab70; --err:#ff6b6b; }
-  @media (prefers-color-scheme: light) {
-    :root { --bg:#fff; --fg:#1a1a1a; --card:#f5f5f5; --border:#ddd; --muted:#666; --accent:#0078d4; --ok:#1b6b2f; --warn:#a05000; --err:#c62828; }
-  }
-  * { box-sizing: border-box; }
-  body { background: var(--bg); color: var(--fg); font-family: -apple-system, Segoe UI, sans-serif; font-size: 13px; margin: 0; padding: 20px 28px 60px; max-width: 900px; }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  h2 { font-size: 14px; margin: 24px 0 8px; border-bottom: 1px solid var(--border); padding-bottom: 4px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
-  .toolbar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
-  .btn { font-size: 12px; padding: 5px 13px; border-radius: 5px; border: 1px solid var(--border); cursor: pointer; background: transparent; color: var(--fg); }
-  .btn:hover { background: var(--card); }
-  .btn-sm { font-size: 11px; padding: 3px 8px; border-radius: 4px; border: 1px solid var(--border); cursor: pointer; background: transparent; color: var(--fg); }
-  .btn-danger { border-color: var(--err); color: var(--err); }
-  .btn-primary { background: #0078d4; color: #fff; border-color: #0078d4; }
-
-  .banner { border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 13px; }
-  .banner.ok   { background: color-mix(in srgb, var(--ok) 12%, var(--bg));   border: 1px solid var(--ok);   color: var(--ok); }
-  .banner.warn { background: color-mix(in srgb, var(--warn) 12%, var(--bg)); border: 1px solid var(--warn); color: var(--warn); }
-
-  .check { border: 1px solid var(--border); border-radius: 6px; padding: 9px 12px; margin-bottom: 6px; }
-  .check.fail { border-color: var(--err); }
-  .check.warn { border-color: var(--warn); }
-  .check-head { display: flex; align-items: center; gap: 6px; font-size: 13px; }
-  .check-detail { font-size: 12px; color: var(--muted); margin: 3px 0 0 24px; }
-  ol.fix { margin: 5px 0 0 24px; padding-left: 16px; font-size: 12px; color: var(--warn); }
-  .opt { font-size: 11px; font-weight: normal; color: var(--muted); }
-
-  .slot-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-  .slot-label { font-size: 12px; width: 80px; flex-shrink: 0; color: var(--muted); }
-  .slot-input { font-size: 12px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--fg); flex: 1; max-width: 280px; }
-  .slot-val { font-size: 12px; color: var(--fg); }
-
-  /* Branch / pipeline config table */
-  .env-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 10px; }
-  .env-table th { text-align: left; padding: 5px 8px; font-size: 11px; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  .env-table td { padding: 5px 6px; border-bottom: 1px solid var(--border); vertical-align: middle; }
-  .env-table tr:last-child td { border-bottom: none; }
-  .env-table tr:hover td { background: var(--card); }
-  .et-input { font-size: 12px; padding: 3px 6px; border: 1px solid var(--border); border-radius: 3px; background: var(--bg); color: var(--fg); width: 100%; min-width: 60px; }
-  .et-select { font-size: 12px; padding: 3px 4px; border: 1px solid var(--border); border-radius: 3px; background: var(--bg); color: var(--fg); }
-  .order-btn { font-size: 11px; padding: 1px 5px; border: 1px solid var(--border); border-radius: 3px; cursor: pointer; background: transparent; color: var(--fg); line-height: 1.4; }
-  .order-btn:hover { background: var(--card); }
-  .del-btn { font-size: 11px; padding: 2px 6px; border: 1px solid var(--err); border-radius: 3px; cursor: pointer; background: transparent; color: var(--err); }
-  .del-btn:hover { background: color-mix(in srgb, var(--err) 10%, transparent); }
-  .env-actions { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; flex-wrap: wrap; }
-  .save-btn { background: #0078d4; color: #fff; border: none; padding: 5px 16px; border-radius: 5px; cursor: pointer; font-size: 12px; }
-  .save-btn:hover { background: #005a9e; }
-  .cb-cell { display: flex; gap: 10px; align-items: center; }
-  .cb-label { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 3px; white-space: nowrap; }
-
-  .role-box { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-  .role-name { font-weight: 600; font-size: 15px; }
-  .audit-box { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; }
-  .audit-meta { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-  .trim-row { display: flex; gap: 6px; flex-wrap: wrap; }
+${sharedCss()}
+.slot-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.slot-label { font-size: 12px; width: 90px; flex-shrink: 0; color: var(--vscode-descriptionForeground); }
+.slot-input { width: 240px; }
+.slot-val { font-size: 12px; }
+.role-box { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 5px; padding: 10px 14px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.role-name { font-weight: 600; font-size: 14px; }
+.audit-box { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 5px; padding: 10px 14px; }
+.audit-meta { font-size: 12px; color: var(--vscode-descriptionForeground); margin-bottom: 8px; }
+.trim-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.env-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 10px; }
+.env-table th { text-align: left; padding: 5px 8px; font-size: 11px; color: var(--vscode-descriptionForeground); font-weight: 600; border-bottom: 1px solid var(--vscode-panel-border); white-space: nowrap; }
+.env-table td { padding: 5px 6px; border-bottom: 1px solid var(--vscode-panel-border); vertical-align: middle; }
+.env-table tr:last-child td { border-bottom: none; }
+.env-table tr:hover td { background: var(--vscode-list-hoverBackground); }
+.et-input { font-size: 12px; padding: 3px 6px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 3px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); width: 100%; min-width: 60px; }
+.et-select { font-size: 12px; padding: 3px 4px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 3px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); }
+.order-btn { font-size: 11px; padding: 1px 5px; border: 1px solid var(--vscode-panel-border); border-radius: 3px; cursor: pointer; background: transparent; color: var(--vscode-foreground); }
+.order-btn:hover { background: var(--vscode-list-hoverBackground); }
+.del-btn { font-size: 11px; padding: 2px 6px; border: 1px solid var(--vscode-errorForeground, #f44747); border-radius: 3px; cursor: pointer; background: transparent; color: var(--vscode-errorForeground, #f44747); }
+.env-actions { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; flex-wrap: wrap; }
+.check { border: 1px solid var(--vscode-panel-border); border-radius: 5px; padding: 9px 12px; margin-bottom: 6px; }
+.check.fail { border-color: var(--vscode-errorForeground, #f44747); }
+.check.warn { border-color: var(--vscode-notificationsWarningIcon-foreground, #e6a817); }
+.check-head { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.check-detail { font-size: 12px; color: var(--vscode-descriptionForeground); margin: 3px 0 0 24px; }
+ol.fix { margin: 5px 0 0 24px; padding-left: 16px; font-size: 12px; color: var(--vscode-notificationsWarningIcon-foreground, #e6a817); }
+.opt { font-size: 11px; font-weight: normal; color: var(--vscode-descriptionForeground); }
+.cb-cell { display: flex; gap: 10px; align-items: center; }
+.cb-label { font-size: 11px; color: var(--vscode-descriptionForeground); display: flex; align-items: center; gap: 3px; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -325,76 +307,119 @@ ${isAdmin ? `
   }
 
   /* ── Pipeline / Branch editor ── */
-  const ENV_DATA = JSON.parse('${envData}');
-  let envs = ENV_DATA.map(e => Object.assign({}, e));
+  var envs = (function() {
+    try { return JSON.parse('${envData}').map(function(e) { return Object.assign({}, e); }); }
+    catch(e) { return []; }
+  })();
 
-  const ROLES        = ['', 'Lead', 'Admin'];
-  const TEST_LEVELS  = ['RunLocalTests', 'RunAllTestsInOrg', 'RunSpecifiedTests'];
+  var ROLES       = ['', 'Lead', 'Admin'];
+  var TEST_LEVELS = ['RunLocalTests', 'RunAllTestsInOrg', 'RunSpecifiedTests'];
 
-  function esc(s) {
-    return String(s ?? '').replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
+  function hesc(s) {
+    return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function rowHtml(e, i, total) {
+    var upDis  = i === 0 ? ' disabled style="opacity:0.25"' : '';
+    var dnDis  = i === total-1 ? ' disabled style="opacity:0.25"' : '';
+    var roleOpts = ROLES.map(function(r) {
+      return '<option value="' + hesc(r) + '"' + (e.requiredRole === r ? ' selected' : '') + '>' + hesc(r || 'Any') + '</option>';
+    }).join('');
+    var testOpts = TEST_LEVELS.map(function(t) {
+      return '<option value="' + hesc(t) + '"' + (e.deployTestLevel === t ? ' selected' : '') + '>' + hesc(t) + '</option>';
+    }).join('');
+    return '<tr data-row="' + i + '">'
+      + '<td style="white-space:nowrap">'
+      +   '<button class="order-btn" data-action="up" data-row="' + i + '"' + upDis + ' title="Move up">▲</button> '
+      +   '<button class="order-btn" data-action="dn" data-row="' + i + '"' + dnDis + ' title="Move down">▼</button>'
+      + '</td>'
+      + '<td><input class="et-input" data-field="name" data-row="' + i + '" value="' + hesc(e.name) + '" placeholder="dev"></td>'
+      + '<td><input class="et-input" data-field="label" data-row="' + i + '" value="' + hesc(e.label) + '" placeholder="DEV"></td>'
+      + '<td><input class="et-input" data-field="branch" data-row="' + i + '" value="' + hesc(e.branch) + '" placeholder="dev"></td>'
+      + '<td><select class="et-select" data-field="requiredRole" data-row="' + i + '">' + roleOpts + '</select></td>'
+      + '<td><select class="et-select" data-field="deployTestLevel" data-row="' + i + '">' + testOpts + '</select></td>'
+      + '<td><span class="cb-cell">'
+      +   '<label class="cb-label"><input type="checkbox" data-field="coverageGate" data-row="' + i + '"' + (e.coverageGate ? ' checked' : '') + '> Coverage</label> '
+      +   '<label class="cb-label"><input type="checkbox" data-field="signoffGate" data-row="' + i + '"' + (e.signoffGate ? ' checked' : '') + '> Sign-off</label>'
+      + '</span></td>'
+      + '<td><span class="cb-cell">'
+      +   '<label class="cb-label"><input type="checkbox" data-field="isProd" data-row="' + i + '"' + (e.isProd ? ' checked' : '') + '> Prod</label> '
+      +   '<label class="cb-label"><input type="checkbox" data-field="locked" data-row="' + i + '"' + (e.locked ? ' checked' : '') + '> Locked</label>'
+      + '</span></td>'
+      + '<td><button class="del-btn" data-action="del" data-row="' + i + '" title="Remove stage">✕</button></td>'
+      + '</tr>';
   }
 
   function renderTable() {
-    const body = document.getElementById('envBody');
+    var body = document.getElementById('envBody');
     if (!body) { return; }
-    body.innerHTML = envs.map((e, i) => {
-      const upBtn   = i > 0 ? '<button class="order-btn" onclick="moveRow('+i+',-1)" title="Move up">▲</button>' : '<button class="order-btn" style="opacity:0.2" disabled>▲</button>';
-      const downBtn = i < envs.length-1 ? '<button class="order-btn" onclick="moveRow('+i+',1)" title="Move down">▼</button>' : '<button class="order-btn" style="opacity:0.2" disabled>▼</button>';
-      const roleOpts = ROLES.map(r => '<option value="'+esc(r)+'"'+(e.requiredRole===r?' selected':'')+'>'+esc(r||'Any')+'</option>').join('');
-      const testOpts = TEST_LEVELS.map(t => '<option value="'+esc(t)+'"'+(e.deployTestLevel===t?' selected':'')+'>'+esc(t)+'</option>').join('');
-      return '<tr id="erow'+i+'">'
-        +'<td style="white-space:nowrap">'+upBtn+' '+downBtn+'</td>'
-        +'<td><input class="et-input" style="min-width:70px" value="'+esc(e.name)+'" oninput="setF('+i+',\'name\',this.value)" placeholder="dev"></td>'
-        +'<td><input class="et-input" style="min-width:70px" value="'+esc(e.label)+'" oninput="setF('+i+',\'label\',this.value)" placeholder="DEV"></td>'
-        +'<td><input class="et-input" style="min-width:80px" value="'+esc(e.branch)+'" oninput="setF('+i+',\'branch\',this.value)" placeholder="dev"></td>'
-        +'<td><select class="et-select" onchange="setF('+i+',\'requiredRole\',this.value)">'+roleOpts+'</select></td>'
-        +'<td><select class="et-select" onchange="setF('+i+',\'deployTestLevel\',this.value)">'+testOpts+'</select></td>'
-        +'<td><span class="cb-cell">'
-          +'<label class="cb-label"><input type="checkbox"'+(e.coverageGate?' checked':'')+' onchange="setF('+i+',\'coverageGate\',this.checked)"> Coverage</label>'
-          +'<label class="cb-label"><input type="checkbox"'+(e.signoffGate?' checked':'')+' onchange="setF('+i+',\'signoffGate\',this.checked)"> Sign-off</label>'
-        +'</span></td>'
-        +'<td><span class="cb-cell">'
-          +'<label class="cb-label"><input type="checkbox"'+(e.isProd?' checked':'')+' onchange="setF('+i+',\'isProd\',this.checked)"> Prod</label>'
-          +'<label class="cb-label"><input type="checkbox"'+(e.locked?' checked':'')+' onchange="setF('+i+',\'locked\',this.checked)"> Locked</label>'
-        +'</span></td>'
-        +'<td><button class="del-btn" onclick="delRow('+i+')" title="Remove stage">✕</button></td>'
-        +'</tr>';
-    }).join('');
+    body.innerHTML = envs.map(function(e, i) { return rowHtml(e, i, envs.length); }).join('');
   }
 
-  function setF(i, field, val) { envs[i][field] = val; }
-  function moveRow(i, dir) {
-    const tmp = envs[i]; envs[i] = envs[i+dir]; envs[i+dir] = tmp;
+  /* Event delegation — one listener on the tbody handles all rows */
+  document.addEventListener('DOMContentLoaded', function() {
+    var body = document.getElementById('envBody');
+    if (!body) { return; }
     renderTable();
-  }
-  function delRow(i) {
-    if (envs.length <= 1) { return; }
-    envs.splice(i, 1);
-    renderTable();
-  }
+
+    body.addEventListener('input', function(ev) {
+      var el = ev.target;
+      var row = parseInt(el.getAttribute('data-row'), 10);
+      var field = el.getAttribute('data-field');
+      if (isNaN(row) || !field || !envs[row]) { return; }
+      envs[row][field] = el.type === 'checkbox' ? el.checked : el.value;
+    });
+    body.addEventListener('change', function(ev) {
+      var el = ev.target;
+      var row = parseInt(el.getAttribute('data-row'), 10);
+      var field = el.getAttribute('data-field');
+      if (isNaN(row) || !field || !envs[row]) { return; }
+      envs[row][field] = el.type === 'checkbox' ? el.checked : el.value;
+    });
+    body.addEventListener('click', function(ev) {
+      var el = ev.target.closest('[data-action]');
+      if (!el) { return; }
+      var action = el.getAttribute('data-action');
+      var row = parseInt(el.getAttribute('data-row'), 10);
+      if (action === 'up' && row > 0) {
+        var tmp = envs[row]; envs[row] = envs[row-1]; envs[row-1] = tmp;
+        renderTable();
+      } else if (action === 'dn' && row < envs.length-1) {
+        var tmp = envs[row]; envs[row] = envs[row+1]; envs[row+1] = tmp;
+        renderTable();
+      } else if (action === 'del') {
+        if (envs.length <= 1) { return; }
+        envs.splice(row, 1);
+        renderTable();
+      }
+    });
+  });
+
   function addRow() {
     envs.push({ name: '', label: '', branch: '', requiredRole: '', deployTestLevel: 'RunLocalTests', coverageGate: false, signoffGate: false, isProd: false, locked: false });
     renderTable();
-    // scroll new row into view
-    const body = document.getElementById('envBody');
-    if (body) { body.lastElementChild?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
-  }
-  function saveEnvs() {
-    // Validate: each row needs a name and branch
-    for (let i = 0; i < envs.length; i++) {
-      if (!envs[i].name.trim()) { alert('Stage ' + (i+1) + ' is missing a Name.'); return; }
-      if (!envs[i].branch.trim()) { alert('Stage "' + envs[i].name + '" is missing a Branch name.'); return; }
+    var body = document.getElementById('envBody');
+    if (body && body.lastElementChild) {
+      body.lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
-    // Fill label from name if blank
-    const toSave = envs.map(e => Object.assign({}, e, { name: e.name.trim(), branch: e.branch.trim(), label: (e.label||'').trim() || e.name.trim().toUpperCase() }));
-    vscode.postMessage({ command: 'saveEnvironments', envs: toSave });
-    const msg = document.getElementById('saveMsg');
-    if (msg) { msg.style.display = 'inline'; setTimeout(() => { msg.style.display = 'none'; }, 2500); }
   }
 
-  // Init
-  if (document.getElementById('envBody')) { renderTable(); }
+  function saveEnvs() {
+    for (var i = 0; i < envs.length; i++) {
+      if (!String(envs[i].name || '').trim()) { alert('Stage ' + (i+1) + ' is missing a Name.'); return; }
+      if (!String(envs[i].branch || '').trim()) { alert('Stage "' + envs[i].name + '" is missing a Branch name.'); return; }
+    }
+    var toSave = envs.map(function(e) {
+      return Object.assign({}, e, {
+        name:   String(e.name || '').trim(),
+        branch: String(e.branch || '').trim(),
+        label:  String(e.label || '').trim() || String(e.name || '').trim().toUpperCase()
+      });
+    });
+    vscode.postMessage({ command: 'saveEnvironments', envs: toSave });
+    var msg = document.getElementById('saveMsg');
+    if (msg) { msg.style.display = 'inline'; setTimeout(function() { msg.style.display = 'none'; }, 2500); }
+  }
 </script>
 </body>
 </html>`;

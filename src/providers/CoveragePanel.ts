@@ -11,6 +11,7 @@ import {
 import {
     extractStoryId, isFeatureBranch, getCoverageGateEnvironment, getSourceRootFolder,
 } from "../config";
+import { sharedCss, cspMeta, loadingHtml } from "../ui/shared";
 
 export class CoveragePanel {
     private static _current: CoveragePanel | undefined;
@@ -171,7 +172,7 @@ export class CoveragePanel {
     }
 
     private _loadingHtml(): string {
-        return `<!DOCTYPE html><html><body style="font-family:sans-serif;padding:24px;color:#888">Loading coverage…</body></html>`;
+        return loadingHtml("Loading coverage…");
     }
 
     private _renderHtml(branch: string, storyId: string, apex: string[], passed: boolean, stale: boolean): string {
@@ -238,40 +239,37 @@ ${gateBanner}
 <html>
 <head>
 <meta charset="utf-8">
+${cspMeta(this._panel.webview)}
 <style>
-  :root { --bg:#1e1e1e; --fg:#e0e0e0; --card:#252526; --border:#3c3c3c; --muted:#888; --accent:#4fc3f7; --ok:#7cd992; --warn:#ffab70; --err:#ff6b6b; }
-  @media (prefers-color-scheme: light) {
-    :root { --bg:#fff; --fg:#1a1a1a; --card:#f5f5f5; --border:#ddd; --muted:#666; --accent:#0078d4; --ok:#1b6b2f; --warn:#a05000; --err:#c62828; }
-  }
-  * { box-sizing: border-box; }
-  body { background: var(--bg); color: var(--fg); font-family: -apple-system, Segoe UI, sans-serif; font-size: 13px; margin: 0; padding: 20px 28px 60px; max-width: 800px; }
+${sharedCss()}
+  body { padding: 20px 28px 60px; max-width: 800px; }
   h1 { font-size: 18px; margin: 0 0 4px; }
-  .subtitle { color: var(--muted); font-size: 12px; margin-bottom: 16px; }
+  .subtitle { color: var(--vscode-descriptionForeground); font-size: 12px; margin-bottom: 16px; }
   .toolbar { display: flex; gap: 8px; margin-bottom: 16px; }
-  .btn { font-size: 12px; padding: 6px 14px; border-radius: 5px; border: 1px solid var(--border); cursor: pointer; background: transparent; color: var(--fg); }
+  .btn { font-size: 12px; padding: 6px 14px; border-radius: 5px; border: 1px solid var(--vscode-panel-border); cursor: pointer; background: transparent; color: var(--vscode-foreground); }
   .btn-primary { background: #0078d4; color: #fff; border-color: #0078d4; font-size: 13px; padding: 8px 20px; margin-top: 8px; }
   .btn:hover { opacity: 0.85; }
 
   .banner { border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; font-size: 13px; }
-  .banner.ok   { background: color-mix(in srgb, var(--ok)   12%, var(--bg)); border: 1px solid var(--ok);   color: var(--ok); }
-  .banner.warn { background: color-mix(in srgb, var(--warn) 12%, var(--bg)); border: 1px solid var(--warn); }
-  .banner.info { background: color-mix(in srgb, var(--accent) 10%, var(--bg)); border: 1px solid var(--accent); color: var(--muted); }
+  .banner.ok   { background: color-mix(in srgb, var(--vscode-charts-green,#4caf50)   12%, var(--vscode-editor-background)); border: 1px solid var(--vscode-charts-green,#4caf50);   color: var(--vscode-charts-green,#4caf50); }
+  .banner.warn { background: color-mix(in srgb, var(--vscode-notificationsWarningIcon-foreground,#e6a817) 12%, var(--vscode-editor-background)); border: 1px solid var(--vscode-notificationsWarningIcon-foreground,#e6a817); }
+  .banner.info { background: color-mix(in srgb, var(--vscode-textLink-foreground, #0078d4) 10%, var(--vscode-editor-background)); border: 1px solid var(--vscode-textLink-foreground, #0078d4); color: var(--vscode-descriptionForeground); }
 
-  .section { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 14px; }
+  .section { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 8px; padding: 14px 16px; margin-bottom: 14px; }
   .section-head { font-weight: 600; font-size: 13px; margin-bottom: 10px; }
 
   .cls-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  .cls-table th { text-align: left; padding: 4px 8px; border-bottom: 2px solid var(--border); color: var(--muted); font-size: 11px; }
-  .cls-table td { padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  .cls-table th { text-align: left; padding: 4px 8px; border-bottom: 2px solid var(--vscode-panel-border); color: var(--vscode-descriptionForeground); font-size: 11px; }
+  .cls-table td { padding: 5px 8px; border-bottom: 1px solid var(--vscode-panel-border); }
   .cls-name { word-break: break-all; }
-  .pct-ok   { color: var(--ok); font-weight: 600; }
-  .pct-fail { color: var(--err); font-weight: 600; }
-  .pct-na   { color: var(--muted); }
+  .pct-ok   { color: var(--vscode-charts-green,#4caf50); font-weight: 600; }
+  .pct-fail { color: var(--vscode-errorForeground,#f44747); font-weight: 600; }
+  .pct-na   { color: var(--vscode-descriptionForeground); }
 
-  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
-  textarea { width: 100%; font-size: 12px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--fg); resize: vertical; }
-  .hint { font-size: 11px; color: var(--muted); margin-top: 6px; }
-  .link { color: var(--accent); text-decoration: none; font-weight: normal; }
+  label { display: block; font-size: 12px; color: var(--vscode-descriptionForeground); margin-bottom: 4px; }
+  textarea { width: 100%; font-size: 12px; padding: 7px 10px; border: 1px solid var(--vscode-panel-border); border-radius: 4px; background: var(--vscode-editor-background); color: var(--vscode-foreground); resize: vertical; }
+  .hint { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 6px; }
+  .link { color: var(--vscode-textLink-foreground, #0078d4); text-decoration: none; font-weight: normal; }
   .link:hover { text-decoration: underline; }
 </style>
 </head>
