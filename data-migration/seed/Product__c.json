@@ -1,0 +1,1098 @@
+{
+    "records": [
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef1"
+            },
+            "Name": "Individual Mediclaim",
+            "Product_Class__c": "Health",
+            "Customer_Type__c": "Retail",
+            "Is_Active__c": true,
+            "Record_Type__c": "Health5",
+            "Product_Group__c": "@Product_Group__cRef8"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef2"
+            },
+            "Name": "Group Term Life",
+            "Product_Class__c": "Life",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Life1",
+            "Product_Group__c": "@Product_Group__cRef4"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef3"
+            },
+            "Name": "Aviation  Craft Insurance",
+            "Product_Class__c": "Aviation",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Aviation1",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef4"
+            },
+            "Name": "Aviation  Liability Insurance",
+            "Product_Class__c": "Aviation",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Aviation2",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef5"
+            },
+            "Name": "Credit Insurance",
+            "Product_Class__c": "Credit Insurance",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Credit1",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef6"
+            },
+            "Name": "Advance Loss Of Profit",
+            "Product_Class__c": "Engineering",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Engineering1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef7"
+            },
+            "Name": "Boiler  And Pressure Vessel",
+            "Product_Class__c": "Engineering",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Engineering2",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef8"
+            },
+            "Name": "Contractors  Plant And Machinery",
+            "Product_Class__c": "Engineering",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Engineering3",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef9"
+            },
+            "Name": "Contractors All Risks",
+            "Product_Class__c": "Engineering",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Engineering3",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef10"
+            },
+            "Name": "Erection All Risk",
+            "Product_Class__c": "Engineering",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Engineering3",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef11"
+            },
+            "Name": "Machinery Breakdown",
+            "Product_Class__c": "Engineering",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Engineering3",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef12"
+            },
+            "Name": "Machinery Loss Of Profits",
+            "Product_Class__c": "Engineering",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Engineering1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef13"
+            },
+            "Name": "Marine Cum Errection",
+            "Product_Class__c": "Engineering",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Engineering5",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef14"
+            },
+            "Name": "Bharat Griha Raksha",
+            "Product_Class__c": "Fire",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Fire1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef15"
+            },
+            "Name": "Bharat Laghu Udyam Suraksha",
+            "Product_Class__c": "Fire",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Fire1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef16"
+            },
+            "Name": "Bharat Sookshma Udhyam Suraksha",
+            "Product_Class__c": "Fire",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Fire1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef17"
+            },
+            "Name": "Business Interruption",
+            "Product_Class__c": "Fire",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Fire2",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef18"
+            },
+            "Name": "Standard Fire And Special Perils Insurance Policy",
+            "Product_Class__c": "Fire",
+            "Customer_Type__c": "Retail",
+            "Is_Active__c": true,
+            "Record_Type__c": "Fire1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef19"
+            },
+            "Name": "Fire Loss Of Profit",
+            "Product_Class__c": "Fire",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Fire2",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef20"
+            },
+            "Name": "Home Shield Insurance",
+            "Product_Class__c": "Fire",
+            "Customer_Type__c": "Retail",
+            "Is_Active__c": true,
+            "Record_Type__c": "Fire3",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef21"
+            },
+            "Name": "Industrial All Risk",
+            "Product_Class__c": "Fire",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Fire4",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef22"
+            },
+            "Name": "Mega - All Risk",
+            "Product_Class__c": "Fire",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Fire4",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef23"
+            },
+            "Name": "Msme Suraksha Kavach",
+            "Product_Class__c": "Fire",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Fire1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef24"
+            },
+            "Name": "Standalone Terrorism Insurance",
+            "Product_Class__c": "Fire",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Fire5",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef25"
+            },
+            "Name": "Group Mediclaim",
+            "Product_Class__c": "Health",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Health1",
+            "Product_Group__c": "@Product_Group__cRef1"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef26"
+            },
+            "Name": "Group Travel Insurance",
+            "Product_Class__c": "Health",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Health3",
+            "Product_Group__c": "@Product_Group__cRef1"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef27"
+            },
+            "Name": "Bankeks Blanket Bond",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability1",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef28"
+            },
+            "Name": "Carriers Legal Liability",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability2",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef29"
+            },
+            "Name": "Clinical Trials Insurance",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability3",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef30"
+            },
+            "Name": "Commercial General Liability",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability4",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef31"
+            },
+            "Name": "Crime Liability",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability3",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef32"
+            },
+            "Name": "Cyber And Professional Indemnity",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability5",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef33"
+            },
+            "Name": "Directors & Officers Liability",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability6",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef34"
+            },
+            "Name": "Environmental Liability",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability10",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef35"
+            },
+            "Name": "Error  And Omissions",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability5",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef36"
+            },
+            "Name": "Kidnap & Ransom",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability7",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef37"
+            },
+            "Name": "Posi (Public Offering Of Securities Insurance)",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability9",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef38"
+            },
+            "Name": "Product Liability",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability4",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef39"
+            },
+            "Name": "Professional Indemnity",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Retail",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability5",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef40"
+            },
+            "Name": "Public Liability",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability10",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef41"
+            },
+            "Name": "Service Contract Liability",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability5",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef42"
+            },
+            "Name": "Stock Broker Indemnity",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability5",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef43"
+            },
+            "Name": "Third Party General Liability",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability10",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef44"
+            },
+            "Name": "Trade Credit Insurance",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Credit1",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef45"
+            },
+            "Name": "Trustee Liability",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability5",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef46"
+            },
+            "Name": "Workmens Compensation",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef1"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef47"
+            },
+            "Name": "Marine Open Cover",
+            "Product_Class__c": "Marine",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Marine1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef48"
+            },
+            "Name": "Marine Open Policy",
+            "Product_Class__c": "Marine",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Marine1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef49"
+            },
+            "Name": "Marine Sales Turnover Policy",
+            "Product_Class__c": "Marine",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Marine1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef50"
+            },
+            "Name": "Marine Specific (Corporate)",
+            "Product_Class__c": "Marine",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Marine2",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef51"
+            },
+            "Name": "Marine-Hull",
+            "Product_Class__c": "Marine",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Marine3",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef52"
+            },
+            "Name": "Boat Man Package",
+            "Product_Class__c": "Miscellaneous",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef53"
+            },
+            "Name": "Bsc Insurance",
+            "Product_Class__c": "Miscellaneous",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef54"
+            },
+            "Name": "Consequential Loss Of Profits",
+            "Product_Class__c": "Miscellaneous",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef55"
+            },
+            "Name": "Customs Duty",
+            "Product_Class__c": "Miscellaneous",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef56"
+            },
+            "Name": "Extended Warranty",
+            "Product_Class__c": "Miscellaneous",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef57"
+            },
+            "Name": "Fidelity Insurance",
+            "Product_Class__c": "Miscellaneous",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef58"
+            },
+            "Name": "Film Insurance",
+            "Product_Class__c": "Miscellaneous",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef59"
+            },
+            "Name": "Jewellrs Block Insurance",
+            "Product_Class__c": "Miscellaneous",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef60"
+            },
+            "Name": "Loss Of Licence",
+            "Product_Class__c": "Miscellaneous",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef61"
+            },
+            "Name": "Money",
+            "Product_Class__c": "Miscellaneous",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef62"
+            },
+            "Name": "Neon Sign",
+            "Product_Class__c": "Miscellaneous",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef63"
+            },
+            "Name": "Non-Direct",
+            "Product_Class__c": "Miscellaneous",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef64"
+            },
+            "Name": "Package Insurance",
+            "Product_Class__c": "Miscellaneous",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef65"
+            },
+            "Name": "Property All Risk",
+            "Product_Class__c": "Miscellaneous",
+            "Customer_Type__c": "Retail",
+            "Is_Active__c": true,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef66"
+            },
+            "Name": "Shop Keepers Insurance",
+            "Product_Class__c": "Miscellaneous",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef67"
+            },
+            "Name": "Special Contingency Policy (Scp)",
+            "Product_Class__c": "Miscellaneous",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef68"
+            },
+            "Name": "Surety Insurance",
+            "Product_Class__c": "Miscellaneous",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef69"
+            },
+            "Name": "MOTOR - CPA POLICY",
+            "Product_Class__c": "Motor",
+            "Is_Active__c": false,
+            "Record_Type__c": "Motor1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef70"
+            },
+            "Name": "MOTOR COMMERCIAL VEHICLE",
+            "Product_Class__c": "Motor",
+            "Is_Active__c": false,
+            "Record_Type__c": "Motor1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef71"
+            },
+            "Name": "Motor GCV Policy",
+            "Product_Class__c": "Motor",
+            "Is_Active__c": false,
+            "Record_Type__c": "Motor1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef72"
+            },
+            "Name": "Motor Misc Policy",
+            "Product_Class__c": "Motor",
+            "Is_Active__c": false,
+            "Record_Type__c": "Motor1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef73"
+            },
+            "Name": "MOTOR OWN DAMAGE - PRIVATE CAR POLICY",
+            "Product_Class__c": "Motor",
+            "Is_Active__c": false,
+            "Record_Type__c": "Motor1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef74"
+            },
+            "Name": "MOTOR OWN DAMAGE - TWO WHEELER POLICY",
+            "Product_Class__c": "Motor",
+            "Is_Active__c": false,
+            "Record_Type__c": "Motor1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef75"
+            },
+            "Name": "Motor PCV Policy",
+            "Product_Class__c": "Motor",
+            "Is_Active__c": false,
+            "Record_Type__c": "Motor1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef76"
+            },
+            "Name": "MOTOR PRIVATE CAR",
+            "Product_Class__c": "Motor",
+            "Is_Active__c": false,
+            "Record_Type__c": "Motor1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef77"
+            },
+            "Name": "MOTOR ROAD RISK CLASS",
+            "Product_Class__c": "Motor",
+            "Is_Active__c": false,
+            "Record_Type__c": "Motor1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef78"
+            },
+            "Name": "MOTOR THIRD PARTY - PCV POLICY",
+            "Product_Class__c": "Motor",
+            "Is_Active__c": false,
+            "Record_Type__c": "Motor1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef79"
+            },
+            "Name": "MOTOR THIRD PARTY - PRIVATE CAR POLICY",
+            "Product_Class__c": "Motor",
+            "Is_Active__c": false,
+            "Record_Type__c": "Motor1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef80"
+            },
+            "Name": "MOTOR THIRD PARTY - TWO WHEELER POLICY",
+            "Product_Class__c": "Motor",
+            "Is_Active__c": false,
+            "Record_Type__c": "Motor1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef81"
+            },
+            "Name": "MOTOR THIRD PARTY- GCV POLICY",
+            "Product_Class__c": "Motor",
+            "Is_Active__c": false,
+            "Record_Type__c": "Motor1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef82"
+            },
+            "Name": "MOTOR THIRD PARTY LIABILITY",
+            "Product_Class__c": "Motor",
+            "Is_Active__c": false,
+            "Record_Type__c": "Motor1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef83"
+            },
+            "Name": "MOTOR THIRD PARTY- MISC POLICY",
+            "Product_Class__c": "Motor",
+            "Is_Active__c": false,
+            "Record_Type__c": "Motor1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef84"
+            },
+            "Name": "MOTOR TW",
+            "Product_Class__c": "Motor",
+            "Is_Active__c": false,
+            "Record_Type__c": "Motor1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef85"
+            },
+            "Name": "Annual Travel",
+            "Product_Class__c": "Motor",
+            "Is_Active__c": false,
+            "Record_Type__c": "Motor1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef86"
+            },
+            "Name": "Family Travel",
+            "Product_Class__c": "Motor",
+            "Is_Active__c": false,
+            "Record_Type__c": "Motor1",
+            "Product_Group__c": "@Product_Group__cRef2"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef87"
+            },
+            "Name": "Hospital Cash (Health)",
+            "Product_Class__c": "Health",
+            "Is_Active__c": false,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef1"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef88"
+            },
+            "Name": "HOSPI CASH (Accident)",
+            "Product_Class__c": "Health",
+            "Is_Active__c": false,
+            "Record_Type__c": "Miscellaneous",
+            "Product_Group__c": "@Product_Group__cRef1"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef89"
+            },
+            "Name": "OPD Insurance",
+            "Product_Class__c": "Health",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Health6",
+            "Product_Group__c": "@Product_Group__cRef1"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef90"
+            },
+            "Name": "Group Personal Accident",
+            "Product_Class__c": "Health",
+            "Is_Active__c": true,
+            "Record_Type__c": "Health2",
+            "Product_Group__c": "@Product_Group__cRef1"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef91"
+            },
+            "Name": "Cyber Risk",
+            "Product_Class__c": "Liability",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability5",
+            "Product_Group__c": "@Product_Group__cRef3"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef92"
+            },
+            "Name": "Individual Mediclaim",
+            "Product_Class__c": "Health",
+            "Customer_Type__c": "Retail",
+            "Is_Active__c": true,
+            "Record_Type__c": "Health5",
+            "Product_Group__c": "@Product_Group__cRef4"
+        },
+        {
+            "attributes": {
+                "type": "Product__c",
+                "referenceId": "Product__cRef93"
+            },
+            "Name": "Public Liability Act Policy",
+            "Product_Class__c": "Liability",
+            "Customer_Type__c": "Corporate",
+            "Is_Active__c": true,
+            "Record_Type__c": "Liability10",
+            "Product_Group__c": "@Product_Group__cRef3"
+        }
+    ]
+}

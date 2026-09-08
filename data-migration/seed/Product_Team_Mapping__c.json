@@ -1,0 +1,324 @@
+{
+    "records": [
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef1"
+            },
+            "Team__c": "@Team__cRef1",
+            "Product_Group__c": "@Product_Group__cRef1",
+            "Team_Type__c": "Servicing",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef2"
+            },
+            "Team__c": "@Team__cRef2",
+            "Product_Group__c": "@Product_Group__cRef1",
+            "Team_Type__c": "Claims",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef3"
+            },
+            "Team__c": "@Team__cRef3",
+            "Product_Group__c": "@Product_Group__cRef1",
+            "Team_Type__c": "Operations",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef4"
+            },
+            "Team__c": "@Team__cRef4",
+            "Product_Group__c": "@Product_Group__cRef1",
+            "Team_Type__c": "Placement",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef5"
+            },
+            "Team__c": "@Team__cRef5",
+            "Product_Group__c": "@Product_Group__cRef3",
+            "Team_Type__c": "Claims",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef6"
+            },
+            "Team__c": "@Team__cRef6",
+            "Product_Group__c": "@Product_Group__cRef3",
+            "Team_Type__c": "Operations",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef7"
+            },
+            "Team__c": "@Team__cRef7",
+            "Product_Group__c": "@Product_Group__cRef2",
+            "Team_Type__c": "Servicing",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef8"
+            },
+            "Team__c": "@Team__cRef8",
+            "Product_Group__c": "@Product_Group__cRef2",
+            "Team_Type__c": "Placement",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef9"
+            },
+            "Team__c": "@Team__cRef9",
+            "Product_Group__c": "@Product_Group__cRef2",
+            "Team_Type__c": "Operations",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef10"
+            },
+            "Team__c": "@Team__cRef10",
+            "Product_Group__c": "@Product_Group__cRef2",
+            "Team_Type__c": "Claims",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef11"
+            },
+            "Team__c": "@Team__cRef11",
+            "Product_Group__c": "@Product_Group__cRef3",
+            "Team_Type__c": "Placement",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef12"
+            },
+            "Team__c": "@Team__cRef12",
+            "Product_Group__c": "@Product_Group__cRef3",
+            "Team_Type__c": "Servicing",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef13"
+            },
+            "Team__c": "@Team__cRef13",
+            "Product_Group__c": "@Product_Group__cRef4",
+            "Team_Type__c": "Operations",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef14"
+            },
+            "Team__c": "@Team__cRef14",
+            "Product_Group__c": "@Product_Group__cRef4",
+            "Team_Type__c": "Claims",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef15"
+            },
+            "Team__c": "@Team__cRef15",
+            "Product_Group__c": "@Product_Group__cRef4",
+            "Team_Type__c": "Placement",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef16"
+            },
+            "Team__c": "@Team__cRef16",
+            "Product_Group__c": "@Product_Group__cRef4",
+            "Team_Type__c": "Servicing",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef17"
+            },
+            "Team__c": "@Team__cRef17",
+            "Product_Group__c": "@Product_Group__cRef5",
+            "Team_Type__c": "Servicing",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef18"
+            },
+            "Team__c": "@Team__cRef18",
+            "Product_Group__c": "@Product_Group__cRef5",
+            "Team_Type__c": "Claims",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef19"
+            },
+            "Team__c": "@Team__cRef19",
+            "Product_Group__c": "@Product_Group__cRef5",
+            "Team_Type__c": "Operations",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef20"
+            },
+            "Team__c": "@Team__cRef20",
+            "Product_Group__c": "@Product_Group__cRef5",
+            "Team_Type__c": "Placement",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef21"
+            },
+            "Team__c": "@Team__cRef21",
+            "Product_Group__c": "@Product_Group__cRef7",
+            "Team_Type__c": "Claims",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef22"
+            },
+            "Team__c": "@Team__cRef22",
+            "Product_Group__c": "@Product_Group__cRef7",
+            "Team_Type__c": "Operations",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef23"
+            },
+            "Team__c": "@Team__cRef23",
+            "Product_Group__c": "@Product_Group__cRef6",
+            "Team_Type__c": "Servicing",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef24"
+            },
+            "Team__c": "@Team__cRef24",
+            "Product_Group__c": "@Product_Group__cRef6",
+            "Team_Type__c": "Placement",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef25"
+            },
+            "Team__c": "@Team__cRef25",
+            "Product_Group__c": "@Product_Group__cRef6",
+            "Team_Type__c": "Operations",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef26"
+            },
+            "Team__c": "@Team__cRef26",
+            "Product_Group__c": "@Product_Group__cRef6",
+            "Team_Type__c": "Claims",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef27"
+            },
+            "Team__c": "@Team__cRef27",
+            "Product_Group__c": "@Product_Group__cRef7",
+            "Team_Type__c": "Placement",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef28"
+            },
+            "Team__c": "@Team__cRef28",
+            "Product_Group__c": "@Product_Group__cRef7",
+            "Team_Type__c": "Servicing",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef29"
+            },
+            "Team__c": "@Team__cRef29",
+            "Product_Group__c": "@Product_Group__cRef8",
+            "Team_Type__c": "Operations",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef30"
+            },
+            "Team__c": "@Team__cRef30",
+            "Product_Group__c": "@Product_Group__cRef8",
+            "Team_Type__c": "Claims",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef31"
+            },
+            "Team__c": "@Team__cRef31",
+            "Product_Group__c": "@Product_Group__cRef8",
+            "Team_Type__c": "Placement",
+            "Available_for_Policy_Ownership__c": true
+        },
+        {
+            "attributes": {
+                "type": "Product_Team_Mapping__c",
+                "referenceId": "Product_Team_Mapping__cRef32"
+            },
+            "Team__c": "@Team__cRef32",
+            "Product_Group__c": "@Product_Group__cRef8",
+            "Team_Type__c": "Servicing",
+            "Available_for_Policy_Ownership__c": true
+        }
+    ]
+}

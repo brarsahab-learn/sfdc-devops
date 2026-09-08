@@ -1,0 +1,242 @@
+{
+    "records": [
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef1"
+            },
+            "Name": "Agriculture Insurance Company of India Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef2"
+            },
+            "Name": "Bajaj Allianz General Insurance Company Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef3"
+            },
+            "Name": "Cholamandalam MS General Insurance Company Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef4"
+            },
+            "Name": "ECGC Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef5"
+            },
+            "Name": "Future Generali India Insurance Company Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef6"
+            },
+            "Name": "Digit General Insurance Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef7"
+            },
+            "Name": "HDFC ERGO General Insurance Company Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef8"
+            },
+            "Name": "ICICI Lombard General Insurance Company Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef9"
+            },
+            "Name": "IFFCO TOKIO General Insurance Company Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef10"
+            },
+            "Name": "Zurich Kotak General Insurance Company (India) Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef11"
+            },
+            "Name": "Kshema General Insurance Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef12"
+            },
+            "Name": "Liberty General Insurance Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef13"
+            },
+            "Name": "Magma General Insurance Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef14"
+            },
+            "Name": "National Insurance Company Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef15"
+            },
+            "Name": "Navi General Insurance Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef16"
+            },
+            "Name": "Raheja QBE General Insurance Co. Ltd."
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef17"
+            },
+            "Name": "Reliance General Insurance Company Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef18"
+            },
+            "Name": "Royal Sundaram General Insurance Company Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef19"
+            },
+            "Name": "SBI General Insurance Company Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef20"
+            },
+            "Name": "Shriram General Insurance Company Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef21"
+            },
+            "Name": "Tata AIG General Insurance Company Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef22"
+            },
+            "Name": "The New India Assurance Company Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef23"
+            },
+            "Name": "The Oriental Insurance Company Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef24"
+            },
+            "Name": "United India Insurance Company Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef25"
+            },
+            "Name": "Universal Sompo General Insurance Company Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef26"
+            },
+            "Name": "Zuno General Insurance Ltd."
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef27"
+            },
+            "Name": "Aditya Birla Health Insurance Co. Ltd."
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef28"
+            },
+            "Name": "Care Health Insurance Ltd."
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef29"
+            },
+            "Name": "Galaxy Health Insurance Company Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef30"
+            },
+            "Name": "Narayana Health Insurance Ltd."
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef31"
+            },
+            "Name": "Manipal Cigna Health Insurance Company Limited"
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef32"
+            },
+            "Name": "Niva Bupa Health Insurance Co Ltd."
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef33"
+            },
+            "Name": "Star Health & Allied Insurance Co.Ltd."
+        },
+        {
+            "attributes": {
+                "type": "Account",
+                "referenceId": "AccountRef34"
+            },
+            "Name": "Acko General Insurance Limited"
+        }
+    ]
+}

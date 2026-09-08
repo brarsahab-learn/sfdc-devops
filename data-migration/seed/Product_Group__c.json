@@ -1,0 +1,60 @@
+{
+    "records": [
+        {
+            "attributes": {
+                "type": "Product_Group__c",
+                "referenceId": "Product_Group__cRef1"
+            },
+            "Name": "Employee Benefit"
+        },
+        {
+            "attributes": {
+                "type": "Product_Group__c",
+                "referenceId": "Product_Group__cRef2"
+            },
+            "Name": "Non Employee Benefit"
+        },
+        {
+            "attributes": {
+                "type": "Product_Group__c",
+                "referenceId": "Product_Group__cRef3"
+            },
+            "Name": "Speciality"
+        },
+        {
+            "attributes": {
+                "type": "Product_Group__c",
+                "referenceId": "Product_Group__cRef4"
+            },
+            "Name": "Life"
+        },
+        {
+            "attributes": {
+                "type": "Product_Group__c",
+                "referenceId": "Product_Group__cRef5"
+            },
+            "Name": "Employee Benefit"
+        },
+        {
+            "attributes": {
+                "type": "Product_Group__c",
+                "referenceId": "Product_Group__cRef6"
+            },
+            "Name": "Non Employee Benefit"
+        },
+        {
+            "attributes": {
+                "type": "Product_Group__c",
+                "referenceId": "Product_Group__cRef7"
+            },
+            "Name": "Speciality"
+        },
+        {
+            "attributes": {
+                "type": "Product_Group__c",
+                "referenceId": "Product_Group__cRef8"
+            },
+            "Name": "Life"
+        }
+    ]
+}

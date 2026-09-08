@@ -1,0 +1,510 @@
+{
+    "records": [
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef1"
+            },
+            "Account__c": "@AccountRef1",
+            "Address__Street__s": "Plate B & C, 5th Floor, Office Block-1, East Kidwai Nagar,",
+            "Address__City__s": "New Delhi",
+            "Address__PostalCode__s": "110023",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef2"
+            },
+            "Account__c": "@AccountRef2",
+            "Address__Street__s": "7th Floor, Block No 4, DLF Tower, 15 Shivaji Marg, West Delhi",
+            "Address__City__s": "New Delhi",
+            "Address__PostalCode__s": "110015",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef3"
+            },
+            "Account__c": "@AccountRef3",
+            "Address__Street__s": "Flat No 2H, 2I, 2V & 2Q, 2nd Floor, DCM Building, Barakhamba Road",
+            "Address__City__s": "New Delhi",
+            "Address__PostalCode__s": "110001",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef4"
+            },
+            "Account__c": "@AccountRef4",
+            "Address__Street__s": "ECGC Bhawan, CTS No.393,393/1 to 45, M.V Road, Andheri East",
+            "Address__City__s": "Mumbai",
+            "Address__PostalCode__s": "400069",
+            "Address__StateCode__s": "MH",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef5"
+            },
+            "Account__c": "@AccountRef5",
+            "Address__Street__s": "303 to 310, Kailash Building No.26, Kasturba Gandhi Marg, Connaught Place",
+            "Address__City__s": "New Delhi",
+            "Address__PostalCode__s": "110001",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef6"
+            },
+            "Account__c": "@AccountRef6",
+            "Address__Street__s": "B Wing, 5th Half Floor, IFCI Tower, 61 Nehru Place",
+            "Address__City__s": "New Delhi",
+            "Address__PostalCode__s": "110019",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef7"
+            },
+            "Account__c": "@AccountRef7",
+            "Address__Street__s": "A-36, A Block Road, B Block, Sector 64",
+            "Address__City__s": "Noida",
+            "Address__PostalCode__s": "201309",
+            "Address__StateCode__s": "UP",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef8"
+            },
+            "Account__c": "@AccountRef8",
+            "Address__Street__s": "Mercantile House, KG Marg",
+            "Address__City__s": "New Delhi",
+            "Address__PostalCode__s": "110001",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef9"
+            },
+            "Account__c": "@AccountRef9",
+            "Address__Street__s": "IFFCO Tower, Plot No.3, Sector 29",
+            "Address__City__s": "Gurugram",
+            "Address__StateCode__s": "HR",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef10"
+            },
+            "Account__c": "@AccountRef10",
+            "Address__Street__s": "401, 4th Floor, Silver Metropolis, Jai Coach Compound, Off Western Express Highway, Goregaon East",
+            "Address__City__s": "Mumbai",
+            "Address__PostalCode__s": "400063",
+            "Address__StateCode__s": "MH",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef11"
+            },
+            "Account__c": "@AccountRef11",
+            "Address__Street__s": "413, 4th Floor, My Home Tycoon, Kundan Bagh, Begumpet",
+            "Address__City__s": "Hyderabad",
+            "Address__PostalCode__s": "500016",
+            "Address__StateCode__s": "TG",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef12"
+            },
+            "Account__c": "@AccountRef12",
+            "Address__Street__s": "2nd Floor, Plot No.1, DLF Industrial Area, Moti Nagar Flyover",
+            "Address__City__s": "New Delhi",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef13"
+            },
+            "Account__c": "@AccountRef13",
+            "Address__Street__s": "Unit No.A-2, 2nd Floor, Kirti Nagar, Najafgarh Road, Near Kalra Hospital",
+            "Address__City__s": "New Delhi",
+            "Address__PostalCode__s": "110015",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef14"
+            },
+            "Account__c": "@AccountRef14",
+            "Address__Street__s": "Dwarka Business Office, S-17, 2nd Floor, Sector-4, Plot No.5, Malik Plaza, Dwarka",
+            "Address__City__s": "New Delhi",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef15"
+            },
+            "Account__c": "@AccountRef14",
+            "Address__Street__s": "Meera Hotel, Nimbahera Road",
+            "Address__City__s": "Chittorgarh",
+            "Address__StateCode__s": "RJ",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef16"
+            },
+            "Account__c": "@AccountRef14",
+            "Address__Street__s": "DRDO IV, 803-B, 8th Floor, Konnectus Tower-3, Ajmeri Gate, Bhavbhuti Marg",
+            "Address__City__s": "New Delhi",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef17"
+            },
+            "Account__c": "@AccountRef14",
+            "Address__Street__s": "Plot No.132-135, 3rd, 4th & 5th Floor, NBCC Center, Lal Kothi Scheme, Sehkar Marg",
+            "Address__City__s": "Jaipur",
+            "Address__StateCode__s": "RJ",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef18"
+            },
+            "Account__c": "@AccountRef15",
+            "Address__Street__s": "10th Floor, Vaishnavi Tech Square, Iballur Village, Begur Hobli",
+            "Address__City__s": "Bengaluru",
+            "Address__PostalCode__s": "560102",
+            "Address__StateCode__s": "KA",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef19"
+            },
+            "Account__c": "@AccountRef16",
+            "Address__Street__s": "Unit No.421, 4th Floor, Plot No.D-6, Wave Silver Tower, Sector-18",
+            "Address__City__s": "Noida",
+            "Address__StateCode__s": "UP",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef20"
+            },
+            "Account__c": "@AccountRef17",
+            "Address__Street__s": "1st Floor, A-12, Mohan Cooperative Industrial Estate, Mathura Road",
+            "Address__City__s": "New Delhi",
+            "Address__PostalCode__s": "110044",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef21"
+            },
+            "Account__c": "@AccountRef18",
+            "Address__Street__s": "Plot No.136, Rider House, Sector-44, Ground & First Floor",
+            "Address__City__s": "Gurugram",
+            "Address__StateCode__s": "HR",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef22"
+            },
+            "Account__c": "@AccountRef19",
+            "Address__Street__s": "6th Floor, Punj Essen House, 17-18 Nehru Place",
+            "Address__City__s": "New Delhi",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef23"
+            },
+            "Account__c": "@AccountRef20",
+            "Address__Street__s": "1001, Ground Floor, Arya Samaj Road, Naiwala, Karol Bagh",
+            "Address__City__s": "New Delhi",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef24"
+            },
+            "Account__c": "@AccountRef21",
+            "Address__Street__s": "Unit Nos 604-607, 6th Floor, Tower-C, Unitech Cyber Park",
+            "Address__City__s": "Gurugram",
+            "Address__StateCode__s": "HR",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef25"
+            },
+            "Account__c": "@AccountRef21",
+            "Address__Street__s": "A-2, 2nd Floor, Kirti Nagar, Main Najafgarh Road, Near Kalra Hospital",
+            "Address__City__s": "New Delhi",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef26"
+            },
+            "Account__c": "@AccountRef22",
+            "Address__Street__s": "3rd Floor, Arif Chamber-1, Kapoorthala, Aliganj",
+            "Address__City__s": "Lucknow",
+            "Address__StateCode__s": "UP",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef27"
+            },
+            "Account__c": "@AccountRef22",
+            "Address__Street__s": "301, RG City Center, LSC, Block-B, Lawrence Road",
+            "Address__City__s": "New Delhi",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef28"
+            },
+            "Account__c": "@AccountRef22",
+            "Address__Street__s": "2nd Floor, GH Tower, Opp. EPF Karyalaya, Vyom Prasath Colony, GMS Road",
+            "Address__City__s": "Dehradun",
+            "Address__PostalCode__s": "-",
+            "Address__StateCode__s": "UT",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef29"
+            },
+            "Account__c": "@AccountRef22",
+            "Address__Street__s": "New India Centre, 2nd Floor, 17-A Cooperage Road",
+            "Address__City__s": "Mumbai",
+            "Address__PostalCode__s": "400001",
+            "Address__StateCode__s": "MH",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef30"
+            },
+            "Account__c": "@AccountRef23",
+            "Address__Street__s": "SCO 52, Sector 42-C",
+            "Address__City__s": "Chandigarh",
+            "Address__PostalCode__s": "160036",
+            "Address__StateCode__s": "PB",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef31"
+            },
+            "Account__c": "@AccountRef23",
+            "Address__Street__s": "8, 1st Floor, Krishna Market, Kalkaji",
+            "Address__City__s": "New Delhi",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef32"
+            },
+            "Account__c": "@AccountRef24",
+            "Address__Street__s": "Arif Chambers, 1 Kapoorthala Bagh, Aliganj",
+            "Address__City__s": "Lucknow",
+            "Address__StateCode__s": "UP",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef33"
+            },
+            "Account__c": "@AccountRef24",
+            "Address__Street__s": "4A, Big Bazar Street",
+            "Address__City__s": "Dharapuram",
+            "Address__StateCode__s": "TN",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef34"
+            },
+            "Account__c": "@AccountRef24",
+            "Address__Street__s": "D-24 & E-25/23, Himalaya House, KG Marg",
+            "Address__City__s": "New Delhi",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef35"
+            },
+            "Account__c": "@AccountRef25",
+            "Address__Street__s": "149, 4th Floor, Sector 44 Road",
+            "Address__City__s": "Gurugram",
+            "Address__StateCode__s": "HR",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef36"
+            },
+            "Account__c": "@AccountRef26",
+            "Address__Street__s": "7th Floor, Flat No.701,703,705,707 & 709, Antriksh Bhavan, 22 KG Marg",
+            "Address__City__s": "New Delhi",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef37"
+            },
+            "Account__c": "@AccountRef27",
+            "Address__Street__s": "9th Floor, Tower-1, One World Centre, Jupiter Mills Compound, 841 Senapati Bapat Marg, Elphinstone Road",
+            "Address__City__s": "Mumbai",
+            "Address__PostalCode__s": "400013",
+            "Address__StateCode__s": "MH",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef38"
+            },
+            "Account__c": "@AccountRef28",
+            "Address__Street__s": "F-1, 2nd Floor, Sector-06",
+            "Address__City__s": "Noida",
+            "Address__StateCode__s": "UP",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef39"
+            },
+            "Account__c": "@AccountRef29",
+            "Address__Street__s": "Prestige Polygon, 12th Floor, #471 Anna Salai, Nandanam",
+            "Address__City__s": "Chennai",
+            "Address__PostalCode__s": "600035",
+            "Address__StateCode__s": "TN",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef40"
+            },
+            "Account__c": "@AccountRef30",
+            "Address__Street__s": "No.258/A, Bommasandra Industrial Area, Anekal Taluk, Hosur Road",
+            "Address__City__s": "Bengaluru",
+            "Address__PostalCode__s": "560099",
+            "Address__StateCode__s": "KA",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef41"
+            },
+            "Account__c": "@AccountRef31",
+            "Address__Street__s": "401/402, 4th Floor, Raheja Titanium, Off Western Express Highway, Goregaon East",
+            "Address__City__s": "Mumbai",
+            "Address__PostalCode__s": "400063",
+            "Address__StateCode__s": "MH",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef42"
+            },
+            "Account__c": "@AccountRef32",
+            "Address__Street__s": "First Floor, C-98, Lajpat Nagar Part-1",
+            "Address__City__s": "New Delhi",
+            "Address__StateCode__s": "DL",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef43"
+            },
+            "Account__c": "@AccountRef33",
+            "Address__Street__s": "No.1, New Tank Street, Valluvar Kottam High Road, Nungambakkam",
+            "Address__City__s": "Chennai",
+            "Address__PostalCode__s": "600034",
+            "Address__StateCode__s": "TN",
+            "Address__CountryCode__s": "IN"
+        },
+        {
+            "attributes": {
+                "type": "Broker_Office_Location__c",
+                "referenceId": "Broker_Office_Location__cRef44"
+            },
+            "Account__c": "@AccountRef34",
+            "Address__Street__s": "36/5, Hustlehub One East, 27th Main Road, Sector-2, HSR Layout",
+            "Address__City__s": "Bengaluru",
+            "Address__PostalCode__s": "560102",
+            "Address__StateCode__s": "KA",
+            "Address__CountryCode__s": "IN"
+        }
+    ]
+}

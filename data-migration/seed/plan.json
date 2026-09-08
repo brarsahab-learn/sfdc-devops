@@ -1,0 +1,68 @@
+[
+    {
+        "sobject": "Product_Group__c",
+        "files": [
+            "Product_Group__c.json"
+        ]
+    },
+    { "active": true,
+        "sobject": "Team__c",
+        "files": [
+            "Team__c.json"
+        ]
+    },
+    { "active": true,
+        "sobject": "Product__c",
+        "files": [
+            "Product__c.json"
+        ]
+    },
+    { "active": true,
+        "sobject": "Component_Master__c",
+        "files": [
+            "Component_Master__c.json"
+        ]
+    },
+    { "active": true,
+        "sobject": "Broker__c",
+        "files": [
+            "Broker__c.json"
+        ]
+    },
+    { "active": true,
+        "sobject": "Account",
+        "files": [
+            "Account.json"
+        ]
+    },
+    { "active": true,
+        "sobject": "Product_Component__c",
+        "files": [
+            "Product_Component__c.json"
+        ]
+    },
+    { "active": true,
+        "sobject": "Product_Team_Mapping__c",
+        "files": [
+            "Product_Team_Mapping__c.json"
+        ]
+    },
+    { "active": true,
+        "sobject": "Broker_Office_Location__c",
+        "files": [
+            "Broker_Office_Location__c.json"
+        ]
+    },
+    { "active": true,
+        "sobject": "Contact",
+        "files": [
+            "Contact.json"
+        ]
+    },
+    { "active": true,
+        "sobject": "Product_Insurer_Mapping__c",
+        "files": [
+            "Product_Insurer_Mapping__c.json"
+        ]
+    }
+]
