@@ -328,10 +328,11 @@ ${cspMeta(this._panel.webview)}
   // quotes, no JSON.parse() needed, so there's no outer string literal for a stray
   // apostrophe in a story ID or branch name to prematurely close. (A previous version
   // wrapped this in JSON.parse('...') — single-quoted — which broke outright the moment
-  // any field contained a literal ' character, since only </script>-relevant characters
-  // were escaped, never the quote the whole thing was wrapped in.) Escaping <, >, & still
-  // guards against a "</script>" (or an HTML-entity-sensitive character) inside a string
-  // value ending this script block early.
+  // any field contained a literal ' character, since only closing-script-tag-relevant
+  // characters were escaped, never the quote the whole thing was wrapped in.) Escaping
+  // <, >, & still guards against a closing script tag (or an HTML-entity-sensitive
+  // character) inside a string value ending this script block early — note this comment
+  // itself must never spell that literal tag out, or it would do exactly that.
   const CARDS = ${
       JSON.stringify(cards.map(c => ({
           id: c.storyId,

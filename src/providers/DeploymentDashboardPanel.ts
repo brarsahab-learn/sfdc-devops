@@ -1075,6 +1075,12 @@ ${envPane}
   function updateDeployButtonState(env) {
     var pane = document.querySelector('.pane[data-env="' + env + '"]');
     var btn = document.getElementById('deployBtn-' + env);
+    var validateBtn = document.getElementById('validateBtn-' + env);
+    var hasSelection = document.querySelectorAll('.file-check[data-env="' + env + '"]:checked').length > 0;
+    if (validateBtn) {
+      validateBtn.disabled = validateBtn.dataset.hardDisabled === '1' || !hasSelection;
+      validateBtn.title = hasSelection ? '' : 'Check at least one file to validate, or use Deploy ALL.';
+    }
     if (!pane || !btn) { return false; }
     var hasValidated = pane.dataset.hasValidated === '1';
     var matches = hasValidated && currentFingerprint(env) === (pane.dataset.validatedFp || '');
@@ -1103,6 +1109,7 @@ ${envPane}
       }
     }
     updateTestsPanel(env);
+    syncGroupCheckboxes(env);
   }
 
   function currentTestMode(env) {
@@ -1169,6 +1176,36 @@ ${envPane}
     recomputeSelection(env);
   }
 
+  // (De)selects every file within one metadata-type group (e.g. all 56 ApexClass rows) —
+  // same visibility rule as selectAll above, scoped to just this <details> group.
+  function selectGroupAll(groupCb) {
+    var details = groupCb.closest('.type-group');
+    if (!details) { return; }
+    var env = details.dataset.env;
+    var checked = groupCb.checked;
+    details.querySelectorAll('.file-check').forEach(function (cb) {
+      var row = cb.closest('.tree-row');
+      if (!row || row.style.display !== 'none') { cb.checked = checked; }
+    });
+    recomputeSelection(env);
+  }
+
+  // Keeps each group's header checkbox reflecting its rows: checked when all (visible) rows in
+  // the group are checked, indeterminate when only some are, unchecked otherwise.
+  function syncGroupCheckboxes(env) {
+    document.querySelectorAll('.type-group[data-env="' + env + '"]').forEach(function (grp) {
+      var groupCb = grp.querySelector('.group-check');
+      if (!groupCb) { return; }
+      var visible = Array.prototype.filter.call(grp.querySelectorAll('.file-check'), function (cb) {
+        var row = cb.closest('.tree-row');
+        return !row || row.style.display !== 'none';
+      });
+      var checkedCount = visible.filter(function (cb) { return cb.checked; }).length;
+      groupCb.checked = visible.length > 0 && checkedCount === visible.length;
+      groupCb.indeterminate = checkedCount > 0 && checkedCount < visible.length;
+    });
+  }
+
   function filterTree(env) {
     var sel = document.querySelector('.story-filter[data-env="' + env + '"]');
     var val = sel ? sel.value : '';
@@ -1180,6 +1217,7 @@ ${envPane}
       var anyVisible = Array.prototype.some.call(grp.querySelectorAll('.tree-row'), function (r) { return r.style.display !== 'none'; });
       grp.style.display = anyVisible ? '' : 'none';
     });
+    syncGroupCheckboxes(env);
   }
 
   // A real Validate/Deploy now runs async and polls for minutes, not one blocking call — with
@@ -1193,7 +1231,7 @@ ${envPane}
 
   function parsePct(msg) {
     if (/succeeded|complete/i.test(msg)) { return 100; }
-    var m = msg.match(/(\d+)\/(\d+)/);
+    var m = msg.match(/(\\d+)\\/(\\d+)/);
     if (!m) { return -1; }
     var done = parseInt(m[1], 10), total = parseInt(m[2], 10);
     return total > 0 ? Math.min(95, Math.round(done / total * 100)) : -1;
@@ -1239,6 +1277,7 @@ ${envPane}
 
   function runAction(env, actionMode) {
     var boxes = Array.prototype.slice.call(document.querySelectorAll('.file-check[data-env="' + env + '"]:checked'));
+    if (boxes.length === 0) { return; } // nothing checked — Validate/Deploy stay disabled for this, but never trust that alone
     var files = boxes.map(function (b) { return b.value; });
     var autoCb = document.getElementById('autoDeploy-' + env);
     var autoDeployOnSuccess = Boolean(autoCb && autoCb.checked);
@@ -1521,12 +1560,12 @@ ${envPane}
         };
         const typeGroupsHtml = Array.from(byType.keys()).sort().map(type => `
       <details class="type-group" data-env="${env.name}" open>
-        <summary>${escapeHtml(type)} (${byType.get(type)!.length})</summary>
+        <summary><input type="checkbox" class="group-check" title="Select all ${escapeHtml(type)}" onclick="event.stopPropagation()" onchange="selectGroupAll(this)"> ${escapeHtml(type)} (${byType.get(type)!.length})</summary>
         <ul class="files">${byType.get(type)!.map(renderFileRow).join("")}</ul>
       </details>`).join("");
         const unmappedHtml = unmappedFiles.length
             ? `<details class="type-group" data-env="${env.name}" open>
-             <summary>Other (${unmappedFiles.length})</summary>
+             <summary><input type="checkbox" class="group-check" title="Select all Other" onclick="event.stopPropagation()" onchange="selectGroupAll(this)"> Other (${unmappedFiles.length})</summary>
              <ul class="files">${unmappedFiles.map(renderFileRow).join("")}</ul>
            </details>`
             : "";
@@ -1662,7 +1701,7 @@ ${envPane}
       <input type="checkbox" id="deployToDemo-${env.name}">
       Also deploy to Demo (${escapeHtml(getDemoOrgAlias())}) in parallel
     </label>` : ""}
-    <button class="btn btn-secondary" id="validateBtn-${env.name}" ${disabled} onclick="runAction('${env.name}','validate')">🔍 Validate</button>
+    <button class="btn btn-secondary" id="validateBtn-${env.name}" data-hard-disabled="${disabled ? "1" : "0"}" ${disabled} onclick="runAction('${env.name}','validate')">🔍 Validate</button>
     <button class="btn btn-primary" id="deployBtn-${env.name}" data-hard-disabled="${disabled ? "1" : "0"}" disabled title="Run Validate on this exact selection first">🚀 Deploy</button>
     ${m.lastDeploy && m.canDeploy ? `<button class="btn btn-secondary" id="rollbackBtn-${env.name}" title="Redeploy the entire source at the last-deployed commit (${m.lastDeploy.sha.slice(0,8)}) to roll back a bad promotion" onclick="rollback('${env.name}')">↩ Rollback</button>` : ""}
   </div>

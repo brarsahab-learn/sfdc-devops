@@ -73,8 +73,26 @@ export class GitHelper {
         if (args[0] === "checkout" || args[0] === "switch") { this._markSelfInitiatedSwitch(); }
         try {
             const { stdout } = await execFileAsync("git", args, {
-                cwd:      this.workspaceRoot,
-                timeout:  30_000,
+                cwd:       this.workspaceRoot,
+                timeout:   30_000,
+                // SIGTERM can be caught/ignored by whatever git ends up blocked in (an askpass
+                // helper, a credential-manager prompt) — SIGKILL is the only signal guaranteed
+                // to actually end it, so a stuck command can't outlive its timeout.
+                killSignal: "SIGKILL",
+                env: {
+                    ...process.env,
+                    // Never let git (or a credential helper it invokes) fall back to an
+                    // interactive prompt — a fetch/push run from here has no terminal and no
+                    // window of its own to show one in, so a helper that pops a GUI prompt
+                    // (e.g. a locked macOS Keychain's "Allow access?" dialog) just sits there
+                    // forever with nothing visibly wrong: the exact "deadlock" this fixes.
+                    // Forcing every credential path to fail fast means a real auth problem
+                    // surfaces immediately as an error instead of hanging indefinitely.
+                    GIT_TERMINAL_PROMPT: "0",
+                    GIT_ASKPASS:         "echo",
+                    SSH_ASKPASS:         "echo",
+                    GCM_INTERACTIVE:     "never",
+                },
             });
             return stdout.trim();
         } catch (e: any) {

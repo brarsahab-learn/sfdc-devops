@@ -313,8 +313,9 @@ ${events.length === 0
   // syntax is a subset of JS expression syntax) — embedded with no surrounding quotes and
   // no JSON.parse(), so a story ID containing a literal ' can't prematurely close an outer
   // string literal the way a JSON.parse('...') wrapper's single quotes would. Unicode-
-  // escaping < > & still guards against a "</script>" (or an entity-sensitive character)
-  // inside a story ID ending this script block early.
+  // escaping < > & still guards against a closing script tag (or an entity-sensitive
+  // character) inside a story ID ending this script block early — this comment must never
+  // spell that literal tag out, or it would do exactly that.
   const VALID_IDS = new Set(${
       JSON.stringify(allStoryIds).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026")
   });
