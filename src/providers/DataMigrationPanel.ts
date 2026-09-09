@@ -260,6 +260,14 @@ export class DataMigrationPanel {
                 case "exportDryRunReport":
                     await this._handleExportDryRunReport();
                     break;
+
+                case "openConfigJson": {
+                    const cfgPath = path.join(this._workspaceRoot, ".sf-devops-dm.json");
+                    if (!fs.existsSync(cfgPath)) { writeDmConfig(this._workspaceRoot, this._config); }
+                    const doc = await vscode.workspace.openTextDocument(cfgPath);
+                    await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+                    break;
+                }
             }
         }, null, this._disposables);
 
@@ -269,6 +277,15 @@ export class DataMigrationPanel {
             .then(orgs => { this._availableOrgs = orgs; })
             .catch(() => {})
             .finally(() => this._refresh());
+
+        // Watch .sf-devops-dm.json so external edits (e.g. via "Edit Raw JSON") auto-refresh
+        const configPattern = new vscode.RelativePattern(this._workspaceRoot, ".sf-devops-dm.json");
+        const cfgWatcher = vscode.workspace.createFileSystemWatcher(configPattern, true, false, true);
+        cfgWatcher.onDidChange(() => {
+            try { this._config = readDmConfig(this._workspaceRoot); } catch { /* ignore parse errors */ }
+            this._refresh();
+        }, null, this._disposables);
+        this._disposables.push(cfgWatcher);
     }
 
     private _dispose(): void {
@@ -688,6 +705,7 @@ export class DataMigrationPanel {
                 <button class="btn btn-primary" onclick="openAddObjectModal()">+ Add Object</button>
                 <button class="btn" onclick="send('autoSort',{targetOrg:document.getElementById('sortTargetOrg').value})">Auto-Sort by Dependencies</button>
                 <button class="btn" onclick="saveOrder()">Save Order</button>
+                <button class="btn" onclick="send('openConfigJson',{})" title="Open .sf-devops-dm.json in editor — changes auto-refresh this panel on save">&#128196; Edit Raw JSON</button>
                 <select id="sortTargetOrg" class="select" style="margin-left:auto">
                     ${orgOptions(targetOrg)}
                 </select>

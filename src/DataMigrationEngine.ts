@@ -139,6 +139,39 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
     return chunks;
 }
 
+/**
+ * Parse a Salesforce CLI error message and return a user-friendly field-level explanation.
+ * Returns null if the error is not field-related.
+ */
+function parseFieldError(sobject: string, raw: string): string | null {
+    // "No such column 'FieldName__c' on entity 'SObject'"
+    const colMatch = raw.match(/No such column '([^']+)'/i);
+    if (colMatch) {
+        return `Field '${colMatch[1]}' does not exist on ${sobject}. Check your SOQL query — remove or correct this field name.`;
+    }
+    // "INVALID_FIELD: ...: [FieldName__c]"
+    const invFieldBracket = raw.match(/INVALID_FIELD[^:]*:.*?\[([^\]]+)\]/i);
+    if (invFieldBracket) {
+        return `Invalid field '${invFieldBracket[1]}' on ${sobject}. Verify the API name in your SOQL query.`;
+    }
+    // "INVALID_FIELD_FOR_INSERT_UPDATE: Unable to create/update fields: FieldA__c, FieldB__c"
+    const insertUpdate = raw.match(/INVALID_FIELD_FOR_INSERT_UPDATE[^:]*:.*?fields:\s*([^\n.]+)/i);
+    if (insertUpdate) {
+        return `Field(s) not writable on ${sobject}: ${insertUpdate[1].trim()}. These fields may be auto-populated by Salesforce or read-only — remove them from your data file.`;
+    }
+    // "field not readable: FieldName__c"
+    const notReadable = raw.match(/field not readable:\s*([^\s,]+)/i);
+    if (notReadable) {
+        return `Field '${notReadable[1]}' is not readable on ${sobject}. Check FLS/profile permissions or remove it from your SOQL query.`;
+    }
+    // "Unknown field: FieldName__c"
+    const unknown = raw.match(/Unknown field:\s*([^\s,\n]+)/i);
+    if (unknown) {
+        return `Unknown field '${unknown[1]}' on ${sobject}. The field may have been deleted or renamed.`;
+    }
+    return null;
+}
+
 // ---------------------------------------------------------------------------
 // pullData
 // ---------------------------------------------------------------------------
@@ -188,7 +221,10 @@ export async function pullData(
 
             const parsed = JSON.parse(stdout);
             if (parsed.status !== 0) {
-                onLog(`Export failed for ${obj.sobject}: ${parsed.message ?? "unknown error"}`, "error");
+                const rawMsg: string = parsed.message ?? "unknown error";
+                const fieldHint = parseFieldError(obj.sobject, rawMsg);
+                onLog(`Pull failed for ${obj.sobject}: ${rawMsg}`, "error");
+                if (fieldHint) { onLog(`  → ${fieldHint}`, "warn"); }
                 continue;
             }
 
@@ -209,10 +245,15 @@ export async function pullData(
             const rawOut: string = e?.stdout ?? "";
             try {
                 const parsed = JSON.parse(rawOut);
-                const msg = parsed?.message ?? parsed?.result?.message ?? e.message ?? String(e);
-                onLog(`Error pulling ${obj.sobject}: ${msg}`, "error");
+                const msg: string = parsed?.message ?? parsed?.result?.message ?? e.message ?? String(e);
+                onLog(`Pull failed for ${obj.sobject}: ${msg}`, "error");
+                const fieldHint = parseFieldError(obj.sobject, msg);
+                if (fieldHint) { onLog(`  → ${fieldHint}`, "warn"); }
             } catch {
-                onLog(`Error pulling ${obj.sobject}: ${e?.message ?? String(e)}`, "error");
+                const msg: string = e?.message ?? String(e);
+                onLog(`Pull failed for ${obj.sobject}: ${msg}`, "error");
+                const fieldHint = parseFieldError(obj.sobject, msg);
+                if (fieldHint) { onLog(`  → ${fieldHint}`, "warn"); }
             }
         }
 
@@ -903,6 +944,22 @@ async function loadBatch(
         onCount(created.length, failed.length);
         if (failed.length > 0) {
             emit(`${obj.sobject}: ${created.length} created, ${failed.length} failed in batch`, "warn");
+            // Emit field-specific hints for each distinct error pattern
+            const seenHints = new Set<string>();
+            for (const f of failed) {
+                const hint = parseFieldError(obj.sobject, f.error);
+                if (hint && !seenHints.has(hint)) {
+                    seenHints.add(hint);
+                    emit(`  → ${hint}`, "warn");
+                } else if (!hint && f.error && f.error !== "unknown") {
+                    // Surface raw error for non-field issues (e.g. validation rules, required fields)
+                    const shortErr = f.error.length > 200 ? f.error.slice(0, 200) + "…" : f.error;
+                    if (!seenHints.has(shortErr)) {
+                        seenHints.add(shortErr);
+                        emit(`  ✗ ${obj.sobject}[${f.refId}]: ${shortErr}`, "error");
+                    }
+                }
+            }
         }
     } else if (attemptFailed) {
         // Couldn't parse results — mark all as failed
