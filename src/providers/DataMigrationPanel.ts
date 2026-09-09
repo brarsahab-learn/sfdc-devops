@@ -96,17 +96,17 @@ export class DataMigrationPanel {
             switch (msg.command) {
                 case "switchTab":
                     this._activeTab = msg.tab;
-                    await this._refresh();
+                    this._refresh();
                     break;
 
                 case "refresh":
-                    await this._refresh();
+                    this._refresh();
                     break;
 
                 case "saveConfig":
                     writeDmConfig(this._workspaceRoot, msg.config as DmConfig);
                     this._config = msg.config as DmConfig;
-                    await this._refresh();
+                    this._refresh();
                     break;
 
                 case "addObject": {
@@ -114,7 +114,7 @@ export class DataMigrationPanel {
                     cfg.objects.push(msg.obj as DmObjectConfig);
                     writeDmConfig(this._workspaceRoot, cfg);
                     this._config = cfg;
-                    await this._refresh();
+                    this._refresh();
                     break;
                 }
 
@@ -124,7 +124,7 @@ export class DataMigrationPanel {
                     if (idx !== -1) { cfg.objects[idx] = msg.obj as DmObjectConfig; }
                     writeDmConfig(this._workspaceRoot, cfg);
                     this._config = cfg;
-                    await this._refresh();
+                    this._refresh();
                     break;
                 }
 
@@ -133,7 +133,7 @@ export class DataMigrationPanel {
                     cfg.objects = cfg.objects.filter((o) => o.id !== msg.id);
                     writeDmConfig(this._workspaceRoot, cfg);
                     this._config = cfg;
-                    await this._refresh();
+                    this._refresh();
                     break;
                 }
 
@@ -143,7 +143,7 @@ export class DataMigrationPanel {
                     cfg.objects = ids.map((id) => cfg.objects.find((o) => o.id === id)!).filter(Boolean);
                     writeDmConfig(this._workspaceRoot, cfg);
                     this._config = cfg;
-                    await this._refresh();
+                    this._refresh();
                     break;
                 }
 
@@ -155,7 +155,7 @@ export class DataMigrationPanel {
                     } catch { /* leave order unchanged on error */ }
                     writeDmConfig(this._workspaceRoot, cfg);
                     this._config = cfg;
-                    await this._refresh();
+                    this._refresh();
                     break;
                 }
 
@@ -238,16 +238,16 @@ export class DataMigrationPanel {
                     break;
 
                 case "refreshOrgs": {
-                    try {
-                        this._availableOrgs = await listAvailableOrgs(this._workspaceRoot);
-                    } catch {}
-                    await this._refresh();
+                    this._panel.webview.postMessage({ command: "logLine", text: "Refreshing org list...", level: "info" });
+                    listAvailableOrgs(this._workspaceRoot)
+                        .then(orgs => { this._availableOrgs = orgs; this._refresh(); })
+                        .catch(() => this._refresh());
                     break;
                 }
 
                 case "elevateRole":
                     await vscode.commands.executeCommand("sfDevops.changeRole");
-                    await this._refresh();
+                    this._refresh();
                     break;
 
                 case "openConnectOrg": {
@@ -264,7 +264,11 @@ export class DataMigrationPanel {
         }, null, this._disposables);
 
         this._panel.webview.html = loadingHtml("Loading Data Migration...");
-        this._refresh();
+        // Load available orgs once, non-blocking — cached for the lifetime of the panel
+        listAvailableOrgs(this._workspaceRoot)
+            .then(orgs => { this._availableOrgs = orgs; })
+            .catch(() => {})
+            .finally(() => this._refresh());
     }
 
     private _dispose(): void {
@@ -275,11 +279,11 @@ export class DataMigrationPanel {
 
     // ── refresh ──────────────────────────────────────────────────────────────
 
-    private async _refresh(): Promise<void> {
+    private _refresh(): void {
         if (this._refreshing) { return; }
         this._refreshing = true;
         try {
-            const vm = await this._buildViewModel();
+            const vm = this._buildViewModel();
             this._panel.webview.html = this._renderHtml(vm);
         } catch (err) {
             this._panel.webview.html = `<body style="padding:16px;color:#f48771;font-family:sans-serif">Error: ${esc(String(err))}</body>`;
@@ -290,7 +294,7 @@ export class DataMigrationPanel {
 
     // ── view model ───────────────────────────────────────────────────────────
 
-    private async _buildViewModel() {
+    private _buildViewModel() {
         const config    = readDmConfig(this._workspaceRoot);
         this._config    = config;
         const sourceOrg = getSourceOrg(this._ctx) || "";
@@ -300,9 +304,6 @@ export class DataMigrationPanel {
         const tracking  = targetOrg ? readTracking(this._workspaceRoot, targetOrg) : {};
         const logPath   = lastRunLogPath(this._workspaceRoot);
         const hasLog    = fs.existsSync(logPath);
-        let availableOrgs: { alias: string; username: string }[] = [];
-        try { availableOrgs = await listAvailableOrgs(this._workspaceRoot); } catch {}
-        this._availableOrgs = availableOrgs;
         return {
             config,
             sourceOrg,
@@ -311,11 +312,11 @@ export class DataMigrationPanel {
             envs,
             tracking,
             hasLog,
-            availableOrgs,
-            runState: this._runState,
+            availableOrgs: this._availableOrgs,
+            runState:  this._runState,
             activeTab: this._activeTab,
-            dryRun: this._dryRunMode,
-            logLines: this._logLines,
+            dryRun:    this._dryRunMode,
+            logLines:  this._logLines,
         };
     }
 
@@ -342,7 +343,7 @@ export class DataMigrationPanel {
         const ctrl = makeController();
         this._runController = ctrl;
         const { onLog, onProgress } = this._makeLogHandlers();
-        await this._refresh();
+        this._refresh();
         try {
             await pullData(sourceOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, dryRunSampleSize: 5 });
             this._panel.webview.postMessage({ command: "runDone", op: "pull", dryRun });
@@ -361,7 +362,7 @@ export class DataMigrationPanel {
         const ctrl = makeController();
         this._runController = ctrl;
         const { onLog, onProgress } = this._makeLogHandlers();
-        await this._refresh();
+        this._refresh();
         try {
             await loadData(targetOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, objectFilter: sobject ? [sobject] : undefined });
             this._panel.webview.postMessage({ command: "runDone", op: "load", dryRun });
@@ -380,7 +381,7 @@ export class DataMigrationPanel {
         const ctrl = makeController();
         this._runController = ctrl;
         const { onLog, onProgress } = this._makeLogHandlers();
-        await this._refresh();
+        this._refresh();
         try {
             await pullData(sourceOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, dryRunSampleSize: 5 });
             if (ctrl.state !== "cancelled") {
@@ -406,7 +407,7 @@ export class DataMigrationPanel {
         const ctrl = makeController();
         this._runController = ctrl;
         const { onLog, onProgress } = this._makeLogHandlers();
-        await this._refresh();
+        this._refresh();
         try {
             await rollbackData(targetOrg, this._workspaceRoot, this._config, onLog, { dryRun });
             this._panel.webview.postMessage({ command: "runDone", op: "rollback", dryRun });
@@ -431,7 +432,7 @@ export class DataMigrationPanel {
         } catch (err) {
             vscode.window.showErrorMessage(`Clear failed: ${String(err)}`);
         }
-        await this._refresh();
+        this._refresh();
     }
 
     private async _handleExportCsv(targetOrg: string): Promise<void> {
@@ -482,7 +483,7 @@ export class DataMigrationPanel {
         } catch (err) {
             onLog(`External ID check failed for ${sobject}: ${String(err)}`, "error");
         }
-        await this._refresh();
+        this._refresh();
     }
 
     private async _handleCheckAllExtIds(targetOrg: string): Promise<void> {
@@ -500,7 +501,7 @@ export class DataMigrationPanel {
         }
         writeDmConfig(this._workspaceRoot, cfg);
         this._config = cfg;
-        await this._refresh();
+        this._refresh();
     }
 
     private async _handleCreateExtId(sobject: string, targetOrg: string): Promise<void> {
@@ -519,7 +520,7 @@ export class DataMigrationPanel {
         } catch (err) {
             onLog(`Failed to create ExternalId for ${sobject}: ${String(err)}`, "error");
         }
-        await this._refresh();
+        this._refresh();
     }
 
     private async _handleCreateAllExtIds(targetOrg: string): Promise<void> {
@@ -537,7 +538,7 @@ export class DataMigrationPanel {
         }
         writeDmConfig(this._workspaceRoot, cfg);
         this._config = cfg;
-        await this._refresh();
+        this._refresh();
     }
 
     private async _handleExportDryRunReport(): Promise<void> {
@@ -670,16 +671,17 @@ export class DataMigrationPanel {
             return `
             <div class="settings-card">
                 <h3>Settings</h3>
+                <div class="toggle-row">
+                    <label class="toggle-sw"><input type="checkbox" id="autoCreateExtId" ${config.autoCreateExternalId ? "checked" : ""} onchange="pendingSettings.autoCreateExternalId=this.checked"><span class="slider"></span></label>
+                    <span class="toggle-label">Auto-create External ID fields before every Load</span>
+                </div>
                 <div class="field-row">
-                    <label class="toggle-sw"><input type="checkbox" id="autoCreateExtId" ${config.autoCreateExternalId ? "checked" : ""} onchange="pendingSettings.autoCreateExternalId=this.checked">
-                    <span class="slider"></span></label>
-                    <span style="margin-left:8px">Auto-create External IDs</span>
+                    <label>Batch size</label>
+                    <input type="number" id="batchSize" value="${esc(String(config.batchSize ?? 190))}" min="1" max="10000" style="width:90px;flex:none" oninput="pendingSettings.batchSize=+this.value" />
                 </div>
-                <div class="field-row" style="margin-top:8px">
-                    <label style="margin-right:8px">Batch size</label>
-                    <input type="number" id="batchSize" value="${esc(String(config.batchSize ?? 200))}" min="1" max="10000" style="width:90px" oninput="pendingSettings.batchSize=+this.value" />
+                <div style="margin-top:12px">
+                    <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
                 </div>
-                <button class="btn btn-primary" style="margin-top:12px" onclick="saveSettings()">Save Settings</button>
             </div>
 
             <div class="toolbar" style="margin-top:16px">
@@ -761,9 +763,9 @@ export class DataMigrationPanel {
                         ${orgOptions(targetOrg)}
                     </select>
                 </div>
-                <div class="field-row" style="margin-bottom:16px">
+                <div class="toggle-row" style="margin-bottom:16px">
                     <label class="toggle-sw"><input type="checkbox" id="dryRunToggle" ${dryRun ? "checked" : ""}><span class="slider"></span></label>
-                    <span style="margin-left:8px">Dry Run (preview only, no changes)</span>
+                    <span class="toggle-label">Dry Run — preview only, no changes made</span>
                 </div>
                 <div style="display:flex;gap:10px;flex-wrap:wrap">
                     <button class="btn btn-primary" onclick="startPull()">⬇ Pull from Source</button>
@@ -784,13 +786,15 @@ export class DataMigrationPanel {
 
             let rows = "";
             for (const [obj, t] of entries) {
-                const any = (t as any);
-                const failed  = any.failed  ?? 0;
-                const created = any.created ?? 0;
-                const pulled  = any.pulled  ?? 0;
-                const skipped = any.skipped ?? 0;
-                const pending = any.pending ?? 0;
-                const blocked = any.blocked ?? 0;
+                let created = 0, failed = 0, skipped = 0, pending = 0, blocked = 0;
+                for (const entry of Object.values(t)) {
+                    if      (entry.status === "created") { created++; }
+                    else if (entry.status === "failed")  { failed++; }
+                    else if (entry.status === "skipped") { skipped++; }
+                    else if (entry.status === "blocked") { blocked++; }
+                    else                                 { pending++; }
+                }
+                const pulled = Object.keys(t).length;
                 rows += `<tr>
                     <td><code>${esc(obj)}</code></td>
                     <td>${pulled}</td>
@@ -930,10 +934,13 @@ input:checked + .slider::before { transform: translateX(16px); }
 .badge-amber { background: rgba(255,193,7,0.15); color: #FFC107; }
 
 /* ── Field rows ── */
-.field-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-.field-row label { min-width: 110px; font-size: 12px; color: var(--vscode-descriptionForeground); }
+.field-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.field-row label:not(.toggle-sw) { min-width: 110px; font-size: 12px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
 .field-row input, .field-row textarea, .field-row select { flex: 1; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border,transparent); padding: 4px 8px; border-radius: 3px; font-family: var(--vscode-editor-font-family,monospace); font-size: 12px; }
 .field-row textarea { resize: vertical; }
+/* toggle row — no label min-width, items flow naturally */
+.toggle-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.toggle-row .toggle-label { font-size: 12px; color: var(--vscode-foreground); }
 
 /* ── Settings card ── */
 .settings-card { background: var(--vscode-editorGroupHeader-tabsBackground); border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 14px 16px; margin-bottom: 16px; max-width: 480px; }
