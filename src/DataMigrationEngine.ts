@@ -366,12 +366,22 @@ export async function checkExternalId(
         );
         const parsed = JSON.parse(stdout);
         const fields: any[] = parsed?.result?.fields ?? [];
-        const found = fields.find(f => f.externalId === true || /External_?Id__c$/i.test(f.name));
-        if (found) {
-            onLog(`Found external ID field on ${sobject}: ${found.name}`, "success");
-            return found.name as string;
+        // Priority 1: field explicitly marked as externalId by SF metadata
+        const byFlag = fields.find(f => f.externalId === true);
+        if (byFlag) {
+            onLog(`✓ Found ExternalId field on ${sobject}: ${byFlag.name}`, "success");
+            return byFlag.name as string;
         }
-        onLog(`No external ID field found on ${sobject}`, "info");
+        // Priority 2: field name matches common ExternalId patterns (including namespaced)
+        const byName = fields.find(f =>
+            /^(?:\w+__)?External_?Id__c$/i.test(f.name) ||
+            /^(?:\w+__)?ExternalId__c$/i.test(f.name)
+        );
+        if (byName) {
+            onLog(`✓ Found ExternalId-style field on ${sobject}: ${byName.name}`, "success");
+            return byName.name as string;
+        }
+        onLog(`ℹ  No ExternalId field on ${sobject}`, "info");
         return null;
     } catch (e: any) {
         onLog(`Describe failed for ${sobject}: ${e?.message ?? String(e)}`, "warn");
@@ -576,11 +586,20 @@ function readSeedRecords(seedDir: string, sobject: string): Record<string, any>[
     return [];
 }
 
-/** Parse upsert/import result and extract created/failed counts + refId mapping */
-function parseImportResult(
-    stdout: string,
-): { created: string[]; failed: { refId: string; error: string }[]; limitException: boolean } {
+/** Parse upsert/import result and extract created/failed counts + refId mapping.
+ *
+ * Handles two CLI result shapes:
+ *   - sf data upsert bulk:  { id, success, created, referenceId, errors[] }
+ *   - sf data import tree:  { referenceId, id }  (no "success" flag)
+ */
+function parseImportResult(stdout: string): {
+    created: string[];                           // positional SF IDs for upsert bulk
+    createdByRef: Map<string, string>;           // refId → sfId for import tree
+    failed: { refId: string; error: string }[];
+    limitException: boolean;
+} {
     const created: string[] = [];
+    const createdByRef = new Map<string, string>();
     const failed: { refId: string; error: string }[] = [];
     let limitException = false;
 
@@ -590,24 +609,37 @@ function parseImportResult(
 
         if (typeof rawResults === "string" && rawResults.includes("LimitException")) {
             limitException = true;
-            return { created, failed, limitException };
+            return { created, createdByRef, failed, limitException };
         }
 
         const items: any[] = Array.isArray(rawResults) ? rawResults : [];
         for (const item of items) {
-            if (item.success === true || item.created === true || item.isCreated === true) {
-                created.push(item.id ?? item.referenceId ?? "");
+            const hasErrors = Array.isArray(item.errors) && item.errors.length > 0;
+            const isSuccess =
+                item.success === true ||
+                item.created === true ||
+                item.isCreated === true ||
+                // sf data import tree shape: has an id, no error flag
+                (typeof item.id === "string" && item.id.length >= 15 && !hasErrors);
+
+            if (isSuccess) {
+                const sfId = item.id ?? "";
+                const refId = item.referenceId ?? item.refId ?? "";
+                created.push(sfId);
+                if (refId) { createdByRef.set(refId, sfId); }
             } else {
-                const err = (item.errors ?? []).map((e: any) => e.message ?? String(e)).join("; ");
-                if (err.includes("LimitException")) { limitException = true; }
-                failed.push({ refId: item.referenceId ?? "", error: err || "unknown" });
+                const err = hasErrors
+                    ? (item.errors as any[]).map((e: any) => e.message ?? String(e)).join("; ")
+                    : (item.message ?? item.error ?? "unknown");
+                if (String(err).includes("LimitException")) { limitException = true; }
+                failed.push({ refId: item.referenceId ?? item.refId ?? "", error: String(err) || "unknown" });
             }
         }
     } catch {
         if (stdout.includes("LimitException")) { limitException = true; }
     }
 
-    return { created, failed, limitException };
+    return { created, createdByRef, failed, limitException };
 }
 
 // ---------------------------------------------------------------------------
@@ -634,26 +666,32 @@ export async function loadData(
     };
 
     // ------------------------------------------------------------------
-    // Pre-flight: ensure external ID fields exist
+    // Pre-flight: ExternalId check (always runs). Auto-create if configured.
+    // Never blocks the load — falls back to insert mode if field unavailable.
     // ------------------------------------------------------------------
-    if (config.autoCreateExternalId && !dryRun) {
+    if (!dryRun) {
         for (const obj of activeObjects(config)) {
-            if (obj.externalIdVerified) { continue; }
+            if (obj.externalIdVerified && obj.externalIdField) { continue; }
             const found = await checkExternalId(targetOrg, obj.sobject, workspaceRoot, onLog);
             if (found) {
                 obj.externalIdField = found;
                 obj.externalIdVerified = true;
                 writeDmConfig(workspaceRoot, config);
-            } else {
+            } else if (config.autoCreateExternalId) {
+                emit(`No ExternalId on ${obj.sobject} — attempting auto-create…`, "info");
                 try {
-                    const created = await createExternalIdField(targetOrg, obj.sobject, workspaceRoot, onLog);
-                    obj.externalIdField = created;
+                    const fieldName = await createExternalIdField(targetOrg, obj.sobject, workspaceRoot, onLog);
+                    obj.externalIdField = fieldName;
                     obj.externalIdVerified = true;
                     writeDmConfig(workspaceRoot, config);
                 } catch (e: any) {
-                    emit(`ExternalId creation failed — aborting load: ${e?.message ?? String(e)}`, "error");
-                    return { loaded: 0, failed: 0, skipped: 0, blocked: 0 };
+                    emit(`⚠️  Could not create ExternalId for ${obj.sobject}: ${e?.message ?? String(e)}`, "warn");
+                    emit(`   → Proceeding in insert-only mode for ${obj.sobject}. Records may duplicate on re-run.`, "warn");
+                    obj.externalIdField = undefined;
+                    obj.externalIdVerified = false;
                 }
+            } else {
+                emit(`ℹ  ${obj.sobject}: no ExternalId — using insert mode (re-runs may create duplicates).`, "info");
             }
         }
     }
@@ -965,7 +1003,7 @@ async function loadBatch(
         attemptFailed = true;
     }
 
-    const { created, failed, limitException } = parseImportResult(stdout);
+    const { created, createdByRef, failed, limitException } = parseImportResult(stdout);
 
     // Governor-limit retry: split batch in half (down to single record)
     if (limitException && processable.length > 1) {
@@ -976,12 +1014,12 @@ async function loadBatch(
         return;
     }
 
-    // Map results back to tracking entries by position (sf returns results in order)
-    if (created.length > 0 || failed.length > 0) {
-        // created[] contains SF IDs in the same order as processable
+    // Map results back to tracking entries.
+    // Primary: look up by refId (import tree). Fallback: positional index (upsert bulk).
+    if (created.length > 0 || createdByRef.size > 0 || failed.length > 0) {
         for (let i = 0; i < processable.length; i++) {
             const { refId } = processable[i];
-            const sfId = created[i];
+            const sfId = createdByRef.get(refId) ?? created[i] ?? "";
             if (sfId) {
                 tracking[obj.sobject][refId] = { status: "created", id: sfId, at: now() };
                 globalRefIndex.set(refId, sfId);

@@ -360,8 +360,10 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
             const demoConnected = demoAlias ? await isOrgConnected(demoAlias, this._gitHelper.getWorkspaceRoot()) : false;
 
             if (!requiredPassed) {
-                if (confirmed) { await this._extContext.workspaceState.update(SETUP_CONFIRMED_KEY, false); }
-                this._view.webview.html = this._getSetupGateHtml(checks, false, false, demoAlias, demoConnected);
+                // Show setup gate but always allow bypass — user may know setup is fine
+                // and the check is stale (e.g., just connected an org). Do NOT reset the
+                // confirmed flag; a returning user shouldn't be locked out on a transient failure.
+                this._view.webview.html = this._getSetupGateHtml(checks, true, false, demoAlias, demoConnected);
                 return;
             }
             if (!confirmed) {
@@ -1074,9 +1076,10 @@ ${BUSY_BAR_HTML}
 ${statusBanner}
 ${rows}
 <div class="action-bar">
-${canConfirm ? `<button class="btn btn-primary" onclick="send('confirmSetup')">✅ Confirm Setup &amp; Continue</button>` : ""}
-<button class="btn btn-secondary" onclick="send('recheckSetup')">🔄 Re-check Setup</button>
-${forced ? `<button class="btn btn-secondary" onclick="send('closeSetupCheck')">✕ Close (keep current setup)</button>` : ""}
+${canConfirm ? `<button class="btn btn-primary" onclick="send('confirmSetup')">✅ Continue</button>` : ""}
+<button class="btn btn-secondary" onclick="send('openAdminPanel')">⚙ Open Admin Setup</button>
+<button class="btn btn-secondary" onclick="send('recheckSetup')">🔄 Re-check</button>
+${forced ? `<button class="btn btn-secondary" onclick="send('closeSetupCheck')">✕ Close</button>` : ""}
 </div>
 <script>
   const vscode = acquireVsCodeApi();

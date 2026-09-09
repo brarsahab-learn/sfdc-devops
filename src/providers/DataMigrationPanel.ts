@@ -819,8 +819,8 @@ export class DataMigrationPanel {
             <div class="settings-card">
                 <h3>Settings</h3>
                 <div class="toggle-row">
-                    <label class="toggle-sw"><input type="checkbox" id="autoCreateExtId" ${config.autoCreateExternalId ? "checked" : ""} onchange="pendingSettings.autoCreateExternalId=this.checked"><span class="slider"></span></label>
-                    <span class="toggle-label">Auto-create External ID fields before every Load</span>
+                    <label class="toggle-sw"><input type="checkbox" id="autoCreateExtId" ${config.autoCreateExternalId ? "checked" : ""} onchange="toggleAutoCreate(this.checked)"><span class="slider"></span></label>
+                    <span class="toggle-label">Auto-create External ID fields if not found (recommended)</span>
                 </div>
                 <div class="field-row">
                     <label>Batch size</label>
@@ -1278,6 +1278,12 @@ function saveSettings() {
     send('saveConfig', { config: cfg });
 }
 
+function toggleAutoCreate(checked) {
+    pendingSettings.autoCreateExternalId = checked;
+    const cfg = Object.assign({}, DATA.config, pendingSettings);
+    send('saveConfig', { config: cfg });
+}
+
 // ── Object ordering ──────────────────────────────────────────────────────────
 function moveObj(idx, dir) {
     const ids = DATA.config.objects.map(o => o.id);
@@ -1441,6 +1447,7 @@ window.startPullAndLoad  = startPullAndLoad;
 window.getPullSourceOrg  = getPullSourceOrg;
 window.getLoadTargetOrg  = getLoadTargetOrg;
 window.saveSettings      = saveSettings;
+window.toggleAutoCreate  = toggleAutoCreate;
 window.moveObj           = moveObj;
 window.saveOrder         = saveOrder;
 window.openInlineEditor  = openInlineEditor;
