@@ -144,3 +144,28 @@ export function writeLastRunLog(workspaceRoot: string, lines: string[]): void {
 export function lastRunLogPath(workspaceRoot: string): string {
     return path.join(dmBaseDir(workspaceRoot), "lastrun.log");
 }
+
+export function pullLogsDir(workspaceRoot: string): string {
+    return path.join(dmBaseDir(workspaceRoot), "logs", "pull");
+}
+
+export function loadLogsDir(workspaceRoot: string, orgAlias: string): string {
+    return path.join(dmBaseDir(workspaceRoot), "logs", "load", safeOrgName(orgAlias));
+}
+
+/** Write a timestamped log file; trims directory to the last 10 logs. */
+export function writeJobLog(dir: string, lines: string[]): string {
+    fs.mkdirSync(dir, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const fp = path.join(dir, `${ts}.log`);
+    fs.writeFileSync(fp, lines.join("\n"), "utf-8");
+    const all = fs.readdirSync(dir).filter(f => f.endsWith(".log")).sort();
+    while (all.length > 10) { try { fs.unlinkSync(path.join(dir, all.shift()!)); } catch { /* ignore */ } }
+    return fp;
+}
+
+/** Return up to `max` recent log filenames (most-recent first). */
+export function listRecentLogs(dir: string, max = 5): string[] {
+    if (!fs.existsSync(dir)) { return []; }
+    return fs.readdirSync(dir).filter(f => f.endsWith(".log")).sort().reverse().slice(0, max);
+}
