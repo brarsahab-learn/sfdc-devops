@@ -362,27 +362,26 @@ export async function checkExternalId(
     try {
         const { stdout } = await execSf(
             ["sobject", "describe", "--sobject", sobject, "--target-org", targetOrg, "--json"],
-            { cwd: workspaceRoot, timeout: 60_000, maxBuffer: 10 * 1024 * 1024 },
+            { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 10 * 1024 * 1024 },
         );
         const parsed = JSON.parse(stdout);
         const fields: any[] = parsed?.result?.fields ?? [];
-        // Priority 1: field explicitly marked as externalId by SF metadata
-        const byFlag = fields.find(f => f.externalId === true);
-        if (byFlag) {
-            onLog(`✓ Found ExternalId field on ${sobject}: ${byFlag.name}`, "success");
-            return byFlag.name as string;
+
+        // Only consider fields explicitly marked as externalId — SF rejects any other field
+        // as an upsert key regardless of name. Pick the one matching our naming convention
+        // first (External_Id__c / ExternalId__c with optional namespace prefix), then fall
+        // back to any other marked field.
+        const extIdFields = fields.filter(f => f.externalId === true);
+        if (extIdFields.length === 0) {
+            onLog(`ℹ  No ExternalId field found on ${sobject}`, "info");
+            return null;
         }
-        // Priority 2: field name matches common ExternalId patterns (including namespaced)
-        const byName = fields.find(f =>
+        const preferred = extIdFields.find(f =>
             /^(?:\w+__)?External_?Id__c$/i.test(f.name) ||
             /^(?:\w+__)?ExternalId__c$/i.test(f.name)
-        );
-        if (byName) {
-            onLog(`✓ Found ExternalId-style field on ${sobject}: ${byName.name}`, "success");
-            return byName.name as string;
-        }
-        onLog(`ℹ  No ExternalId field on ${sobject}`, "info");
-        return null;
+        ) ?? extIdFields[0];
+        onLog(`✓ ExternalId field on ${sobject}: ${preferred.name}`, "success");
+        return preferred.name as string;
     } catch (e: any) {
         onLog(`Describe failed for ${sobject}: ${e?.message ?? String(e)}`, "warn");
         return null;
@@ -590,18 +589,21 @@ function readSeedRecords(seedDir: string, sobject: string): Record<string, any>[
 /** Parse upsert/import result and extract created/failed counts + refId mapping.
  *
  * Handles two CLI result shapes:
- *   - sf data upsert bulk:  { id, success, created, referenceId, errors[] }
- *   - sf data import tree:  { referenceId, id }  (no "success" flag)
+ *   - sf data upsert bulk:  [{ id, success, created, errors[] }]  — NO referenceId in results;
+ *                           use resultItems[] for positional tracking (same order as CSV rows).
+ *   - sf data import tree:  [{ referenceId, id }]                 — use createdByRef map.
  */
 function parseImportResult(stdout: string): {
-    created: string[];                           // positional SF IDs for upsert bulk
-    createdByRef: Map<string, string>;           // refId → sfId for import tree
+    created: string[];
+    createdByRef: Map<string, string>;
     failed: { refId: string; error: string }[];
+    resultItems: { sfId: string; success: boolean; error: string }[]; // full positional list
     limitException: boolean;
 } {
     const created: string[] = [];
     const createdByRef = new Map<string, string>();
     const failed: { refId: string; error: string }[] = [];
+    const resultItems: { sfId: string; success: boolean; error: string }[] = [];
     let limitException = false;
 
     try {
@@ -610,7 +612,7 @@ function parseImportResult(stdout: string): {
 
         if (typeof rawResults === "string" && rawResults.includes("LimitException")) {
             limitException = true;
-            return { created, createdByRef, failed, limitException };
+            return { created, createdByRef, failed, resultItems, limitException };
         }
 
         const items: any[] = Array.isArray(rawResults) ? rawResults : [];
@@ -620,27 +622,31 @@ function parseImportResult(stdout: string): {
                 item.success === true ||
                 item.created === true ||
                 item.isCreated === true ||
-                // sf data import tree shape: has an id, no error flag
+                // sf data import tree shape: has an id but no explicit success flag
                 (typeof item.id === "string" && item.id.length >= 15 && !hasErrors);
 
             if (isSuccess) {
-                const sfId = item.id ?? "";
-                const refId = item.referenceId ?? item.refId ?? "";
+                const sfId = (item.id as string) ?? "";
+                const refId = (item.referenceId ?? item.refId ?? "") as string;
                 created.push(sfId);
                 if (refId) { createdByRef.set(refId, sfId); }
+                resultItems.push({ sfId, success: true, error: "" });
             } else {
-                const err = hasErrors
+                const errText = hasErrors
                     ? (item.errors as any[]).map((e: any) => e.message ?? String(e)).join("; ")
                     : (item.message ?? item.error ?? "unknown");
-                if (String(err).includes("LimitException")) { limitException = true; }
-                failed.push({ refId: item.referenceId ?? item.refId ?? "", error: String(err) || "unknown" });
+                const errStr = String(errText) || "unknown";
+                if (errStr.includes("LimitException")) { limitException = true; }
+                const refId = (item.referenceId ?? item.refId ?? "") as string;
+                failed.push({ refId, error: errStr });
+                resultItems.push({ sfId: "", success: false, error: errStr });
             }
         }
     } catch {
         if (stdout.includes("LimitException")) { limitException = true; }
     }
 
-    return { created, createdByRef, failed, limitException };
+    return { created, createdByRef, failed, resultItems, limitException };
 }
 
 // ---------------------------------------------------------------------------
@@ -667,12 +673,13 @@ export async function loadData(
     };
 
     // ------------------------------------------------------------------
-    // Pre-flight: ExternalId check (always runs). Auto-create if configured.
-    // Never blocks the load — falls back to insert mode if field unavailable.
+    // Pre-flight: ExternalId check (always re-verifies against target org).
+    // externalIdVerified in config is org-agnostic, so we can't trust it for a
+    // different org. Always describe → only skip auto-create if already found.
+    // Never blocks the load — falls back to insert mode if unavailable.
     // ------------------------------------------------------------------
     if (!dryRun) {
         for (const obj of activeObjects(config)) {
-            if (obj.externalIdVerified && obj.externalIdField) { continue; }
             const found = await checkExternalId(targetOrg, obj.sobject, workspaceRoot, onLog);
             if (found) {
                 obj.externalIdField = found;
@@ -693,6 +700,8 @@ export async function loadData(
                 }
             } else {
                 emit(`ℹ  ${obj.sobject}: no ExternalId — using insert mode (re-runs may create duplicates).`, "info");
+                obj.externalIdField = undefined;
+                obj.externalIdVerified = false;
             }
         }
     }
@@ -961,8 +970,16 @@ async function loadBatch(
 
     try {
         if (obj.externalIdField) {
-            // Upsert via bulk CSV
-            const csv = buildCsv(processable.map(p => p.record), obj.externalIdField);
+            // Upsert via bulk CSV.
+            // Inject the referenceId as the ExternalId field value when the record doesn't
+            // already have one. This makes upserts idempotent: re-runs match existing records
+            // by the same stable key rather than creating duplicates with blank ExternalId.
+            const extField = obj.externalIdField;
+            const records = processable.map(p => ({
+                ...p.record,
+                [extField]: p.record[extField] ?? p.refId,
+            }));
+            const csv = buildCsv(records, extField);
             const csvPath = path.join(tmpDir, `${safeOrgName(obj.sobject)}-${Date.now()}.csv`);
             fs.writeFileSync(csvPath, csv, "utf-8");
 
@@ -1004,7 +1021,7 @@ async function loadBatch(
         attemptFailed = true;
     }
 
-    const { created, createdByRef, failed, limitException } = parseImportResult(stdout);
+    const { created, createdByRef, failed, resultItems, limitException } = parseImportResult(stdout);
 
     // Governor-limit retry: split batch in half (down to single record)
     if (limitException && processable.length > 1) {
@@ -1016,24 +1033,39 @@ async function loadBatch(
     }
 
     // Map results back to tracking entries.
-    // Primary: look up by refId (import tree). Fallback: positional index (upsert bulk).
-    if (created.length > 0 || createdByRef.size > 0 || failed.length > 0) {
+    // Strategy:
+    //   Import tree  → createdByRef keyed by referenceId (always populated)
+    //   Upsert bulk  → resultItems[i] positionally aligned to processable[i]
+    //                  (bulk results have no referenceId, so createdByRef is empty)
+    if (resultItems.length > 0 || createdByRef.size > 0 || attemptFailed) {
+        let batchCreated = 0;
+        let batchFailed = 0;
         for (let i = 0; i < processable.length; i++) {
             const { refId } = processable[i];
-            const sfId = createdByRef.get(refId) ?? created[i] ?? "";
-            if (sfId) {
-                tracking[obj.sobject][refId] = { status: "created", id: sfId, at: now() };
-                globalRefIndex.set(refId, sfId);
+            // Import tree path: lookup by referenceId
+            const sfIdByRef = createdByRef.get(refId);
+            if (sfIdByRef) {
+                tracking[obj.sobject][refId] = { status: "created", id: sfIdByRef, at: now() };
+                globalRefIndex.set(refId, sfIdByRef);
+                batchCreated++;
+                continue;
+            }
+            // Upsert bulk path: positional result (full list includes successes AND failures)
+            const posResult = resultItems[i];
+            if (posResult?.success) {
+                tracking[obj.sobject][refId] = { status: "created", id: posResult.sfId, at: now() };
+                globalRefIndex.set(refId, posResult.sfId);
+                batchCreated++;
             } else {
-                const failedEntry = failed.find(f => f.refId === refId) ?? failed[i];
-                const err = failedEntry?.error ?? "unknown";
+                const failedByRef = failed.find(f => f.refId === refId);
+                const err = failedByRef?.error ?? posResult?.error ?? (attemptFailed ? "Batch failed" : "No result");
                 tracking[obj.sobject][refId] = { status: "failed", error: err, at: now() };
+                batchFailed++;
             }
         }
-        onCount(created.length, failed.length);
-        if (failed.length > 0) {
-            emit(`${obj.sobject}: ${created.length} created, ${failed.length} failed in batch`, "warn");
-            // Emit field-specific hints for each distinct error pattern
+        onCount(batchCreated, batchFailed);
+        if (batchFailed > 0) {
+            emit(`${obj.sobject}: ${batchCreated} created, ${batchFailed} failed in batch`, "warn");
             const seenHints = new Set<string>();
             for (const f of failed) {
                 const hint = parseFieldError(obj.sobject, f.error);
@@ -1041,7 +1073,6 @@ async function loadBatch(
                     seenHints.add(hint);
                     emit(`  → ${hint}`, "warn");
                 } else if (!hint && f.error && f.error !== "unknown") {
-                    // Surface raw error for non-field issues (e.g. validation rules, required fields)
                     const shortErr = f.error.length > 200 ? f.error.slice(0, 200) + "…" : f.error;
                     if (!seenHints.has(shortErr)) {
                         seenHints.add(shortErr);
@@ -1051,7 +1082,6 @@ async function loadBatch(
             }
         }
     } else if (attemptFailed) {
-        // Couldn't parse results — mark all as failed
         for (const { refId } of processable) {
             tracking[obj.sobject][refId] = { status: "failed", error: "No parseable result", at: now() };
         }
