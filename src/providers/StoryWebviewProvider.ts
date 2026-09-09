@@ -1012,7 +1012,7 @@ ${onFeatureBranch ? `
         const orgAliasSlots = getOrgAliasSlots();
         const connectedAliases = checks.find(c => c.key === "orgAuthentication")?.connectedAliases;
 
-        const rows = checks.map(c => {
+        const renderCheck = (c: SetupCheckItem) => {
             const icon = c.passed ? "✅" : (c.required ? "❌" : "⚠️");
             const fixHtml = (!c.passed && c.fixSteps.length)
                 ? `<ol class="fix">${c.fixSteps.map(s => `<li>${escapeHtml(s)}</li>`).join("")}</ol>`
@@ -1027,25 +1027,39 @@ ${onFeatureBranch ? `
             return `<div class="check ${c.passed ? "pass" : (c.required ? "fail" : "warn")}">
   <div class="check-head"><span class="icon">${icon}</span><span class="label">${escapeHtml(c.label)}</span>${c.required ? "" : "<span class=\"opt\">optional</span>"}</div>
   <div class="detail">${escapeHtml(c.detail)}</div>
-  ${fixHtml}
-  ${orgAliasManager}
-  ${envBranchManager}
+  ${fixHtml}${orgAliasManager}${envBranchManager}
 </div>`;
-        }).join("");
+        };
 
+        const failingChecks = checks.filter(c => !c.passed);
+        const passingChecks = checks.filter(c => c.passed);
         const requiredFailing = checks.filter(c => c.required && !c.passed).length;
-        const statusBanner = requiredFailing > 0
-            ? `<div class="warning">⚠ ${requiredFailing} required check(s) failing — fix them below, then re-check.</div>`
-            : `<div class="info">✅ All required checks pass. Confirm below to start working.</div>`;
+        const defaultTab = failingChecks.length > 0 ? "action" : "ok";
+
+        const actionRows = failingChecks.length > 0
+            ? failingChecks.map(renderCheck).join("")
+            : `<div class="info" style="margin-top:8px">✅ No action required — all checks pass.</div>`;
+        const okRows = passingChecks.length > 0
+            ? passingChecks.map(renderCheck).join("")
+            : `<div class="info" style="margin-top:8px">No passing checks yet.</div>`;
 
         return `<!DOCTYPE html>
 <html>
 <head>
 <style>
   body     { font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; color: var(--vscode-foreground); padding-bottom: 4px; }
-  h2       { font-size: 13px; margin: 4px 0 10px; }
-  .warning { background: var(--vscode-inputValidation-warningBackground); border: 1px solid var(--vscode-inputValidation-warningBorder); color: var(--vscode-foreground); border-radius: 4px; padding: 6px 8px; font-size: 11px; margin-bottom: 10px; }
-  .info    { background: var(--vscode-textBlockQuote-background); border: 1px solid var(--vscode-textBlockQuote-border); color: var(--vscode-foreground); border-radius: 4px; padding: 6px 8px; font-size: 11px; margin-bottom: 10px; }
+  h2       { font-size: 13px; margin: 4px 0 8px; }
+  .warning { background: var(--vscode-inputValidation-warningBackground); border: 1px solid var(--vscode-inputValidation-warningBorder); color: var(--vscode-foreground); border-radius: 4px; padding: 5px 8px; font-size: 11px; margin-bottom: 8px; }
+  .info    { background: var(--vscode-textBlockQuote-background); border: 1px solid var(--vscode-textBlockQuote-border); color: var(--vscode-foreground); border-radius: 4px; padding: 5px 8px; font-size: 11px; margin-bottom: 8px; }
+  /* Tabs */
+  .tab-bar { display: flex; gap: 2px; border-bottom: 1px solid var(--vscode-panel-border); margin-bottom: 8px; }
+  .tab-btn { flex: 1; background: none; border: none; border-bottom: 2px solid transparent; padding: 5px 4px; font-size: 11px; font-family: var(--vscode-font-family); color: var(--vscode-foreground); cursor: pointer; text-align: center; }
+  .tab-btn.active { border-bottom-color: #00C9B1; color: #00C9B1; font-weight: 600; }
+  .tab-pane { display: none; }
+  .tab-pane.visible { display: block; }
+  .badge-red { background: #F44336; color: #fff; border-radius: 10px; padding: 0 5px; font-size: 10px; font-weight: 700; margin-left: 3px; }
+  .badge-green { background: #4CAF50; color: #fff; border-radius: 10px; padding: 0 5px; font-size: 10px; font-weight: 700; margin-left: 3px; }
+  /* Checks */
   .check   { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
   .check.fail { border-color: var(--vscode-inputValidation-errorBorder); }
   .check.warn { border-color: var(--vscode-inputValidation-warningBorder); }
@@ -1054,7 +1068,7 @@ ${onFeatureBranch ? `
   .detail  { font-size: 11px; color: var(--vscode-descriptionForeground); margin: 3px 0 0 22px; word-break: break-all; }
   ol.fix   { margin: 6px 0 0 22px; padding-left: 16px; font-size: 11px; color: var(--vscode-editorWarning-foreground); }
   ol.fix li { padding: 1px 0; }
-  .btn     { display: block; width: 100%; padding: 7px; margin: 10px 0 4px; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .btn     { display: block; width: 100%; padding: 7px; margin: 6px 0 0; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
   .btn-primary   { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
   .btn-secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
   .org-manager { margin: 6px 0 0 22px; }
@@ -1065,16 +1079,31 @@ ${onFeatureBranch ? `
   .org-btn { font-size: 11px; padding: 3px 6px; border: 1px solid var(--vscode-panel-border); border-radius: 3px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); cursor: pointer; }
   .org-readonly { flex: 1; font-size: 11px; color: var(--vscode-foreground); }
   .muted-note { font-size: 10px; color: var(--vscode-descriptionForeground); margin-top: 2px; }
-  .action-bar { position: sticky; bottom: -8px; margin: 12px -8px -8px; padding: 8px; background: var(--vscode-sideBar-background, var(--vscode-editor-background)); border-top: 1px solid var(--vscode-panel-border); }
-  .action-bar .btn { margin: 4px 0; }
+  .action-bar { position: sticky; bottom: -8px; margin: 10px -8px -8px; padding: 8px; background: var(--vscode-sideBar-background, var(--vscode-editor-background)); border-top: 1px solid var(--vscode-panel-border); }
   ${BUSY_BAR_CSS}
 </style>
 </head>
 <body>
 ${BUSY_BAR_HTML}
-<h2>⚙ Setup Check ${forced ? `<a href="#" style="float:right;font-size:11px;font-weight:normal" onclick="send('closeSetupCheck')">✕ Close</a>` : ""}</h2>
-${statusBanner}
-${rows}
+<h2>⚙ Setup ${forced ? `<a href="#" style="float:right;font-size:11px;font-weight:normal" onclick="send('closeSetupCheck')">✕</a>` : ""}</h2>
+
+<div class="tab-bar">
+  <button id="tab-btn-action" class="tab-btn${defaultTab === "action" ? " active" : ""}" onclick="showTab('action')">
+    Action Required<span class="badge-red">${failingChecks.length}</span>
+  </button>
+  <button id="tab-btn-ok" class="tab-btn${defaultTab === "ok" ? " active" : ""}" onclick="showTab('ok')">
+    All Good<span class="badge-green">${passingChecks.length}</span>
+  </button>
+</div>
+
+<div id="tab-pane-action" class="tab-pane${defaultTab === "action" ? " visible" : ""}">
+  ${requiredFailing > 0 ? `<div class="warning">⚠ ${requiredFailing} required item(s) need attention.</div>` : ""}
+  ${actionRows}
+</div>
+<div id="tab-pane-ok" class="tab-pane${defaultTab === "ok" ? " visible" : ""}">
+  ${okRows}
+</div>
+
 <div class="action-bar">
 ${canConfirm ? `<button class="btn btn-primary" onclick="send('confirmSetup')">✅ Continue</button>` : ""}
 <button class="btn btn-secondary" onclick="send('openAdminPanel')">⚙ Open Admin Setup</button>
@@ -1085,6 +1114,12 @@ ${forced ? `<button class="btn btn-secondary" onclick="send('closeSetupCheck')">
   const vscode = acquireVsCodeApi();
   ${BUSY_BAR_JS}
   function send(cmd, env) { showBusy(); vscode.postMessage({ command: cmd, env: env }); }
+  function showTab(id) {
+    ['action','ok'].forEach(t => {
+      document.getElementById('tab-pane-' + t).classList.toggle('visible', t === id);
+      document.getElementById('tab-btn-' + t).classList.toggle('active', t === id);
+    });
+  }
   function saveOrgAlias(key) {
     showBusy();
     const el = document.getElementById('alias-' + key);
