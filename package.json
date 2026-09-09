@@ -27,6 +27,11 @@
 		"views": {
 			"sf-devops": [
 				{
+					"id": "sfDevopsActionsView",
+					"name": "Actions",
+					"type": "tree"
+				},
+				{
 					"id": "sfDevopsStoryView",
 					"name": "Current Story",
 					"type": "webview"
@@ -190,13 +195,7 @@
 					"group": "inline"
 				}
 			],
-			"view/title": [
-				{
-					"command": "sfDevops.openDataMigration",
-					"when": "view == sfDevopsEnvView && sfDevops.isLeadOrAdmin",
-					"group": "navigation"
-				}
-			]
+			"view/title": []
 		},
 		"configuration": {
 			"title": "Salesforce DevOps",

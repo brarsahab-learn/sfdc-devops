@@ -21,6 +21,7 @@ import { StoryJourneyPanel } from "./providers/StoryJourneyPanel";
 import { AdminPanel } from "./providers/AdminPanel";
 import { DiffViewerPanel } from "./providers/DiffViewerPanel";
 import { DataMigrationPanel } from "./providers/DataMigrationPanel";
+import { ActionsTreeProvider } from "./providers/ActionsTreeProvider";
 import {
     findEnvironment, canPromote, getRoles,
     isFeatureBranch, getBaseBranch, getStaleBranchThreshold, getPromotableEnvironments,
@@ -126,12 +127,14 @@ export async function activate(context: vscode.ExtensionContext) {
     updateStatusBar(null);
 
     // ── Register sidebar providers ───────────────────────────────────────────
-    const storyProvider = new StoryWebviewProvider(
+    const storyProvider   = new StoryWebviewProvider(
         context.extensionUri, bbClient, gitHelper, context, updateStatusBar
     );
-    const envProvider = new EnvironmentTreeProvider(gitHelper);
+    const envProvider     = new EnvironmentTreeProvider(gitHelper);
+    const actionsProvider = new ActionsTreeProvider();
 
     context.subscriptions.push(
+        vscode.window.registerTreeDataProvider("sfDevopsActionsView", actionsProvider),
         vscode.window.registerWebviewViewProvider("sfDevopsStoryView", storyProvider),
         vscode.window.registerTreeDataProvider("sfDevopsEnvView", envProvider)
     );
