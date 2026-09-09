@@ -77,6 +77,10 @@ export class DataMigrationPanel {
     private _loadLog: string[] = [];
     private _dryRunMode = false;
     private _trackingViewOrg = "";
+    // Covers operations with no pull/load state machine of their own (ExternalId check/create,
+    // auto-sort) — used together with pull/load state to lock the UI against overlapping runs.
+    private _extBusy = false;
+    private _extBusyLabel = "";
     private _availableOrgs: { alias: string; username: string }[] = [];
 
     // ── static entry point ───────────────────────────────────────────────────
@@ -126,7 +130,21 @@ export class DataMigrationPanel {
     ) {
         this._panel.onDidDispose(() => this._dispose(), null, this._disposables);
 
+        // Commands that must never overlap a running pull/load/rollback/ExternalId/auto-sort
+        // operation — buttons are disabled client-side while busy, but this is the server-side
+        // backstop against a stale render or a message that was already in flight.
+        const EXCLUSIVE_COMMANDS = new Set([
+            "pull", "load", "pullAndLoad", "rollback", "autoSort",
+            "checkExtId", "checkAllExtIds", "createExtId", "createAllExtIds",
+            "retryFailed", "clearAndReload", "clearAllAndReload",
+        ]);
+
         this._panel.webview.onDidReceiveMessage(async (msg) => {
+            if (EXCLUSIVE_COMMANDS.has(msg.command) && this._anyRunning) {
+                vscode.window.showWarningMessage(`Please wait for "${this._busyLabel}" to finish first.`);
+                return;
+            }
+            try {
             switch (msg.command) {
                 case "switchTab":
                     this._activeTab = msg.tab;
@@ -182,14 +200,12 @@ export class DataMigrationPanel {
                 }
 
                 case "autoSort": {
-                    let cfg = readDmConfig(this._workspaceRoot);
-                    try {
-                        const noop = () => {};
-                        cfg = await autoSortByDependencies(msg.targetOrg || "", this._workspaceRoot, cfg, noop);
-                    } catch { /* leave order unchanged on error */ }
-                    writeDmConfig(this._workspaceRoot, cfg);
-                    this._config = cfg;
-                    this._refresh();
+                    await this._runExtBusy("Auto-sorting…", async () => {
+                        let cfg = readDmConfig(this._workspaceRoot);
+                        cfg = await autoSortByDependencies(msg.targetOrg || "", this._workspaceRoot, cfg, () => {});
+                        writeDmConfig(this._workspaceRoot, cfg);
+                        this._config = cfg;
+                    });
                     break;
                 }
 
@@ -340,7 +356,7 @@ export class DataMigrationPanel {
                     this._panel.webview.postMessage({ command: "logLine", text: "Refreshing org list...", level: "info" });
                     listAvailableOrgs(this._workspaceRoot)
                         .then(orgs => { this._availableOrgs = orgs; this._refresh(); })
-                        .catch(() => this._refresh());
+                        .catch(err => { this._reportError(`Failed to refresh org list: ${String(err)}`); this._refresh(); });
                     break;
                 }
 
@@ -385,6 +401,47 @@ export class DataMigrationPanel {
             this._refresh();
         }, null, this._disposables);
         this._disposables.push(cfgWatcher);
+    }
+
+    /** True whenever ANY long-running operation is in flight — pull, load (including paused),
+     *  rollback (which reuses the load state machine), an ExternalId check/create, or auto-sort.
+     *  Drives both the global busy banner and disabling of mutating buttons across every tab. */
+    private get _anyRunning(): boolean {
+        return this._pullState === "running"
+            || this._loadState === "running"
+            || this._loadState === "paused"
+            || this._extBusy;
+    }
+
+    private get _busyLabel(): string {
+        if (this._pullState === "running") { return "Pulling…"; }
+        if (this._loadState === "running") { return this._dryRunMode ? "Dry run…" : "Loading…"; }
+        if (this._loadState === "paused")  { return "Load paused"; }
+        if (this._extBusy)                 { return this._extBusyLabel; }
+        return "";
+    }
+
+    /** Runs an operation that has no dedicated state machine (ExternalId check/create, auto-sort)
+     *  behind the same busy lock as pull/load, so its buttons disable everywhere and it can't
+     *  overlap with a pull/load/rollback. Errors are surfaced both as a native notification and
+     *  in the panel's global error banner — never silently swallowed. */
+    private async _runExtBusy(label: string, fn: () => Promise<void>): Promise<void> {
+        if (this._anyRunning) {
+            vscode.window.showWarningMessage(`Please wait for "${this._busyLabel}" to finish first.`);
+            return;
+        }
+        this._extBusy = true;
+        this._extBusyLabel = label;
+        this._refresh();
+        try {
+            await fn();
+        } catch (err) {
+            this._reportError(`${label} failed: ${String(err)}`);
+        } finally {
+            this._extBusy = false;
+            this._extBusyLabel = "";
+            this._refresh();
+        }
     }
 
     private _dispose(): void {
@@ -446,10 +503,19 @@ export class DataMigrationPanel {
             dryRun:    this._dryRunMode,
             pullLog:   this._pullLog,
             loadLog:   this._loadLog,
+            busy:      this._anyRunning,
+            busyLabel: this._busyLabel,
         };
     }
 
     // ── operations ───────────────────────────────────────────────────────────
+
+    /** Surface a failure both as a native VS Code notification (visible no matter which tab is
+     *  open, or even if the panel isn't focused) and in the panel's own error banner. */
+    private _reportError(message: string): void {
+        vscode.window.showErrorMessage(message);
+        this._panel.webview.postMessage({ command: "runError", message });
+    }
 
     private _makeLogHandlers(logTarget: string[]) {
         const onLog = (text: string, level: string) => {
@@ -479,10 +545,11 @@ export class DataMigrationPanel {
             if (!dryRun) { writeJobLog(pullLogsDir(this._workspaceRoot), this._pullLog); }
             this._panel.webview.postMessage({ command: "runDone", op: "pull", dryRun });
         } catch (err) {
-            this._panel.webview.postMessage({ command: "runError", message: String(err) });
+            this._reportError(`Pull failed: ${String(err)}`);
         } finally {
             this._pullState = "done";
             this._pullController = undefined;
+            this._refresh();
         }
     }
 
@@ -500,10 +567,11 @@ export class DataMigrationPanel {
             if (!dryRun) { writeJobLog(loadLogsDir(this._workspaceRoot, targetOrg), this._loadLog); }
             this._panel.webview.postMessage({ command: "runDone", op: "load", dryRun });
         } catch (err) {
-            this._panel.webview.postMessage({ command: "runError", message: String(err) });
+            this._reportError(`Load failed: ${String(err)}`);
         } finally {
             this._loadState = "done";
             this._loadController = undefined;
+            this._refresh();
         }
     }
 
@@ -535,12 +603,13 @@ export class DataMigrationPanel {
             }
             this._panel.webview.postMessage({ command: "runDone", op: "pullAndLoad", dryRun });
         } catch (err) {
-            this._panel.webview.postMessage({ command: "runError", message: String(err) });
+            this._reportError(`Pull + Load failed: ${String(err)}`);
         } finally {
             this._pullState = this._pullState === "running" ? "done" : this._pullState;
             this._loadState = "done";
             this._pullController = undefined;
             this._loadController = undefined;
+            this._refresh();
         }
     }
 
@@ -561,10 +630,11 @@ export class DataMigrationPanel {
             await rollbackData(targetOrg, this._workspaceRoot, this._config, onLog, { dryRun });
             this._panel.webview.postMessage({ command: "runDone", op: "rollback", dryRun });
         } catch (err) {
-            this._panel.webview.postMessage({ command: "runError", message: String(err) });
+            this._reportError(`Rollback failed: ${String(err)}`);
         } finally {
             this._loadState = "done";
             this._loadController = undefined;
+            this._refresh();
         }
     }
 
@@ -613,8 +683,8 @@ export class DataMigrationPanel {
     }
 
     private async _handleCheckExtId(sobject: string, targetOrg: string): Promise<void> {
-        const { onLog } = this._makeLogHandlers(this._loadLog);
-        try {
+        await this._runExtBusy(`Checking ExternalId for ${sobject}…`, async () => {
+            const { onLog } = this._makeLogHandlers(this._loadLog);
             const fieldName = await checkExternalId(targetOrg, sobject, this._workspaceRoot, onLog);
             const cfg = readDmConfig(this._workspaceRoot);
             const obj = cfg.objects.find((o) => o.sobject === sobject);
@@ -625,33 +695,31 @@ export class DataMigrationPanel {
                 this._config = cfg;
             }
             onLog(`External ID check for ${sobject}: ${fieldName ? "Found — " + fieldName : "Not found"}`, fieldName ? "success" : "warn");
-        } catch (err) {
-            onLog(`External ID check failed for ${sobject}: ${String(err)}`, "error");
-        }
-        this._refresh();
+        });
     }
 
     private async _handleCheckAllExtIds(targetOrg: string): Promise<void> {
-        const { onLog } = this._makeLogHandlers(this._loadLog);
-        const cfg = readDmConfig(this._workspaceRoot);
-        for (const obj of cfg.objects.filter((o) => o.active !== false)) {
-            try {
-                const fieldName = await checkExternalId(targetOrg, obj.sobject, this._workspaceRoot, onLog);
-                obj.externalIdVerified = !!fieldName;
-                if (fieldName) { obj.externalIdField = fieldName; }
-                onLog(`${obj.sobject}: ${fieldName ? "✓ " + fieldName : "✗ not found"}`, fieldName ? "success" : "warn");
-            } catch (err) {
-                onLog(`${obj.sobject}: check error — ${String(err)}`, "error");
+        await this._runExtBusy("Checking ExternalIds…", async () => {
+            const { onLog } = this._makeLogHandlers(this._loadLog);
+            const cfg = readDmConfig(this._workspaceRoot);
+            for (const obj of cfg.objects.filter((o) => o.active !== false)) {
+                try {
+                    const fieldName = await checkExternalId(targetOrg, obj.sobject, this._workspaceRoot, onLog);
+                    obj.externalIdVerified = !!fieldName;
+                    if (fieldName) { obj.externalIdField = fieldName; }
+                    onLog(`${obj.sobject}: ${fieldName ? "✓ " + fieldName : "✗ not found"}`, fieldName ? "success" : "warn");
+                } catch (err) {
+                    onLog(`${obj.sobject}: check error — ${String(err)}`, "error");
+                }
             }
-        }
-        writeDmConfig(this._workspaceRoot, cfg);
-        this._config = cfg;
-        this._refresh();
+            writeDmConfig(this._workspaceRoot, cfg);
+            this._config = cfg;
+        });
     }
 
     private async _handleCreateExtId(sobject: string, targetOrg: string): Promise<void> {
-        const { onLog } = this._makeLogHandlers(this._loadLog);
-        try {
+        await this._runExtBusy(`Creating ExternalId for ${sobject}…`, async () => {
+            const { onLog } = this._makeLogHandlers(this._loadLog);
             const fieldName = await createExternalIdField(targetOrg, sobject, this._workspaceRoot, onLog);
             const cfg = readDmConfig(this._workspaceRoot);
             const obj = cfg.objects.find((o) => o.sobject === sobject);
@@ -662,28 +730,26 @@ export class DataMigrationPanel {
                 this._config = cfg;
             }
             onLog(`Created ExternalId field for ${sobject}: ${fieldName}`, "success");
-        } catch (err) {
-            onLog(`Failed to create ExternalId for ${sobject}: ${String(err)}`, "error");
-        }
-        this._refresh();
+        });
     }
 
     private async _handleCreateAllExtIds(targetOrg: string): Promise<void> {
-        const { onLog } = this._makeLogHandlers(this._loadLog);
-        const cfg = readDmConfig(this._workspaceRoot);
-        for (const obj of cfg.objects.filter((o) => o.active !== false && !o.externalIdVerified)) {
-            try {
-                const fieldName = await createExternalIdField(targetOrg, obj.sobject, this._workspaceRoot, onLog);
-                obj.externalIdField = fieldName;
-                obj.externalIdVerified = true;
-                onLog(`Created ExternalId for ${obj.sobject}: ${fieldName}`, "success");
-            } catch (err) {
-                onLog(`Failed for ${obj.sobject}: ${String(err)}`, "error");
+        await this._runExtBusy("Creating ExternalIds…", async () => {
+            const { onLog } = this._makeLogHandlers(this._loadLog);
+            const cfg = readDmConfig(this._workspaceRoot);
+            for (const obj of cfg.objects.filter((o) => o.active !== false && !o.externalIdVerified)) {
+                try {
+                    const fieldName = await createExternalIdField(targetOrg, obj.sobject, this._workspaceRoot, onLog);
+                    obj.externalIdField = fieldName;
+                    obj.externalIdVerified = true;
+                    onLog(`Created ExternalId for ${obj.sobject}: ${fieldName}`, "success");
+                } catch (err) {
+                    onLog(`Failed for ${obj.sobject}: ${String(err)}`, "error");
+                }
             }
-        }
-        writeDmConfig(this._workspaceRoot, cfg);
-        this._config = cfg;
-        this._refresh();
+            writeDmConfig(this._workspaceRoot, cfg);
+            this._config = cfg;
+        });
     }
 
     private async _handleExportDryRunReport(): Promise<void> {
@@ -720,7 +786,10 @@ export class DataMigrationPanel {
 
     private _renderHtml(vm: Awaited<ReturnType<DataMigrationPanel["_buildViewModel"]>>): string {
         const { config, sourceOrg, targetOrg, role, envs, tracking, trackingOrg, trackedOrgs, hasLog, seedInfo,
-                availableOrgs, pullState, loadState, activeTab, dryRun, pullLog, loadLog } = vm;
+                availableOrgs, pullState, loadState, activeTab, dryRun, pullLog, loadLog, busy, busyLabel } = vm;
+        // Disable-attribute fragment for every button that mutates state or shells out to the
+        // Salesforce CLI, so nothing can be started while another operation is already running.
+        const dis = busy ? "disabled" : "";
 
         // Build pipeline orgs list
         const pipelineAliases = new Set<string>();
@@ -774,13 +843,13 @@ export class DataMigrationPanel {
                     <td>${esc(obj.label ?? obj.sobject)}</td>
                     <td>${esc((obj.dependsOn ?? []).join(", "))}</td>
                     <td title="${esc(obj.query ?? "")}">${queryPreview}</td>
-                    <td><label class="toggle-sw"><input type="checkbox" ${active ? "checked" : ""} onchange="send('updateObject',{obj:Object.assign({},DATA.config.objects[${idx}],{active:this.checked})})"><span class="slider"></span></label></td>
+                    <td><label class="toggle-sw"><input type="checkbox" ${active ? "checked" : ""} ${dis} onchange="send('updateObject',{obj:Object.assign({},DATA.config.objects[${idx}],{active:this.checked})})"><span class="slider"></span></label></td>
                     <td>${extIdBadge}</td>
                     <td class="row-actions">
-                        <button class="icon-btn" title="Edit" onclick="openInlineEditor(${idx})">✏️</button>
-                        <button class="icon-btn" title="Move Up" onclick="moveObj(${idx},-1)" ${idx === 0 ? "disabled" : ""}>▲</button>
-                        <button class="icon-btn" title="Move Down" onclick="moveObj(${idx},1)" ${idx === objects.length - 1 ? "disabled" : ""}>▼</button>
-                        <button class="icon-btn danger-btn" title="Delete" onclick="if(confirm('Delete '+${JSON.stringify(esc(obj.sobject))}+'?'))send('deleteObject',{id:${JSON.stringify(obj.id)}})">🗑</button>
+                        <button class="icon-btn" title="Edit" ${dis} onclick="openInlineEditor(${idx})">✏️</button>
+                        <button class="icon-btn" title="Move Up" onclick="moveObj(${idx},-1)" ${idx === 0 || busy ? "disabled" : ""}>▲</button>
+                        <button class="icon-btn" title="Move Down" onclick="moveObj(${idx},1)" ${idx === objects.length - 1 || busy ? "disabled" : ""}>▼</button>
+                        <button class="icon-btn danger-btn" title="Delete" ${dis} onclick="if(confirm('Delete '+${JSON.stringify(esc(obj.sobject))}+'?'))send('deleteObject',{id:${JSON.stringify(obj.id)}})">🗑</button>
                     </td>
                 </tr>
                 <tr id="editor-${esc(obj.id)}" class="inline-editor-row" style="display:none">
@@ -807,7 +876,7 @@ export class DataMigrationPanel {
                                 <input id="ed-deps-${esc(obj.id)}" value="${esc((obj.dependsOn ?? []).join(", "))}" />
                             </div>
                             <div style="display:flex;gap:8px;margin-top:8px">
-                                <button class="btn btn-primary" onclick="saveInlineEditor(${idx})">Save</button>
+                                <button class="btn btn-primary" ${dis} onclick="saveInlineEditor(${idx})">Save</button>
                                 <button class="btn" onclick="closeInlineEditor('${esc(obj.id)}')">Cancel</button>
                             </div>
                         </div>
@@ -819,24 +888,24 @@ export class DataMigrationPanel {
             <div class="settings-card">
                 <h3>Settings</h3>
                 <div class="toggle-row">
-                    <label class="toggle-sw"><input type="checkbox" id="autoCreateExtId" ${config.autoCreateExternalId ? "checked" : ""} onchange="toggleAutoCreate(this.checked)"><span class="slider"></span></label>
+                    <label class="toggle-sw"><input type="checkbox" id="autoCreateExtId" ${config.autoCreateExternalId ? "checked" : ""} ${dis} onchange="toggleAutoCreate(this.checked)"><span class="slider"></span></label>
                     <span class="toggle-label">Auto-create External ID fields if not found (recommended)</span>
                 </div>
                 <div class="field-row">
                     <label>Batch size</label>
-                    <input type="number" id="batchSize" value="${esc(String(config.batchSize ?? 190))}" min="1" max="10000" style="width:90px;flex:none" oninput="pendingSettings.batchSize=+this.value" />
+                    <input type="number" id="batchSize" value="${esc(String(config.batchSize ?? 190))}" min="1" max="10000" style="width:90px;flex:none" ${dis} oninput="pendingSettings.batchSize=+this.value" />
                 </div>
                 <div style="margin-top:12px">
-                    <button class="btn btn-primary" onclick="saveSettings()">Save Settings</button>
+                    <button class="btn btn-primary" ${dis} onclick="saveSettings()">Save Settings</button>
                 </div>
             </div>
 
             <div class="toolbar" style="margin-top:16px">
-                <button class="btn btn-primary" onclick="openAddObjectModal()">+ Add Object</button>
-                <button class="btn" onclick="send('autoSort',{targetOrg:document.getElementById('sortTargetOrg').value})">Auto-Sort by Dependencies</button>
-                <button class="btn" onclick="saveOrder()">Save Order</button>
-                <button class="btn" onclick="send('openConfigJson',{})" title="Open .sf-devops-dm.json in editor — changes auto-refresh this panel on save">&#128196; Edit Raw JSON</button>
-                <select id="sortTargetOrg" class="select" style="margin-left:auto">
+                <button class="btn btn-primary" ${dis} onclick="openAddObjectModal()">+ Add Object</button>
+                <button class="btn" ${dis} onclick="send('autoSort',{targetOrg:document.getElementById('sortTargetOrg').value})">Auto-Sort by Dependencies</button>
+                <button class="btn" ${dis} onclick="saveOrder()">Save Order</button>
+                <button class="btn" ${dis} onclick="send('openConfigJson',{})" title="Open .sf-devops-dm.json in editor — changes auto-refresh this panel on save">&#128196; Edit Raw JSON</button>
+                <select id="sortTargetOrg" class="select" style="margin-left:auto" ${dis}>
                     ${orgOptions(targetOrg)}
                 </select>
             </div>
@@ -857,7 +926,7 @@ export class DataMigrationPanel {
                     <div class="field-row"><label>External ID Field</label><input id="new-extid" placeholder="e.g. ExternalId__c" /></div>
                     <div class="field-row"><label>Depends On (comma-separated)</label><input id="new-deps" placeholder="e.g. Account, Contact" /></div>
                     <div style="display:flex;gap:8px;margin-top:12px">
-                        <button class="btn btn-primary" onclick="submitAddObject()">Add</button>
+                        <button class="btn btn-primary" ${dis} onclick="submitAddObject()">Add</button>
                         <button class="btn" onclick="closeAddObjectModal()">Cancel</button>
                     </div>
                 </div>
@@ -876,7 +945,7 @@ export class DataMigrationPanel {
                 <td><strong>${r.count > 0 ? r.count : "—"}</strong></td>
                 <td style="color:var(--vscode-descriptionForeground);font-size:11px">${r.lastPulled ? new Date(r.lastPulled).toLocaleString() : "—"}</td>
                 <td class="row-actions">
-                    ${r.count > 0 ? `<button class="btn btn-sm danger-btn" onclick="if(confirm('Clear seed for ${esc(r.sobject)}?'))send('clearSeed',{sobject:${JSON.stringify(r.sobject)}})">Clear</button>` : ""}
+                    ${r.count > 0 ? `<button class="btn btn-sm danger-btn" ${dis} onclick="if(confirm('Clear seed for ${esc(r.sobject)}?'))send('clearSeed',{sobject:${JSON.stringify(r.sobject)}})">Clear</button>` : ""}
                 </td>
             </tr>`).join("");
 
@@ -886,20 +955,20 @@ export class DataMigrationPanel {
             <div class="run-idle-card" style="max-width:680px">
                 <div class="field-row" style="margin-bottom:12px">
                     <label style="width:100px">Source Org</label>
-                    <select id="pullSourceOrg" class="select" onchange="if(this.value==='**connect**')send('openConnectOrg');else send('setSourceOrg',{alias:this.value})">
+                    <select id="pullSourceOrg" class="select" ${dis} onchange="if(this.value==='**connect**')send('openConnectOrg');else send('setSourceOrg',{alias:this.value})">
                         ${orgOptions(sourceOrg)}
                     </select>
-                    <button class="icon-btn" onclick="send('refreshOrgs')" title="Refresh orgs">🔄</button>
+                    <button class="icon-btn" ${dis} onclick="send('refreshOrgs')" title="Refresh orgs">🔄</button>
                 </div>
                 <div class="toggle-row" style="margin-bottom:16px">
-                    <label class="toggle-sw"><input type="checkbox" id="dryRunToggle" ${dryRun ? "checked" : ""}><span class="slider"></span></label>
+                    <label class="toggle-sw"><input type="checkbox" id="dryRunToggle" ${dryRun ? "checked" : ""} ${dis}><span class="slider"></span></label>
                     <span class="toggle-label">Dry Run — fetch 5 records per object, no files written</span>
                 </div>
                 <div class="toolbar" style="margin-bottom:12px">
                     ${isRunning
                         ? `<button class="btn danger-btn" onclick="send('cancelPull')">✕ Cancel Pull</button>`
-                        : `<button class="btn btn-primary" onclick="startPull()">⬇ Pull All Objects</button>
-                           <button class="btn btn-accent" onclick="startPullAndLoad()">⬇⬆ Pull + Load</button>`
+                        : `<button class="btn btn-primary" ${dis} onclick="startPull()">⬇ Pull All Objects</button>
+                           <button class="btn btn-accent" ${dis} onclick="startPullAndLoad()">⬇⬆ Pull + Load</button>`
                     }
                     ${recentLogs.length > 0 ? `<button class="btn" onclick="send('viewPullLog',{})" style="margin-left:auto">📄 Last Pull Log</button>` : ""}
                 </div>
@@ -958,17 +1027,17 @@ export class DataMigrationPanel {
             <div class="run-idle-card">
                 <div class="field-row" style="margin-bottom:12px">
                     <label style="width:100px">Target Org</label>
-                    <select id="loadTargetOrg" class="select" onchange="if(this.value==='**connect**')send('openConnectOrg');else send('setTargetOrg',{alias:this.value})">
+                    <select id="loadTargetOrg" class="select" ${dis} onchange="if(this.value==='**connect**')send('openConnectOrg');else send('setTargetOrg',{alias:this.value})">
                         ${orgOptions(targetOrg)}
                     </select>
                 </div>
                 <div class="toggle-row" style="margin-bottom:16px">
-                    <label class="toggle-sw"><input type="checkbox" id="dryRunToggle" ${dryRun ? "checked" : ""}><span class="slider"></span></label>
+                    <label class="toggle-sw"><input type="checkbox" id="dryRunToggle" ${dryRun ? "checked" : ""} ${dis}><span class="slider"></span></label>
                     <span class="toggle-label">Dry Run — validate only, no records inserted</span>
                 </div>
                 <div style="display:flex;gap:10px;flex-wrap:wrap">
-                    <button class="btn btn-primary" onclick="startLoad()">⬆ Load to Target</button>
-                    <button class="btn btn-accent" onclick="startPullAndLoad()">⬇⬆ Pull + Load</button>
+                    <button class="btn btn-primary" ${dis} onclick="startLoad()">⬆ Load to Target</button>
+                    <button class="btn btn-accent" ${dis} onclick="startPullAndLoad()">⬇⬆ Pull + Load</button>
                     ${recentLogs.length > 0 ? `<button class="btn" onclick="send('viewLoadLog',{targetOrg:document.getElementById('loadTargetOrg')?.value||${JSON.stringify(targetOrg)}})" style="margin-left:auto">📄 Last Load Log</button>` : ""}
                 </div>
                 ${isDone ? `<div class="done-banner">✅ Load complete. Check the Tracking tab for results.</div>` : ""}
