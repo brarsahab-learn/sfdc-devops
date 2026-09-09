@@ -549,6 +549,84 @@ function buildCsv(
     return [headers.join(","), ...rows].join("\n");
 }
 
+/** Minimal RFC4180 CSV parser — handles quoted fields with embedded commas, quotes, and
+ *  newlines, which Bulk API 2.0's `sf__Error` column regularly contains (e.g. messages that
+ *  themselves list comma-separated field names). Returns one object per data row, keyed by
+ *  header. */
+export function parseCsv(text: string): Record<string, string>[] {
+    const rows: string[][] = [];
+    let row: string[] = [];
+    let field = "";
+    let inQuotes = false;
+    for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        if (inQuotes) {
+            if (c === '"') {
+                if (text[i + 1] === '"') { field += '"'; i++; }
+                else { inQuotes = false; }
+            } else {
+                field += c;
+            }
+        } else if (c === '"') {
+            inQuotes = true;
+        } else if (c === ",") {
+            row.push(field); field = "";
+        } else if (c === "\n" || c === "\r") {
+            if (c === "\r" && text[i + 1] === "\n") { i++; }
+            row.push(field); field = "";
+            rows.push(row); row = [];
+        } else {
+            field += c;
+        }
+    }
+    if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+    const nonEmptyRows = rows.filter(r => !(r.length === 1 && r[0] === ""));
+    if (nonEmptyRows.length === 0) { return []; }
+    const headers = nonEmptyRows[0];
+    return nonEmptyRows.slice(1).map(r => {
+        const obj: Record<string, string> = {};
+        headers.forEach((h, i) => { obj[h] = r[i] ?? ""; });
+        return obj;
+    });
+}
+
+/** After a Bulk API 2.0 upsert job completes with failures, the CLI only reports a generic
+ *  "N records failed" message — the real per-record reasons require a separate `sf data bulk
+ *  results` call that writes a `<jobId>-failed-records.csv` with an `sf__Error` column. This
+ *  fetches that file and maps each failed row back to its referenceId via the externalId
+ *  field value we stamped on every outbound record (see loadBatch's upsert path). Returns null
+ *  if the results can't be fetched or parsed — callers fall back to the generic message. */
+async function fetchBulkJobFailures(
+    jobId: string,
+    targetOrg: string,
+    tmpDir: string,
+    extField: string,
+): Promise<{ refId: string; error: string }[] | null> {
+    try {
+        const { stdout } = await execSf(
+            ["data", "bulk", "results", "--job-id", jobId, "--target-org", targetOrg, "--json"],
+            { cwd: tmpDir, timeout: 60_000, maxBuffer: 20 * 1024 * 1024 },
+        );
+        const parsed = JSON.parse(stdout);
+        const failedFilePath: string | undefined = parsed?.result?.failedFilePath;
+        if (!failedFilePath) { return null; }
+        const csvPath = path.isAbsolute(failedFilePath) ? failedFilePath : path.join(tmpDir, failedFilePath);
+        if (!fs.existsSync(csvPath)) { return null; }
+        const rows = parseCsv(fs.readFileSync(csvPath, "utf-8"));
+        const out = rows.map(r => ({
+            refId: r[extField] ?? "",
+            error: r["sf__Error"] || "Unknown error (see failed-records CSV)",
+        }));
+        // Best-effort cleanup — these CSVs land in tmpDir and aren't needed once parsed.
+        for (const suffix of ["-success-records.csv", "-failed-records.csv", "-unprocessed-records.csv"]) {
+            try { fs.unlinkSync(path.join(tmpDir, `${jobId}${suffix}`)); } catch { /* ignore */ }
+        }
+        return out;
+    } catch {
+        return null;
+    }
+}
+
 /** Read seed records for a given sobject from seedDir. Returns [] if no file found. */
 function readSeedRecords(seedDir: string, sobject: string): Record<string, any>[] {
     // sf data export tree produces <SObjects>.json (plural) or uses plan.json listing
@@ -598,6 +676,8 @@ export function parseImportResult(stdout: string): {
     failed: { refId: string; error: string }[];
     resultItems: { sfId: string; success: boolean; error: string }[]; // full positional list
     limitException: boolean;
+    jobId?: string; // Bulk API 2.0 job id — set only on the "N records failed" top-level error,
+                     // so the caller can fetch the real per-record reasons via `sf data bulk results`.
 } {
     const created: string[] = [];
     const createdByRef = new Map<string, string>();
@@ -609,12 +689,16 @@ export function parseImportResult(stdout: string): {
         const parsed = JSON.parse(stdout);
 
         // Top-level CLI error (e.g. bad flag, auth failure) has no `result` key at all — surface
-        // its message instead of silently reporting "0 created, N failed" with no detail.
+        // its message instead of silently reporting "0 created, N failed" with no detail. For a
+        // Bulk API 2.0 job that completed with failures, this is ALWAYS just the generic
+        // "Job finished being processed but failed to process N records." — the real per-record
+        // reasons live in a separate `sf data bulk results` call keyed by `data.jobId`.
         if (parsed?.result === undefined && typeof parsed?.message === "string") {
             const errStr = parsed.message as string;
             if (errStr.includes("LimitException")) { limitException = true; }
             failed.push({ refId: "", error: errStr });
-            return { created, createdByRef, failed, resultItems, limitException };
+            const jobId = typeof parsed?.data?.jobId === "string" ? parsed.data.jobId : undefined;
+            return { created, createdByRef, failed, resultItems, limitException, jobId };
         }
 
         const rawResults: unknown = parsed?.result?.results ?? parsed?.result ?? [];
@@ -1087,7 +1171,19 @@ async function loadBatch(
         attemptFailed = true;
     }
 
-    const { created, createdByRef, failed, resultItems, limitException } = parseImportResult(stdout);
+    const parsedResult = parseImportResult(stdout);
+    const { created, createdByRef, resultItems, limitException, jobId } = parsedResult;
+    let failed = parsedResult.failed;
+
+    // Bulk API 2.0 only ever reports "N records failed" with no per-record reason — fetch the
+    // real ones (e.g. REQUIRED_FIELD_MISSING, DUPLICATE_VALUE) via `sf data bulk results` so the
+    // log shows what actually broke instead of a single opaque summary line.
+    if (jobId && obj.externalIdField) {
+        const realFailures = await fetchBulkJobFailures(jobId, targetOrg, tmpDir, obj.externalIdField);
+        if (realFailures && realFailures.length > 0) {
+            failed = realFailures;
+        }
+    }
 
     // Governor-limit retry: split batch in half (down to single record)
     if (limitException && processable.length > 1) {
