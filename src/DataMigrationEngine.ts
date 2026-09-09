@@ -592,7 +592,7 @@ function readSeedRecords(seedDir: string, sobject: string): Record<string, any>[
  *                           use resultItems[] for positional tracking (same order as CSV rows).
  *   - sf data import tree:  [{ referenceId, id }]                 — use createdByRef map.
  */
-function parseImportResult(stdout: string): {
+export function parseImportResult(stdout: string): {
     created: string[];
     createdByRef: Map<string, string>;
     failed: { refId: string; error: string }[];
@@ -607,6 +607,16 @@ function parseImportResult(stdout: string): {
 
     try {
         const parsed = JSON.parse(stdout);
+
+        // Top-level CLI error (e.g. bad flag, auth failure) has no `result` key at all — surface
+        // its message instead of silently reporting "0 created, N failed" with no detail.
+        if (parsed?.result === undefined && typeof parsed?.message === "string") {
+            const errStr = parsed.message as string;
+            if (errStr.includes("LimitException")) { limitException = true; }
+            failed.push({ refId: "", error: errStr });
+            return { created, createdByRef, failed, resultItems, limitException };
+        }
+
         const rawResults: unknown = parsed?.result?.results ?? parsed?.result ?? [];
 
         if (typeof rawResults === "string" && rawResults.includes("LimitException")) {
@@ -987,7 +997,7 @@ async function backfillExternalIds(
         await execSf(
             ["data", "upsert", "bulk",
              "--sobject", obj.sobject,
-             "--external-id-field", "Id",
+             "--external-id", "Id",
              "--file", csvPath,
              "--target-org", targetOrg,
              "--wait", "10",
@@ -1042,7 +1052,7 @@ async function loadBatch(
             const result = await execSf(
                 ["data", "upsert", "bulk",
                  "--sobject", obj.sobject,
-                 "--external-id-field", obj.externalIdField,
+                 "--external-id", obj.externalIdField,
                  "--file", csvPath,
                  "--target-org", targetOrg,
                  "--wait", "10",
