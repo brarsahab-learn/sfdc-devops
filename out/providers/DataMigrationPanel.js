@@ -1,113 +1,112 @@
+"use strict";
 // DataMigrationPanel.ts — 4-tab VS Code webview panel for Salesforce Data Migration.
-
-import * as vscode from "vscode";
-import * as path from "path";
-import * as fs from "fs";
-import { sharedCss, cspMeta, loadingHtml } from "../ui/shared";
-import { getEffectiveRole } from "../RoleManager";
-import { getRoles, getEnvironments, getOrgAliasSlots } from "../config";
-import {
-    readDmConfig, writeDmConfig, getSourceOrg, getTargetOrg, setSourceOrg, setTargetOrg,
-    DmConfig, DmObjectConfig, readTracking, writeTracking, lastRunLogPath, dmBaseDir,
-    pullLogsDir, loadLogsDir, writeJobLog, listRecentLogs, safeOrgName
-} from "../DataMigrationConfig";
-import {
-    makeController, pullData, loadData, rollbackData, autoSortByDependencies,
-    checkExternalId, createExternalIdField, listAvailableOrgs,
-    DmRunController, DmProgressEvent
-} from "../DataMigrationEngine";
-import { log } from "../Log";
-
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.DataMigrationPanel = void 0;
+const vscode = __importStar(require("vscode"));
+const path = __importStar(require("path"));
+const fs = __importStar(require("fs"));
+const shared_1 = require("../ui/shared");
+const RoleManager_1 = require("../RoleManager");
+const config_1 = require("../config");
+const DataMigrationConfig_1 = require("../DataMigrationConfig");
+const DataMigrationEngine_1 = require("../DataMigrationEngine");
+const Log_1 = require("../Log");
 // ── helpers ──────────────────────────────────────────────────────────────────
-
 /** Count records stored in seed JSON files for a given sobject. */
-function countSeedRecords(seedDir: string, sobject: string): number {
-    if (!fs.existsSync(seedDir)) { return 0; }
+function countSeedRecords(seedDir, sobject) {
+    if (!fs.existsSync(seedDir)) {
+        return 0;
+    }
     let count = 0;
     try {
         for (const f of fs.readdirSync(seedDir)) {
-            if (!f.endsWith(".json") || f.endsWith("-plan.json")) { continue; }
-            if (!f.toLowerCase().includes(sobject.toLowerCase())) { continue; }
+            if (!f.endsWith(".json") || f.endsWith("-plan.json")) {
+                continue;
+            }
+            if (!f.toLowerCase().includes(sobject.toLowerCase())) {
+                continue;
+            }
             const data = JSON.parse(fs.readFileSync(path.join(seedDir, f), "utf-8"));
             count += Array.isArray(data.records) ? data.records.length : 0;
         }
-    } catch { /* ignore */ }
+    }
+    catch { /* ignore */ }
     return count;
 }
-
 /** Read last-pull timestamp and per-object record counts from seed directory. */
-function getSeedInfo(workspaceRoot: string, config: DmConfig): { sobject: string; label: string; count: number; lastPulled: string | null }[] {
+function getSeedInfo(workspaceRoot, config) {
     const seedDir = path.resolve(workspaceRoot, config.seedDir);
     const planPath = path.join(seedDir, "plan.json");
-    let lastPulled: string | null = null;
-    try { const p = JSON.parse(fs.readFileSync(planPath, "utf-8")); lastPulled = p.generatedAt ?? null; } catch { /* ignore */ }
+    let lastPulled = null;
+    try {
+        const p = JSON.parse(fs.readFileSync(planPath, "utf-8"));
+        lastPulled = p.generatedAt ?? null;
+    }
+    catch { /* ignore */ }
     return (config.objects ?? []).filter(o => o.active !== false).map(obj => ({
         sobject: obj.sobject,
-        label:   obj.label || obj.sobject,
-        count:   countSeedRecords(seedDir, obj.sobject),
+        label: obj.label || obj.sobject,
+        count: countSeedRecords(seedDir, obj.sobject),
         lastPulled,
     }));
 }
-
-function esc(s: string): string {
-    return String(s).replace(/[<>&"]/g, (c) => (({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" } as Record<string, string>)[c] ?? c));
+function esc(s) {
+    return String(s).replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c] ?? c));
 }
-
-function jsonInject(data: unknown): string {
+function jsonInject(data) {
     return JSON.stringify(data)
         .replace(/</g, "\\u003c")
         .replace(/>/g, "\\u003e")
         .replace(/&/g, "\\u0026");
 }
-
 // ── panel ────────────────────────────────────────────────────────────────────
-
-export class DataMigrationPanel {
-    private static _current: DataMigrationPanel | undefined;
-    private readonly _disposables: vscode.Disposable[] = [];
-    private _refreshing = false;
-
-    private _config: DmConfig = { objects: [], autoCreateExternalId: true, batchSize: 190, seedDir: ".git/sf-devops-dm/seed" };
-    private _activeTab: "config" | "pull" | "load" | "tracking" | "extids" = "config";
-    private _pullController: DmRunController | undefined;
-    private _loadController: DmRunController | undefined;
-    private _pullState: "idle" | "running" | "done" = "idle";
-    private _loadState: "idle" | "running" | "paused" | "done" = "idle";
-    private _pullLog: string[] = [];
-    private _loadLog: string[] = [];
-    private _dryRunMode = false;
-    private _trackingViewOrg = "";
-    // Covers operations with no pull/load state machine of their own (ExternalId check/create,
-    // auto-sort) — used together with pull/load state to lock the UI against overlapping runs.
-    private _extBusy = false;
-    private _extBusyLabel = "";
-    // Last operation error, shown in a banner that's visible on every tab until dismissed or a
-    // new run starts — unlike a one-shot postMessage, it survives the _refresh() that follows.
-    private _lastError: string | null = null;
-    private _availableOrgs: { alias: string; username: string }[] = [];
-
+class DataMigrationPanel {
     // ── static entry point ───────────────────────────────────────────────────
-
-    static createOrShow(context: vscode.ExtensionContext, workspaceRoot: string): void {
+    static createOrShow(context, workspaceRoot) {
         // Role gate
-        const role = getEffectiveRole(context);
-        const roles = getRoles();
+        const role = (0, RoleManager_1.getEffectiveRole)(context);
+        const roles = (0, config_1.getRoles)();
         const leadIdx = roles.findIndex((r) => r.toLowerCase() === "lead");
         const userIdx = roles.findIndex((r) => r === role);
-
         if (DataMigrationPanel._current) {
             DataMigrationPanel._current._panel.reveal(vscode.ViewColumn.Two);
             DataMigrationPanel._current._refresh();
             return;
         }
-
-        const panel = vscode.window.createWebviewPanel(
-            "sfDevopsDataMigration",
-            "Salesforce-DevOps — Data Migration",
-            vscode.ViewColumn.Two,
-            { enableScripts: true, retainContextWhenHidden: true }
-        );
-
+        const panel = vscode.window.createWebviewPanel("sfDevopsDataMigration", "Salesforce-DevOps — Data Migration", vscode.ViewColumn.Two, { enableScripts: true, retainContextWhenHidden: true });
         if (userIdx < leadIdx) {
             panel.webview.html = DataMigrationPanel._accessDeniedHtml(panel.webview, role, roles[leadIdx] ?? "Lead");
             // Still wire up elevateRole so the button works
@@ -122,17 +121,31 @@ export class DataMigrationPanel {
             panel.onDidDispose(() => sub.dispose());
             return;
         }
-
         DataMigrationPanel._current = new DataMigrationPanel(panel, context, workspaceRoot);
     }
-
-    private constructor(
-        private readonly _panel: vscode.WebviewPanel,
-        private readonly _ctx: vscode.ExtensionContext,
-        private readonly _workspaceRoot: string
-    ) {
+    constructor(_panel, _ctx, _workspaceRoot) {
+        this._panel = _panel;
+        this._ctx = _ctx;
+        this._workspaceRoot = _workspaceRoot;
+        this._disposables = [];
+        this._refreshing = false;
+        this._config = { objects: [], autoCreateExternalId: true, batchSize: 190, seedDir: ".git/sf-devops-dm/seed" };
+        this._activeTab = "config";
+        this._pullState = "idle";
+        this._loadState = "idle";
+        this._pullLog = [];
+        this._loadLog = [];
+        this._dryRunMode = false;
+        this._trackingViewOrg = "";
+        // Covers operations with no pull/load state machine of their own (ExternalId check/create,
+        // auto-sort) — used together with pull/load state to lock the UI against overlapping runs.
+        this._extBusy = false;
+        this._extBusyLabel = "";
+        // Last operation error, shown in a banner that's visible on every tab until dismissed or a
+        // new run starts — unlike a one-shot postMessage, it survives the _refresh() that follows.
+        this._lastError = null;
+        this._availableOrgs = [];
         this._panel.onDidDispose(() => this._dispose(), null, this._disposables);
-
         // Commands that must never overlap a running pull/load/rollback/ExternalId/auto-sort
         // operation — buttons are disabled client-side while busy, but this is the server-side
         // backstop against a stale render or a message that was already in flight.
@@ -141,305 +154,286 @@ export class DataMigrationPanel {
             "checkExtId", "checkAllExtIds", "createExtId", "createAllExtIds",
             "retryFailed", "clearAndReload", "clearAllAndReload",
         ]);
-
         this._panel.webview.onDidReceiveMessage(async (msg) => {
             if (EXCLUSIVE_COMMANDS.has(msg.command) && this._anyRunning) {
                 vscode.window.showWarningMessage(`Please wait for "${this._busyLabel}" to finish first.`);
                 return;
             }
             try {
-            switch (msg.command) {
-                case "switchTab":
-                    this._activeTab = msg.tab;
-                    this._refresh();
-                    break;
-
-                case "refresh":
-                    this._refresh();
-                    break;
-
-                case "dismissError":
-                    this._lastError = null;
-                    this._refresh();
-                    break;
-
-                case "saveConfig":
-                    writeDmConfig(this._workspaceRoot, msg.config as DmConfig);
-                    this._config = msg.config as DmConfig;
-                    this._refresh();
-                    break;
-
-                case "addObject": {
-                    const cfg = readDmConfig(this._workspaceRoot);
-                    cfg.objects.push(msg.obj as DmObjectConfig);
-                    writeDmConfig(this._workspaceRoot, cfg);
-                    this._config = cfg;
-                    this._refresh();
-                    break;
-                }
-
-                case "updateObject": {
-                    const cfg = readDmConfig(this._workspaceRoot);
-                    const idx = cfg.objects.findIndex((o) => o.id === msg.obj.id);
-                    if (idx !== -1) { cfg.objects[idx] = msg.obj as DmObjectConfig; }
-                    writeDmConfig(this._workspaceRoot, cfg);
-                    this._config = cfg;
-                    this._refresh();
-                    break;
-                }
-
-                case "deleteObject": {
-                    const cfg = readDmConfig(this._workspaceRoot);
-                    cfg.objects = cfg.objects.filter((o) => o.id !== msg.id);
-                    writeDmConfig(this._workspaceRoot, cfg);
-                    this._config = cfg;
-                    this._refresh();
-                    break;
-                }
-
-                case "reorderObjects": {
-                    const cfg = readDmConfig(this._workspaceRoot);
-                    const ids: string[] = msg.ids;
-                    cfg.objects = ids.map((id) => cfg.objects.find((o) => o.id === id)!).filter(Boolean);
-                    writeDmConfig(this._workspaceRoot, cfg);
-                    this._config = cfg;
-                    this._refresh();
-                    break;
-                }
-
-                case "autoSort": {
-                    await this._runExtBusy("Auto-sorting…", async () => {
-                        let cfg = readDmConfig(this._workspaceRoot);
-                        cfg = await autoSortByDependencies(msg.targetOrg || "", this._workspaceRoot, cfg, () => {});
-                        writeDmConfig(this._workspaceRoot, cfg);
+                switch (msg.command) {
+                    case "switchTab":
+                        this._activeTab = msg.tab;
+                        this._refresh();
+                        break;
+                    case "refresh":
+                        this._refresh();
+                        break;
+                    case "dismissError":
+                        this._lastError = null;
+                        this._refresh();
+                        break;
+                    case "saveConfig":
+                        (0, DataMigrationConfig_1.writeDmConfig)(this._workspaceRoot, msg.config);
+                        this._config = msg.config;
+                        this._refresh();
+                        break;
+                    case "addObject": {
+                        const cfg = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
+                        cfg.objects.push(msg.obj);
+                        (0, DataMigrationConfig_1.writeDmConfig)(this._workspaceRoot, cfg);
                         this._config = cfg;
-                    });
-                    break;
-                }
-
-                case "setSourceOrg":
-                    setSourceOrg(this._ctx, msg.alias);
-                    break;
-
-                case "setTargetOrg":
-                    setTargetOrg(this._ctx, msg.alias);
-                    break;
-
-                case "pull":
-                    await this._startPull(msg.sourceOrg, !!msg.dryRun);
-                    break;
-
-                case "load":
-                    await this._startLoad(msg.targetOrg, !!msg.dryRun);
-                    break;
-
-                case "pullAndLoad":
-                    await this._startPullAndLoad(msg.sourceOrg, msg.targetOrg, !!msg.dryRun);
-                    break;
-
-                case "pause":
-                    this._loadController?.pause();
-                    this._loadState = "paused";
-                    break;
-
-                case "resume":
-                    this._loadController?.resume();
-                    this._loadState = "running";
-                    break;
-
-                case "skipObject":
-                    this._loadController?.skipObject();
-                    break;
-
-                case "cancel":
-                    this._loadController?.cancel();
-                    this._pullController?.cancel();
-                    this._loadState = "idle";
-                    this._pullState = "idle";
-                    break;
-
-                case "cancelPull":
-                    this._pullController?.cancel();
-                    this._pullState = "idle";
-                    break;
-
-                case "selectTrackingOrg":
-                    this._trackingViewOrg = msg.org || "";
-                    this._refresh();
-                    break;
-
-                case "clearAndReload": {
-                    const trk = readTracking(this._workspaceRoot, msg.targetOrg);
-                    delete trk[msg.sobject];
-                    writeTracking(this._workspaceRoot, msg.targetOrg, trk);
-                    const cfg = readDmConfig(this._workspaceRoot);
-                    this._config = cfg;
-                    await this._startLoad(msg.targetOrg, false, msg.sobject);
-                    break;
-                }
-
-                case "clearAllAndReload": {
-                    const ok = await vscode.window.showWarningMessage(
-                        `Clear all tracking for ${msg.targetOrg} and reload every object?`, { modal: true }, "Clear & Reload"
-                    );
-                    if (ok !== "Clear & Reload") { break; }
-                    writeTracking(this._workspaceRoot, msg.targetOrg, {});
-                    const cfg = readDmConfig(this._workspaceRoot);
-                    this._config = cfg;
-                    await this._startLoad(msg.targetOrg, false);
-                    break;
-                }
-
-                case "clearSeed": {
-                    const seedDir = path.resolve(this._workspaceRoot, this._config.seedDir);
-                    if (fs.existsSync(seedDir)) {
-                        for (const f of fs.readdirSync(seedDir)) {
-                            if (f.toLowerCase().includes((msg.sobject as string).toLowerCase())) {
-                                try { fs.unlinkSync(path.join(seedDir, f)); } catch { /* ignore */ }
+                        this._refresh();
+                        break;
+                    }
+                    case "updateObject": {
+                        const cfg = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
+                        const idx = cfg.objects.findIndex((o) => o.id === msg.obj.id);
+                        if (idx !== -1) {
+                            cfg.objects[idx] = msg.obj;
+                        }
+                        (0, DataMigrationConfig_1.writeDmConfig)(this._workspaceRoot, cfg);
+                        this._config = cfg;
+                        this._refresh();
+                        break;
+                    }
+                    case "deleteObject": {
+                        const cfg = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
+                        cfg.objects = cfg.objects.filter((o) => o.id !== msg.id);
+                        (0, DataMigrationConfig_1.writeDmConfig)(this._workspaceRoot, cfg);
+                        this._config = cfg;
+                        this._refresh();
+                        break;
+                    }
+                    case "reorderObjects": {
+                        const cfg = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
+                        const ids = msg.ids;
+                        cfg.objects = ids.map((id) => cfg.objects.find((o) => o.id === id)).filter(Boolean);
+                        (0, DataMigrationConfig_1.writeDmConfig)(this._workspaceRoot, cfg);
+                        this._config = cfg;
+                        this._refresh();
+                        break;
+                    }
+                    case "autoSort": {
+                        await this._runExtBusy("Auto-sorting…", async () => {
+                            let cfg = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
+                            cfg = await (0, DataMigrationEngine_1.autoSortByDependencies)(msg.targetOrg || "", this._workspaceRoot, cfg, () => { });
+                            (0, DataMigrationConfig_1.writeDmConfig)(this._workspaceRoot, cfg);
+                            this._config = cfg;
+                        });
+                        break;
+                    }
+                    case "setSourceOrg":
+                        (0, DataMigrationConfig_1.setSourceOrg)(this._ctx, msg.alias);
+                        break;
+                    case "setTargetOrg":
+                        (0, DataMigrationConfig_1.setTargetOrg)(this._ctx, msg.alias);
+                        break;
+                    case "pull":
+                        await this._startPull(msg.sourceOrg, !!msg.dryRun);
+                        break;
+                    case "load":
+                        await this._startLoad(msg.targetOrg, !!msg.dryRun);
+                        break;
+                    case "pullAndLoad":
+                        await this._startPullAndLoad(msg.sourceOrg, msg.targetOrg, !!msg.dryRun);
+                        break;
+                    case "pause":
+                        this._loadController?.pause();
+                        this._loadState = "paused";
+                        break;
+                    case "resume":
+                        this._loadController?.resume();
+                        this._loadState = "running";
+                        break;
+                    case "skipObject":
+                        this._loadController?.skipObject();
+                        break;
+                    case "cancel":
+                        this._loadController?.cancel();
+                        this._pullController?.cancel();
+                        this._loadState = "idle";
+                        this._pullState = "idle";
+                        break;
+                    case "cancelPull":
+                        this._pullController?.cancel();
+                        this._pullState = "idle";
+                        break;
+                    case "selectTrackingOrg":
+                        this._trackingViewOrg = msg.org || "";
+                        this._refresh();
+                        break;
+                    case "clearAndReload": {
+                        const trk = (0, DataMigrationConfig_1.readTracking)(this._workspaceRoot, msg.targetOrg);
+                        delete trk[msg.sobject];
+                        (0, DataMigrationConfig_1.writeTracking)(this._workspaceRoot, msg.targetOrg, trk);
+                        const cfg = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
+                        this._config = cfg;
+                        await this._startLoad(msg.targetOrg, false, msg.sobject);
+                        break;
+                    }
+                    case "clearAllAndReload": {
+                        const ok = await vscode.window.showWarningMessage(`Clear all tracking for ${msg.targetOrg} and reload every object?`, { modal: true }, "Clear & Reload");
+                        if (ok !== "Clear & Reload") {
+                            break;
+                        }
+                        (0, DataMigrationConfig_1.writeTracking)(this._workspaceRoot, msg.targetOrg, {});
+                        const cfg = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
+                        this._config = cfg;
+                        await this._startLoad(msg.targetOrg, false);
+                        break;
+                    }
+                    case "clearSeed": {
+                        const seedDir = path.resolve(this._workspaceRoot, this._config.seedDir);
+                        if (fs.existsSync(seedDir)) {
+                            for (const f of fs.readdirSync(seedDir)) {
+                                if (f.toLowerCase().includes(msg.sobject.toLowerCase())) {
+                                    try {
+                                        fs.unlinkSync(path.join(seedDir, f));
+                                    }
+                                    catch { /* ignore */ }
+                                }
                             }
                         }
+                        this._refresh();
+                        break;
                     }
-                    this._refresh();
-                    break;
-                }
-
-                case "viewPullLog": {
-                    const dir = pullLogsDir(this._workspaceRoot);
-                    const recent = listRecentLogs(dir, 1);
-                    const fp = recent[0] ? path.join(dir, recent[0]) : null;
-                    if (!fp || !fs.existsSync(fp)) { vscode.window.showWarningMessage("No pull log found."); break; }
-                    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(fp), vscode.ViewColumn.One);
-                    break;
-                }
-
-                case "viewLoadLog": {
-                    const dir = loadLogsDir(this._workspaceRoot, msg.targetOrg || "");
-                    const recent = listRecentLogs(dir, 1);
-                    const fp = recent[0] ? path.join(dir, recent[0]) : null;
-                    if (!fp || !fs.existsSync(fp)) { vscode.window.showWarningMessage("No load log found for this org."); break; }
-                    await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(fp), vscode.ViewColumn.One);
-                    break;
-                }
-
-                case "retryFailed": {
-                    const cfg = readDmConfig(this._workspaceRoot);
-                    this._config = cfg;
-                    await this._startLoad(msg.targetOrg, false, msg.sobject);
-                    break;
-                }
-
-                case "rollback":
-                    await this._handleRollback(msg.targetOrg, !!msg.dryRun);
-                    break;
-
-                case "clearObject":
-                    await this._handleClearObject(msg.sobject, msg.targetOrg);
-                    break;
-
-                case "exportCsv":
-                    await this._handleExportCsv(msg.targetOrg);
-                    break;
-
-                case "viewLog":
-                    await this._handleViewLog();
-                    break;
-
-                case "checkExtId":
-                    await this._handleCheckExtId(msg.sobject, msg.targetOrg);
-                    break;
-
-                case "checkAllExtIds":
-                    await this._handleCheckAllExtIds(msg.targetOrg);
-                    break;
-
-                case "createExtId":
-                    await this._handleCreateExtId(msg.sobject, msg.targetOrg);
-                    break;
-
-                case "createAllExtIds":
-                    await this._handleCreateAllExtIds(msg.targetOrg);
-                    break;
-
-                case "refreshOrgs": {
-                    this._panel.webview.postMessage({ command: "logLine", text: "Refreshing org list...", level: "info" });
-                    listAvailableOrgs(this._workspaceRoot)
-                        .then(orgs => { this._availableOrgs = orgs; this._refresh(); })
-                        .catch(err => { this._reportError(`Failed to refresh org list: ${String(err)}`); this._refresh(); });
-                    break;
-                }
-
-                case "elevateRole":
-                    await vscode.commands.executeCommand("sfDevops.changeRole");
-                    this._refresh();
-                    break;
-
-                case "openConnectOrg": {
-                    const terminal = vscode.window.createTerminal("SF Org Login");
-                    terminal.show();
-                    terminal.sendText("sf org login web");
-                    break;
-                }
-
-                case "exportDryRunReport":
-                    await this._handleExportDryRunReport();
-                    break;
-
-                case "openConfigJson": {
-                    const cfgPath = path.join(this._workspaceRoot, ".sf-devops-dm.json");
-                    if (!fs.existsSync(cfgPath)) { writeDmConfig(this._workspaceRoot, this._config); }
-                    const doc = await vscode.workspace.openTextDocument(cfgPath);
-                    await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
-                    break;
+                    case "viewPullLog": {
+                        const dir = (0, DataMigrationConfig_1.pullLogsDir)(this._workspaceRoot);
+                        const recent = (0, DataMigrationConfig_1.listRecentLogs)(dir, 1);
+                        const fp = recent[0] ? path.join(dir, recent[0]) : null;
+                        if (!fp || !fs.existsSync(fp)) {
+                            vscode.window.showWarningMessage("No pull log found.");
+                            break;
+                        }
+                        await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(fp), vscode.ViewColumn.One);
+                        break;
+                    }
+                    case "viewLoadLog": {
+                        const dir = (0, DataMigrationConfig_1.loadLogsDir)(this._workspaceRoot, msg.targetOrg || "");
+                        const recent = (0, DataMigrationConfig_1.listRecentLogs)(dir, 1);
+                        const fp = recent[0] ? path.join(dir, recent[0]) : null;
+                        if (!fp || !fs.existsSync(fp)) {
+                            vscode.window.showWarningMessage("No load log found for this org.");
+                            break;
+                        }
+                        await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(fp), vscode.ViewColumn.One);
+                        break;
+                    }
+                    case "retryFailed": {
+                        const cfg = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
+                        this._config = cfg;
+                        await this._startLoad(msg.targetOrg, false, msg.sobject);
+                        break;
+                    }
+                    case "rollback":
+                        await this._handleRollback(msg.targetOrg, !!msg.dryRun);
+                        break;
+                    case "clearObject":
+                        await this._handleClearObject(msg.sobject, msg.targetOrg);
+                        break;
+                    case "exportCsv":
+                        await this._handleExportCsv(msg.targetOrg);
+                        break;
+                    case "viewLog":
+                        await this._handleViewLog();
+                        break;
+                    case "checkExtId":
+                        await this._handleCheckExtId(msg.sobject, msg.targetOrg);
+                        break;
+                    case "checkAllExtIds":
+                        await this._handleCheckAllExtIds(msg.targetOrg);
+                        break;
+                    case "createExtId":
+                        await this._handleCreateExtId(msg.sobject, msg.targetOrg);
+                        break;
+                    case "createAllExtIds":
+                        await this._handleCreateAllExtIds(msg.targetOrg);
+                        break;
+                    case "refreshOrgs": {
+                        this._panel.webview.postMessage({ command: "logLine", text: "Refreshing org list...", level: "info" });
+                        (0, DataMigrationEngine_1.listAvailableOrgs)(this._workspaceRoot)
+                            .then(orgs => { this._availableOrgs = orgs; this._refresh(); })
+                            .catch(err => { this._reportError(`Failed to refresh org list: ${String(err)}`); this._refresh(); });
+                        break;
+                    }
+                    case "elevateRole":
+                        await vscode.commands.executeCommand("sfDevops.changeRole");
+                        this._refresh();
+                        break;
+                    case "openConnectOrg": {
+                        const terminal = vscode.window.createTerminal("SF Org Login");
+                        terminal.show();
+                        terminal.sendText("sf org login web");
+                        break;
+                    }
+                    case "exportDryRunReport":
+                        await this._handleExportDryRunReport();
+                        break;
+                    case "openConfigJson": {
+                        const cfgPath = path.join(this._workspaceRoot, ".sf-devops-dm.json");
+                        if (!fs.existsSync(cfgPath)) {
+                            (0, DataMigrationConfig_1.writeDmConfig)(this._workspaceRoot, this._config);
+                        }
+                        const doc = await vscode.workspace.openTextDocument(cfgPath);
+                        await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
+                        break;
+                    }
                 }
             }
-            } catch (err) {
+            catch (err) {
                 // Safety net: any handler above that doesn't already catch its own errors
                 // (e.g. a malformed .sf-devops-dm.json on a plain config edit) would otherwise
                 // fail as a silent, invisible unhandled rejection.
                 this._reportError(`Action "${msg.command}" failed: ${String(err)}`);
             }
         }, null, this._disposables);
-
-        this._panel.webview.html = loadingHtml("Loading Data Migration...");
+        this._panel.webview.html = (0, shared_1.loadingHtml)("Loading Data Migration...");
         // Load available orgs once, non-blocking — cached for the lifetime of the panel
-        listAvailableOrgs(this._workspaceRoot)
+        (0, DataMigrationEngine_1.listAvailableOrgs)(this._workspaceRoot)
             .then(orgs => { this._availableOrgs = orgs; })
-            .catch(() => {})
+            .catch(() => { })
             .finally(() => this._refresh());
-
         // Watch .sf-devops-dm.json so external edits (e.g. via "Edit Raw JSON") auto-refresh
         const configPattern = new vscode.RelativePattern(this._workspaceRoot, ".sf-devops-dm.json");
         const cfgWatcher = vscode.workspace.createFileSystemWatcher(configPattern, true, false, true);
         cfgWatcher.onDidChange(() => {
-            try { this._config = readDmConfig(this._workspaceRoot); } catch { /* ignore parse errors */ }
+            try {
+                this._config = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
+            }
+            catch { /* ignore parse errors */ }
             this._refresh();
         }, null, this._disposables);
         this._disposables.push(cfgWatcher);
     }
-
     /** True whenever ANY long-running operation is in flight — pull, load (including paused),
      *  rollback (which reuses the load state machine), an ExternalId check/create, or auto-sort.
      *  Drives both the global busy banner and disabling of mutating buttons across every tab. */
-    private get _anyRunning(): boolean {
+    get _anyRunning() {
         return this._pullState === "running"
             || this._loadState === "running"
             || this._loadState === "paused"
             || this._extBusy;
     }
-
-    private get _busyLabel(): string {
-        if (this._pullState === "running") { return "Pulling…"; }
-        if (this._loadState === "running") { return this._dryRunMode ? "Dry run…" : "Loading…"; }
-        if (this._loadState === "paused")  { return "Load paused"; }
-        if (this._extBusy)                 { return this._extBusyLabel; }
+    get _busyLabel() {
+        if (this._pullState === "running") {
+            return "Pulling…";
+        }
+        if (this._loadState === "running") {
+            return this._dryRunMode ? "Dry run…" : "Loading…";
+        }
+        if (this._loadState === "paused") {
+            return "Load paused";
+        }
+        if (this._extBusy) {
+            return this._extBusyLabel;
+        }
         return "";
     }
-
     /** Runs an operation that has no dedicated state machine (ExternalId check/create, auto-sort)
      *  behind the same busy lock as pull/load, so its buttons disable everywhere and it can't
      *  overlap with a pull/load/rollback. Errors are surfaced both as a native notification and
      *  in the panel's global error banner — never silently swallowed. */
-    private async _runExtBusy(label: string, fn: () => Promise<void>): Promise<void> {
+    async _runExtBusy(label, fn) {
         if (this._anyRunning) {
             vscode.window.showWarningMessage(`Please wait for "${this._busyLabel}" to finish first.`);
             return;
@@ -450,56 +444,57 @@ export class DataMigrationPanel {
         this._refresh();
         try {
             await fn();
-        } catch (err) {
+        }
+        catch (err) {
             this._reportError(`${label} failed: ${String(err)}`);
-        } finally {
+        }
+        finally {
             this._extBusy = false;
             this._extBusyLabel = "";
             this._refresh();
         }
     }
-
-    private _dispose(): void {
+    _dispose() {
         DataMigrationPanel._current = undefined;
         this._panel.dispose();
-        while (this._disposables.length) { this._disposables.pop()?.dispose(); }
+        while (this._disposables.length) {
+            this._disposables.pop()?.dispose();
+        }
     }
-
     // ── refresh ──────────────────────────────────────────────────────────────
-
-    private _refresh(): void {
-        if (this._refreshing) { return; }
+    _refresh() {
+        if (this._refreshing) {
+            return;
+        }
         this._refreshing = true;
         try {
             const vm = this._buildViewModel();
             this._panel.webview.html = this._renderHtml(vm);
-        } catch (err) {
+        }
+        catch (err) {
             this._panel.webview.html = `<body style="padding:16px;color:#f48771;font-family:sans-serif">Error: ${esc(String(err))}</body>`;
-        } finally {
+        }
+        finally {
             this._refreshing = false;
         }
     }
-
     // ── view model ───────────────────────────────────────────────────────────
-
-    private _buildViewModel() {
-        const config      = readDmConfig(this._workspaceRoot);
-        this._config      = config;
-        const sourceOrg   = getSourceOrg(this._ctx) || "";
-        const targetOrg   = getTargetOrg(this._ctx) || "";
-        const role        = getEffectiveRole(this._ctx);
-        const envs        = getEnvironments();
+    _buildViewModel() {
+        const config = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
+        this._config = config;
+        const sourceOrg = (0, DataMigrationConfig_1.getSourceOrg)(this._ctx) || "";
+        const targetOrg = (0, DataMigrationConfig_1.getTargetOrg)(this._ctx) || "";
+        const role = (0, RoleManager_1.getEffectiveRole)(this._ctx);
+        const envs = (0, config_1.getEnvironments)();
         const trackingOrg = this._trackingViewOrg || targetOrg;
-        const tracking    = trackingOrg ? readTracking(this._workspaceRoot, trackingOrg) : {};
-        const hasLog      = fs.existsSync(lastRunLogPath(this._workspaceRoot));
-        const seedInfo    = getSeedInfo(this._workspaceRoot, config);
-
+        const tracking = trackingOrg ? (0, DataMigrationConfig_1.readTracking)(this._workspaceRoot, trackingOrg) : {};
+        const hasLog = fs.existsSync((0, DataMigrationConfig_1.lastRunLogPath)(this._workspaceRoot));
+        const seedInfo = getSeedInfo(this._workspaceRoot, config);
         // List all orgs that have tracking files (for the Tracking org selector)
         const trackingDir = path.join(this._workspaceRoot, ".git", "sf-devops-dm", "tracking");
-        const trackedOrgs: string[] = fs.existsSync(trackingDir)
+        const trackedOrgs = fs.existsSync(trackingDir)
             ? fs.readdirSync(trackingDir).filter(f => f.endsWith(".json")).map(f => f.replace(/\.json$/, ""))
             : [];
-
         return {
             config,
             sourceOrg,
@@ -515,102 +510,107 @@ export class DataMigrationPanel {
             pullState: this._pullState,
             loadState: this._loadState,
             activeTab: this._activeTab,
-            dryRun:    this._dryRunMode,
-            pullLog:   this._pullLog,
-            loadLog:   this._loadLog,
-            busy:      this._anyRunning,
+            dryRun: this._dryRunMode,
+            pullLog: this._pullLog,
+            loadLog: this._loadLog,
+            busy: this._anyRunning,
             busyLabel: this._busyLabel,
             lastError: this._lastError,
         };
     }
-
     // ── operations ───────────────────────────────────────────────────────────
-
     /** Surface a failure both as a native VS Code notification (visible no matter which tab is
      *  open, or even if the panel isn't focused) and in the panel's own error banner. */
-    private _reportError(message: string): void {
+    _reportError(message) {
         this._lastError = message;
         vscode.window.showErrorMessage(message);
         this._panel.webview.postMessage({ command: "runError", message });
     }
-
-    private _makeLogHandlers(logTarget: string[]) {
-        const onLog = (text: string, level: string) => {
+    _makeLogHandlers(logTarget) {
+        const onLog = (text, level) => {
             const line = `[${new Date().toLocaleTimeString()}]  ${text}`;
             logTarget.push(line);
-            if (logTarget.length > 2000) { logTarget.shift(); }
+            if (logTarget.length > 2000) {
+                logTarget.shift();
+            }
             this._panel.webview.postMessage({ command: "logLine", text: line, level });
-            log(`[DM] ${text}`);
+            (0, Log_1.log)(`[DM] ${text}`);
         };
-        const onProgress = (evt: DmProgressEvent) => {
+        const onProgress = (evt) => {
             this._panel.webview.postMessage({ command: "progress", data: evt });
         };
         return { onLog, onProgress };
     }
-
-    private async _startPull(sourceOrg: string, dryRun: boolean): Promise<void> {
+    async _startPull(sourceOrg, dryRun) {
         this._pullState = "running";
         this._lastError = null;
         this._pullLog = [];
         this._dryRunMode = dryRun;
         this._activeTab = "pull";
-        const ctrl = makeController();
+        const ctrl = (0, DataMigrationEngine_1.makeController)();
         this._pullController = ctrl;
         const { onLog, onProgress } = this._makeLogHandlers(this._pullLog);
         this._refresh();
         try {
-            await pullData(sourceOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, dryRunSampleSize: 5 });
-            if (!dryRun) { writeJobLog(pullLogsDir(this._workspaceRoot), this._pullLog); }
+            await (0, DataMigrationEngine_1.pullData)(sourceOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, dryRunSampleSize: 5 });
+            if (!dryRun) {
+                (0, DataMigrationConfig_1.writeJobLog)((0, DataMigrationConfig_1.pullLogsDir)(this._workspaceRoot), this._pullLog);
+            }
             this._panel.webview.postMessage({ command: "runDone", op: "pull", dryRun });
-        } catch (err) {
+        }
+        catch (err) {
             this._reportError(`Pull failed: ${String(err)}`);
-        } finally {
+        }
+        finally {
             this._pullState = "done";
             this._pullController = undefined;
             this._refresh();
         }
     }
-
-    private async _startLoad(targetOrg: string, dryRun: boolean, sobject?: string): Promise<void> {
+    async _startLoad(targetOrg, dryRun, sobject) {
         this._loadState = "running";
         this._lastError = null;
         this._loadLog = [];
         this._dryRunMode = dryRun;
         this._activeTab = "load";
-        const ctrl = makeController();
+        const ctrl = (0, DataMigrationEngine_1.makeController)();
         this._loadController = ctrl;
         const { onLog, onProgress } = this._makeLogHandlers(this._loadLog);
         this._refresh();
         try {
-            await loadData(targetOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, objectFilter: sobject ? [sobject] : undefined });
-            if (!dryRun) { writeJobLog(loadLogsDir(this._workspaceRoot, targetOrg), this._loadLog); }
+            await (0, DataMigrationEngine_1.loadData)(targetOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, objectFilter: sobject ? [sobject] : undefined });
+            if (!dryRun) {
+                (0, DataMigrationConfig_1.writeJobLog)((0, DataMigrationConfig_1.loadLogsDir)(this._workspaceRoot, targetOrg), this._loadLog);
+            }
             this._panel.webview.postMessage({ command: "runDone", op: "load", dryRun });
-        } catch (err) {
+        }
+        catch (err) {
             this._reportError(`Load failed: ${String(err)}`);
-        } finally {
+        }
+        finally {
             this._loadState = "done";
             this._loadController = undefined;
             this._refresh();
         }
     }
-
-    private async _startPullAndLoad(sourceOrg: string, targetOrg: string, dryRun: boolean): Promise<void> {
+    async _startPullAndLoad(sourceOrg, targetOrg, dryRun) {
         // Pull phase
         this._pullState = "running";
         this._lastError = null;
         this._pullLog = [];
         this._activeTab = "pull";
         this._dryRunMode = dryRun;
-        const ctrl = makeController();
+        const ctrl = (0, DataMigrationEngine_1.makeController)();
         this._pullController = ctrl;
         this._loadController = ctrl; // shared controller for cancel
         const { onLog: pullLog, onProgress: pullProg } = this._makeLogHandlers(this._pullLog);
         this._refresh();
         try {
-            await pullData(sourceOrg, this._workspaceRoot, this._config, pullLog, pullProg, ctrl, { dryRun, dryRunSampleSize: 5 });
-            if (!dryRun) { writeJobLog(pullLogsDir(this._workspaceRoot), this._pullLog); }
+            await (0, DataMigrationEngine_1.pullData)(sourceOrg, this._workspaceRoot, this._config, pullLog, pullProg, ctrl, { dryRun, dryRunSampleSize: 5 });
+            if (!dryRun) {
+                (0, DataMigrationConfig_1.writeJobLog)((0, DataMigrationConfig_1.pullLogsDir)(this._workspaceRoot), this._pullLog);
+            }
             this._pullState = "done";
-
             if (ctrl.state !== "cancelled") {
                 // Load phase
                 this._loadState = "running";
@@ -618,13 +618,17 @@ export class DataMigrationPanel {
                 this._activeTab = "load";
                 const { onLog: loadLog, onProgress: loadProg } = this._makeLogHandlers(this._loadLog);
                 this._refresh();
-                await loadData(targetOrg, this._workspaceRoot, this._config, loadLog, loadProg, ctrl, { dryRun });
-                if (!dryRun) { writeJobLog(loadLogsDir(this._workspaceRoot, targetOrg), this._loadLog); }
+                await (0, DataMigrationEngine_1.loadData)(targetOrg, this._workspaceRoot, this._config, loadLog, loadProg, ctrl, { dryRun });
+                if (!dryRun) {
+                    (0, DataMigrationConfig_1.writeJobLog)((0, DataMigrationConfig_1.loadLogsDir)(this._workspaceRoot, targetOrg), this._loadLog);
+                }
             }
             this._panel.webview.postMessage({ command: "runDone", op: "pullAndLoad", dryRun });
-        } catch (err) {
+        }
+        catch (err) {
             this._reportError(`Pull + Load failed: ${String(err)}`);
-        } finally {
+        }
+        finally {
             this._pullState = this._pullState === "running" ? "done" : this._pullState;
             this._loadState = "done";
             this._pullController = undefined;
@@ -632,54 +636,56 @@ export class DataMigrationPanel {
             this._refresh();
         }
     }
-
-    private async _handleRollback(targetOrg: string, dryRun: boolean): Promise<void> {
-        const confirm = await vscode.window.showWarningMessage(
-            `This will delete all tracked records from ${targetOrg}. Type DELETE to confirm.`,
-            { modal: true }, "DELETE"
-        );
-        if (confirm !== "DELETE") { return; }
+    async _handleRollback(targetOrg, dryRun) {
+        const confirm = await vscode.window.showWarningMessage(`This will delete all tracked records from ${targetOrg}. Type DELETE to confirm.`, { modal: true }, "DELETE");
+        if (confirm !== "DELETE") {
+            return;
+        }
         this._loadState = "running";
         this._lastError = null;
         this._loadLog = [];
         this._activeTab = "load";
-        const ctrl = makeController();
+        const ctrl = (0, DataMigrationEngine_1.makeController)();
         this._loadController = ctrl;
         const { onLog, onProgress } = this._makeLogHandlers(this._loadLog);
         this._refresh();
         try {
-            await rollbackData(targetOrg, this._workspaceRoot, this._config, onLog, { dryRun });
+            await (0, DataMigrationEngine_1.rollbackData)(targetOrg, this._workspaceRoot, this._config, onLog, { dryRun });
             this._panel.webview.postMessage({ command: "runDone", op: "rollback", dryRun });
-        } catch (err) {
+        }
+        catch (err) {
             this._reportError(`Rollback failed: ${String(err)}`);
-        } finally {
+        }
+        finally {
             this._loadState = "done";
             this._loadController = undefined;
             this._refresh();
         }
     }
-
-    private async _handleClearObject(sobject: string, trackOrg: string): Promise<void> {
+    async _handleClearObject(sobject, trackOrg) {
         // Clears the tracking entries only — does NOT delete records from Salesforce.
         // Use Full Rollback for that.
-        const trk = readTracking(this._workspaceRoot, trackOrg);
+        const trk = (0, DataMigrationConfig_1.readTracking)(this._workspaceRoot, trackOrg);
         if (trk[sobject]) {
             delete trk[sobject];
-            writeTracking(this._workspaceRoot, trackOrg, trk);
+            (0, DataMigrationConfig_1.writeTracking)(this._workspaceRoot, trackOrg, trk);
         }
         vscode.window.showInformationMessage(`Tracking cleared for ${sobject} in ${trackOrg}.`);
         this._refresh();
     }
-
-    private async _handleExportCsv(targetOrg: string): Promise<void> {
+    async _handleExportCsv(targetOrg) {
         try {
-            const tracking = readTracking(this._workspaceRoot, targetOrg);
-            const rows: string[] = ["Object,Total,Created,Failed,Skipped,Pending,Blocked"];
+            const tracking = (0, DataMigrationConfig_1.readTracking)(this._workspaceRoot, targetOrg);
+            const rows = ["Object,Total,Created,Failed,Skipped,Pending,Blocked"];
             for (const [obj, entries] of Object.entries(tracking)) {
                 const counts = { created: 0, failed: 0, skipped: 0, pending: 0, blocked: 0 };
                 for (const e of Object.values(entries)) {
-                    if (e.status in counts) { (counts as any)[e.status]++; }
-                    else { counts.pending++; }
+                    if (e.status in counts) {
+                        counts[e.status]++;
+                    }
+                    else {
+                        counts.pending++;
+                    }
                 }
                 const total = Object.keys(entries).length;
                 rows.push([obj, total, counts.created, counts.failed, counts.skipped, counts.pending, counts.blocked].join(","));
@@ -688,13 +694,13 @@ export class DataMigrationPanel {
             fs.writeFileSync(outPath, rows.join("\n"), "utf8");
             const doc = await vscode.workspace.openTextDocument(outPath);
             await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
-        } catch (err) {
+        }
+        catch (err) {
             vscode.window.showErrorMessage(`Export failed: ${String(err)}`);
         }
     }
-
-    private async _handleViewLog(): Promise<void> {
-        const logPath = lastRunLogPath(this._workspaceRoot);
+    async _handleViewLog() {
+        const logPath = (0, DataMigrationConfig_1.lastRunLogPath)(this._workspaceRoot);
         if (!fs.existsSync(logPath)) {
             vscode.window.showWarningMessage("No log file found.");
             return;
@@ -702,93 +708,93 @@ export class DataMigrationPanel {
         const doc = await vscode.workspace.openTextDocument(logPath);
         await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
     }
-
-    private async _handleCheckExtId(sobject: string, targetOrg: string): Promise<void> {
+    async _handleCheckExtId(sobject, targetOrg) {
         await this._runExtBusy(`Checking ExternalId for ${sobject}…`, async () => {
             const { onLog } = this._makeLogHandlers(this._loadLog);
-            const fieldName = await checkExternalId(targetOrg, sobject, this._workspaceRoot, onLog);
-            const cfg = readDmConfig(this._workspaceRoot);
+            const fieldName = await (0, DataMigrationEngine_1.checkExternalId)(targetOrg, sobject, this._workspaceRoot, onLog);
+            const cfg = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
             const obj = cfg.objects.find((o) => o.sobject === sobject);
             if (obj) {
                 obj.externalIdVerified = !!fieldName;
-                if (fieldName) { obj.externalIdField = fieldName; }
-                writeDmConfig(this._workspaceRoot, cfg);
+                if (fieldName) {
+                    obj.externalIdField = fieldName;
+                }
+                (0, DataMigrationConfig_1.writeDmConfig)(this._workspaceRoot, cfg);
                 this._config = cfg;
             }
             onLog(`External ID check for ${sobject}: ${fieldName ? "Found — " + fieldName : "Not found"}`, fieldName ? "success" : "warn");
         });
     }
-
-    private async _handleCheckAllExtIds(targetOrg: string): Promise<void> {
+    async _handleCheckAllExtIds(targetOrg) {
         await this._runExtBusy("Checking ExternalIds…", async () => {
             const { onLog } = this._makeLogHandlers(this._loadLog);
-            const cfg = readDmConfig(this._workspaceRoot);
+            const cfg = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
             for (const obj of cfg.objects.filter((o) => o.active !== false)) {
                 try {
-                    const fieldName = await checkExternalId(targetOrg, obj.sobject, this._workspaceRoot, onLog);
+                    const fieldName = await (0, DataMigrationEngine_1.checkExternalId)(targetOrg, obj.sobject, this._workspaceRoot, onLog);
                     obj.externalIdVerified = !!fieldName;
-                    if (fieldName) { obj.externalIdField = fieldName; }
+                    if (fieldName) {
+                        obj.externalIdField = fieldName;
+                    }
                     onLog(`${obj.sobject}: ${fieldName ? "✓ " + fieldName : "✗ not found"}`, fieldName ? "success" : "warn");
-                } catch (err) {
+                }
+                catch (err) {
                     onLog(`${obj.sobject}: check error — ${String(err)}`, "error");
                 }
             }
-            writeDmConfig(this._workspaceRoot, cfg);
+            (0, DataMigrationConfig_1.writeDmConfig)(this._workspaceRoot, cfg);
             this._config = cfg;
         });
     }
-
-    private async _handleCreateExtId(sobject: string, targetOrg: string): Promise<void> {
+    async _handleCreateExtId(sobject, targetOrg) {
         await this._runExtBusy(`Creating ExternalId for ${sobject}…`, async () => {
             const { onLog } = this._makeLogHandlers(this._loadLog);
-            const fieldName = await createExternalIdField(targetOrg, sobject, this._workspaceRoot, onLog);
-            const cfg = readDmConfig(this._workspaceRoot);
+            const fieldName = await (0, DataMigrationEngine_1.createExternalIdField)(targetOrg, sobject, this._workspaceRoot, onLog);
+            const cfg = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
             const obj = cfg.objects.find((o) => o.sobject === sobject);
             if (obj) {
                 obj.externalIdField = fieldName;
                 obj.externalIdVerified = true;
-                writeDmConfig(this._workspaceRoot, cfg);
+                (0, DataMigrationConfig_1.writeDmConfig)(this._workspaceRoot, cfg);
                 this._config = cfg;
             }
             onLog(`Created ExternalId field for ${sobject}: ${fieldName}`, "success");
         });
     }
-
-    private async _handleCreateAllExtIds(targetOrg: string): Promise<void> {
+    async _handleCreateAllExtIds(targetOrg) {
         await this._runExtBusy("Creating ExternalIds…", async () => {
             const { onLog } = this._makeLogHandlers(this._loadLog);
-            const cfg = readDmConfig(this._workspaceRoot);
+            const cfg = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
             for (const obj of cfg.objects.filter((o) => o.active !== false && !o.externalIdVerified)) {
                 try {
-                    const fieldName = await createExternalIdField(targetOrg, obj.sobject, this._workspaceRoot, onLog);
+                    const fieldName = await (0, DataMigrationEngine_1.createExternalIdField)(targetOrg, obj.sobject, this._workspaceRoot, onLog);
                     obj.externalIdField = fieldName;
                     obj.externalIdVerified = true;
                     onLog(`Created ExternalId for ${obj.sobject}: ${fieldName}`, "success");
-                } catch (err) {
+                }
+                catch (err) {
                     onLog(`Failed for ${obj.sobject}: ${String(err)}`, "error");
                 }
             }
-            writeDmConfig(this._workspaceRoot, cfg);
+            (0, DataMigrationConfig_1.writeDmConfig)(this._workspaceRoot, cfg);
             this._config = cfg;
         });
     }
-
-    private async _handleExportDryRunReport(): Promise<void> {
+    async _handleExportDryRunReport() {
         try {
             const lines = this._loadLog.length > 0 ? this._loadLog : this._pullLog;
             const outPath = path.join(this._workspaceRoot, `dm-dryrun-report-${Date.now()}.csv`);
             fs.writeFileSync(outPath, lines.join("\n"), "utf8");
             const doc = await vscode.workspace.openTextDocument(outPath);
             await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
-        } catch (err) {
+        }
+        catch (err) {
             vscode.window.showErrorMessage(`Export failed: ${String(err)}`);
         }
     }
-
     // ── HTML rendering ───────────────────────────────────────────────────────
-
-    private static _accessDeniedHtml(webview: vscode.Webview, role: string, required: string): string {
-        return `<!DOCTYPE html><html><head>${cspMeta(webview)}<style>
+    static _accessDeniedHtml(webview, role, required) {
+        return `<!DOCTYPE html><html><head>${(0, shared_1.cspMeta)(webview)}<style>
         body{font-family:var(--vscode-font-family);background:var(--vscode-editor-background);color:var(--vscode-foreground);display:flex;align-items:center;justify-content:center;height:100vh;margin:0;}
         .box{text-align:center;max-width:400px;}
         h2{color:#F44336;margin-bottom:8px;}
@@ -804,26 +810,23 @@ export class DataMigrationPanel {
         <script>const vscode=acquireVsCodeApi();function send(cmd){vscode.postMessage({command:cmd});}</script>
         </html>`;
     }
-
-    private _renderHtml(vm: Awaited<ReturnType<DataMigrationPanel["_buildViewModel"]>>): string {
-        const { config, sourceOrg, targetOrg, role, envs, tracking, trackingOrg, trackedOrgs, hasLog, seedInfo,
-                availableOrgs, pullState, loadState, activeTab, dryRun, pullLog, loadLog, busy, busyLabel, lastError } = vm;
+    _renderHtml(vm) {
+        const { config, sourceOrg, targetOrg, role, envs, tracking, trackingOrg, trackedOrgs, hasLog, seedInfo, availableOrgs, pullState, loadState, activeTab, dryRun, pullLog, loadLog, busy, busyLabel, lastError } = vm;
         // Disable-attribute fragment for every button that mutates state or shells out to the
         // Salesforce CLI, so nothing can be started while another operation is already running.
         const dis = busy ? "disabled" : "";
-
         // Build pipeline orgs list
-        const pipelineAliases = new Set<string>();
+        const pipelineAliases = new Set();
         const envEntries = Object.entries(envs ?? {});
-        const slotEntries = Object.entries(getOrgAliasSlots?.() ?? {});
+        const slotEntries = Object.entries((0, config_1.getOrgAliasSlots)?.() ?? {});
         for (const [, v] of [...envEntries, ...slotEntries]) {
-            if (typeof v === "string" && v) { pipelineAliases.add(v); }
+            if (typeof v === "string" && v) {
+                pipelineAliases.add(v);
+            }
         }
-
         const pipelineOrgs = [...pipelineAliases].map((a) => ({ alias: a, username: a }));
         const otherOrgs = (availableOrgs || []).filter((o) => !pipelineAliases.has(o.alias));
-
-        function orgOptions(selectedAlias: string): string {
+        function orgOptions(selectedAlias) {
             let out = "";
             out += `<optgroup label="Pipeline Orgs">`;
             for (const o of pipelineOrgs) {
@@ -838,15 +841,13 @@ export class DataMigrationPanel {
             out += `<option value="**connect**">+ Connect New Org…</option>`;
             return out;
         }
-
-        const tabs: { id: string; label: string }[] = [
-            { id: "config",   label: "⚙ Config" },
-            { id: "pull",     label: "⬇ Pull" },
-            { id: "load",     label: `⬆ Load${loadState === "running" ? " ●" : loadState === "paused" ? " ⏸" : ""}` },
+        const tabs = [
+            { id: "config", label: "⚙ Config" },
+            { id: "pull", label: "⬇ Pull" },
+            { id: "load", label: `⬆ Load${loadState === "running" ? " ●" : loadState === "paused" ? " ⏸" : ""}` },
             { id: "tracking", label: "📊 Tracking" },
-            { id: "extids",   label: "🔑 External IDs" },
+            { id: "extids", label: "🔑 External IDs" },
         ];
-
         // ── Tab 1: Config ────────────────────────────────────────────────────
         const renderConfigTab = () => {
             const objects = config.objects ?? [];
@@ -856,7 +857,7 @@ export class DataMigrationPanel {
                 const extIdBadge = obj.externalIdVerified
                     ? `<span class="badge badge-green" title="${esc(obj.externalIdField ?? "")}">✅ ${esc(obj.externalIdField ?? "")}</span>`
                     : `<span class="badge badge-amber" style="cursor:pointer" onclick="send('switchTab',{tab:'extids'})">⚠️ Not set</span>`;
-                const queryPreview = (obj.query || "").length > 60 ? esc(obj.query!.slice(0, 60)) + "…" : esc(obj.query ?? "");
+                const queryPreview = (obj.query || "").length > 60 ? esc(obj.query.slice(0, 60)) + "…" : esc(obj.query ?? "");
                 rows += `
                 <tr id="row-${esc(obj.id)}" class="${active ? "" : "inactive-row"}">
                     <td>${idx + 1}</td>
@@ -904,7 +905,6 @@ export class DataMigrationPanel {
                     </td>
                 </tr>`;
             });
-
             return `
             <div class="settings-card">
                 <h3>Settings</h3>
@@ -953,14 +953,12 @@ export class DataMigrationPanel {
                 </div>
             </div>`;
         };
-
         // ── Tab 2: Pull ──────────────────────────────────────────────────────
         const renderPullTab = () => {
             const isRunning = pullState === "running";
-            const isDone    = pullState === "done";
+            const isDone = pullState === "done";
             const totalSeed = seedInfo.reduce((s, r) => s + r.count, 0);
-            const hasSeed   = totalSeed > 0;
-
+            const hasSeed = totalSeed > 0;
             const seedRows = seedInfo.map(r => `<tr>
                 <td><code>${esc(r.sobject)}</code></td>
                 <td><strong>${r.count > 0 ? r.count : "—"}</strong></td>
@@ -969,9 +967,7 @@ export class DataMigrationPanel {
                     ${r.count > 0 ? `<button class="btn btn-sm danger-btn" ${dis} onclick="if(confirm('Clear seed for ${esc(r.sobject)}?'))send('clearSeed',{sobject:${JSON.stringify(r.sobject)}})">Clear</button>` : ""}
                 </td>
             </tr>`).join("");
-
-            const recentLogs = listRecentLogs(pullLogsDir(this._workspaceRoot), 3);
-
+            const recentLogs = (0, DataMigrationConfig_1.listRecentLogs)((0, DataMigrationConfig_1.pullLogsDir)(this._workspaceRoot), 3);
             return `
             <div class="run-idle-card" style="max-width:680px">
                 <div class="field-row" style="margin-bottom:12px">
@@ -987,10 +983,9 @@ export class DataMigrationPanel {
                 </div>
                 <div class="toolbar" style="margin-bottom:12px">
                     ${isRunning
-                        ? `<button class="btn danger-btn" onclick="send('cancelPull')">✕ Cancel Pull</button>`
-                        : `<button class="btn btn-primary" ${dis} onclick="startPull()">⬇ Pull All Objects</button>
-                           <button class="btn btn-accent" ${dis} onclick="startPullAndLoad()">⬇⬆ Pull + Load</button>`
-                    }
+                ? `<button class="btn danger-btn" onclick="send('cancelPull')">✕ Cancel Pull</button>`
+                : `<button class="btn btn-primary" ${dis} onclick="startPull()">⬇ Pull All Objects</button>
+                           <button class="btn btn-accent" ${dis} onclick="startPullAndLoad()">⬇⬆ Pull + Load</button>`}
                     ${recentLogs.length > 0 ? `<button class="btn" onclick="send('viewPullLog',{})" style="margin-left:auto">📄 Last Pull Log</button>` : ""}
                 </div>
                 ${isRunning ? `<div class="run-banner banner-teal" id="run-banner" style="margin-bottom:12px">
@@ -1005,18 +1000,15 @@ export class DataMigrationPanel {
                 : `<div class="table-wrap"><table class="data-table">
                     <thead><tr><th>Object</th><th>Records in Seed</th><th>Last Pulled</th><th>Actions</th></tr></thead>
                     <tbody>${seedRows}</tbody>
-                </table></div>`
-            }
+                </table></div>`}
 
             <div class="log-area" id="log-area" style="margin-top:16px">${pullLog.map((l) => `<div class="log-line">${esc(l)}</div>`).join("")}</div>`;
         };
-
         // ── Tab 3: Load ──────────────────────────────────────────────────────
         const renderLoadTab = () => {
             const isActive = loadState === "running" || loadState === "paused";
-            const isDone   = loadState === "done";
-            const recentLogs = listRecentLogs(loadLogsDir(this._workspaceRoot, targetOrg), 3);
-
+            const isDone = loadState === "done";
+            const recentLogs = (0, DataMigrationConfig_1.listRecentLogs)((0, DataMigrationConfig_1.loadLogsDir)(this._workspaceRoot, targetOrg), 3);
             if (isActive) {
                 const bannerClass = dryRun ? "banner-amber" : "banner-teal";
                 const bannerLabel = dryRun ? "DRY RUN" : "LOADING";
@@ -1036,14 +1028,13 @@ export class DataMigrationPanel {
                 </div>
                 <div class="run-controls">
                     ${loadState === "paused"
-                        ? `<button class="btn btn-primary" onclick="send('resume')">▶ Resume</button>`
-                        : `<button class="btn" onclick="send('pause')">⏸ Pause</button>`}
+                    ? `<button class="btn btn-primary" onclick="send('resume')">▶ Resume</button>`
+                    : `<button class="btn" onclick="send('pause')">⏸ Pause</button>`}
                     <button class="btn" onclick="send('skipObject')">⏭ Skip Object</button>
                     <button class="btn danger-btn" onclick="send('cancel')">✕ Cancel</button>
                 </div>
                 <div class="log-area" id="log-area">${loadLog.map((l) => `<div class="log-line">${esc(l)}</div>`).join("")}</div>`;
             }
-
             return `
             <div class="run-idle-card">
                 <div class="field-row" style="margin-bottom:12px">
@@ -1065,42 +1056,47 @@ export class DataMigrationPanel {
             </div>
             <div class="log-area" id="log-area" style="margin-top:16px">${loadLog.map((l) => `<div class="log-line">${esc(l)}</div>`).join("")}</div>`;
         };
-
         // ── Tab 4: Tracking ──────────────────────────────────────────────────
         const renderTrackingTab = () => {
             const seedDir = path.resolve(this._workspaceRoot, config.seedDir);
             const trackMap = tracking ?? {};
-
             // Org selector: pipeline orgs + tracked orgs + availableOrgs (deduplicated)
-            const allTrackOrgs = new Set<string>([
+            const allTrackOrgs = new Set([
                 ...(targetOrg ? [targetOrg] : []),
                 ...trackedOrgs,
                 ...[...pipelineAliases],
             ]);
-            const orgSelectorOpts = [...allTrackOrgs].map(o =>
-                `<option value="${esc(o)}"${o === trackingOrg ? " selected" : ""}>${esc(o)}</option>`
-            ).join("");
-
+            const orgSelectorOpts = [...allTrackOrgs].map(o => `<option value="${esc(o)}"${o === trackingOrg ? " selected" : ""}>${esc(o)}</option>`).join("");
             // Show any object that has seed data OR tracking entries
-            const allObjects = new Set<string>(Object.keys(trackMap));
+            const allObjects = new Set(Object.keys(trackMap));
             for (const obj of (config.objects ?? []).filter(o => o.active !== false)) {
-                if (countSeedRecords(seedDir, obj.sobject) > 0) { allObjects.add(obj.sobject); }
+                if (countSeedRecords(seedDir, obj.sobject) > 0) {
+                    allObjects.add(obj.sobject);
+                }
             }
-
             const emptyMsg = allObjects.size === 0
                 ? `<p style="color:var(--vscode-descriptionForeground);margin-top:16px">No data yet for <strong>${esc(trackingOrg || "(no org)")}</strong>. Pull data first, then run a load.</p>`
                 : "";
-
             let rows = "";
             for (const obj of allObjects) {
                 const t = trackMap[obj] ?? {};
                 let created = 0, failed = 0, skipped = 0, pending = 0, blocked = 0;
                 for (const entry of Object.values(t)) {
-                    if      (entry.status === "created") { created++; }
-                    else if (entry.status === "failed")  { failed++; }
-                    else if (entry.status === "skipped") { skipped++; }
-                    else if (entry.status === "blocked") { blocked++; }
-                    else                                 { pending++; }
+                    if (entry.status === "created") {
+                        created++;
+                    }
+                    else if (entry.status === "failed") {
+                        failed++;
+                    }
+                    else if (entry.status === "skipped") {
+                        skipped++;
+                    }
+                    else if (entry.status === "blocked") {
+                        blocked++;
+                    }
+                    else {
+                        pending++;
+                    }
                 }
                 const seedCount = countSeedRecords(seedDir, obj);
                 const loadTotal = created + failed + skipped + pending + blocked;
@@ -1124,7 +1120,6 @@ export class DataMigrationPanel {
                     </td>
                 </tr>`;
             }
-
             return `
             <div class="toolbar" style="margin-bottom:14px;align-items:center">
                 <label style="font-size:12px;color:var(--vscode-descriptionForeground)">Viewing org:</label>
@@ -1149,14 +1144,12 @@ export class DataMigrationPanel {
                 <button class="btn" onclick="send('viewLoadLog',{targetOrg:${JSON.stringify(trackingOrg)}})">📄 Load Log</button>
             </div>` : ""}`;
         };
-
         // ── Tab 4: External IDs ──────────────────────────────────────────────
         const renderExtIdsTab = () => {
             const activeObjs = (config.objects ?? []).filter((o) => o.active !== false);
             if (activeObjs.length === 0) {
                 return `<p style="color:var(--vscode-descriptionForeground)">No active objects configured.</p>`;
             }
-
             let rows = "";
             for (const obj of activeObjs) {
                 const status = obj.externalIdVerified
@@ -1172,7 +1165,6 @@ export class DataMigrationPanel {
                     </td>
                 </tr>`;
             }
-
             return `
             <div class="table-wrap">
                 <table class="data-table">
@@ -1186,26 +1178,21 @@ export class DataMigrationPanel {
             </div>
             <div class="log-area" id="log-area" style="margin-top:16px">${loadLog.map((l) => `<div class="log-line">${esc(l)}</div>`).join("")}</div>`;
         };
-
-        const tabContent = activeTab === "config"   ? renderConfigTab()
-                         : activeTab === "pull"     ? renderPullTab()
-                         : activeTab === "load"     ? renderLoadTab()
-                         : activeTab === "tracking" ? renderTrackingTab()
-                         :                            renderExtIdsTab();
-
-        const tabNav = tabs.map(({ id, label }) =>
-            `<button class="tab-btn ${activeTab === id ? "tab-active" : ""}" onclick="send('switchTab',{tab:'${id}'})">${label}</button>`
-        ).join("");
-
+        const tabContent = activeTab === "config" ? renderConfigTab()
+            : activeTab === "pull" ? renderPullTab()
+                : activeTab === "load" ? renderLoadTab()
+                    : activeTab === "tracking" ? renderTrackingTab()
+                        : renderExtIdsTab();
+        const tabNav = tabs.map(({ id, label }) => `<button class="tab-btn ${activeTab === id ? "tab-active" : ""}" onclick="send('switchTab',{tab:'${id}'})">${label}</button>`).join("");
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-${cspMeta(this._panel.webview)}
+${(0, shared_1.cspMeta)(this._panel.webview)}
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Data Migration</title>
 <style>
-${sharedCss()}
+${(0, shared_1.sharedCss)()}
 
 /* ── Layout ── */
 body { padding: 0; overflow: hidden; display: flex; flex-direction: column; height: 100vh; }
@@ -1591,3 +1578,5 @@ window.dismissGlobalError  = dismissGlobalError;
 </html>`;
     }
 }
+exports.DataMigrationPanel = DataMigrationPanel;
+//# sourceMappingURL=DataMigrationPanel.js.map

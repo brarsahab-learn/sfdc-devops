@@ -1,0 +1,1370 @@
+"use strict";
+// StoryWebviewProvider.ts
+// Renders the main "Current Story" panel in the sidebar.
+// Shows story progress across all environments + action buttons.
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.StoryWebviewProvider = void 0;
+const vscode = __importStar(require("vscode"));
+const path = __importStar(require("path"));
+const config_1 = require("../config");
+const SetupCheck_1 = require("../SetupCheck");
+const RoleManager_1 = require("../RoleManager");
+const config_2 = require("../config");
+const SfCli_1 = require("../SfCli");
+const StoryProgress_1 = require("../StoryProgress");
+const SETUP_CONFIRMED_KEY = "sfDevops.setupConfirmed";
+function escapeHtml(s) {
+    return String(s).replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
+}
+// Shared busy-state bar for all three panel templates (main, setup gate, conflict) — a click
+// used to have no visible effect until the next full webview.html swap landed, which could
+// look frozen or unresponsive for a moment. A full refresh always replaces this markup
+// wholesale, so "clear the busy state" needs no explicit signal — it's implicit in a new
+// render arriving.
+//
+// The fallback timeout only exists for the case where NOTHING ever re-renders at all (e.g. a
+// QuickPick the user cancelled) — it must never be short enough to fire while a real command
+// is still genuinely running. This bit a real user: Resume/Promote/Validate can involve a
+// git push plus an actual Salesforce check-only deploy, which routinely takes well past a
+// few seconds — a too-short timeout re-enabled the button while that was still in flight,
+// which both looked like nothing happened AND invited a second click that started a SECOND
+// overlapping git/CLI operation in the same working tree, compounding the apparent hang.
+// 2 minutes is short enough to still recover a truly-stuck panel, but long enough that it
+// essentially never races a real in-flight operation (the QuickPick-cancel case it actually
+// exists for resolves near-instantly regardless).
+const BUSY_TIMEOUT_MS = 120000;
+const BUSY_BAR_CSS = `
+  .busy-bar { display: none; position: sticky; top: 0; z-index: 20; background: var(--vscode-statusBarItem-warningBackground, var(--vscode-badge-background)); color: var(--vscode-statusBarItem-warningForeground, var(--vscode-badge-foreground)); font-size: 11px; text-align: center; padding: 3px 0; margin: -8px -8px 8px; }
+  body.busy .btn, body.busy .tbtn, body.busy button, body.busy .org-btn { pointer-events: none; opacity: 0.55; }
+`;
+const BUSY_BAR_HTML = `<div class="busy-bar" id="busyBar">&#x23F3; Working&hellip; (this can take a while for a real validate/deploy)</div>`;
+const BUSY_BAR_JS = `
+  function showBusy() {
+    document.body.classList.add('busy');
+    var bar = document.getElementById('busyBar');
+    if (bar) { bar.style.display = 'block'; }
+    clearTimeout(window.__busyTimeout);
+    window.__busyTimeout = setTimeout(function () { clearBusy(); }, ${BUSY_TIMEOUT_MS});
+  }
+  function clearBusy() {
+    clearTimeout(window.__busyTimeout);
+    document.body.classList.remove('busy');
+    var bar = document.getElementById('busyBar');
+    if (bar) { bar.style.display = 'none'; }
+  }
+  window.addEventListener('message', function(e) {
+    if (e.data && e.data.command === 'clearBusy') { clearBusy(); }
+  });
+`;
+class StoryWebviewProvider {
+    constructor(_extensionUri, _bbClient, _gitHelper, _extContext, 
+    /** Fed the same branch/story/stage refresh() already derives, so the status bar item never has to recompute (and risk drifting from) what the sidebar itself is showing. `null` covers "nothing to show right now" states (no view resolved yet, setup gate, paused conflict). */
+    _onStatusChange) {
+        this._extensionUri = _extensionUri;
+        this._bbClient = _bbClient;
+        this._gitHelper = _gitHelper;
+        this._extContext = _extContext;
+        this._onStatusChange = _onStatusChange;
+        this._forceShowSetup = false;
+    }
+    /** Resolved fresh on every use — "Change Role" can update this at runtime, so it must never be cached. */
+    get _userRole() {
+        return (0, RoleManager_1.getEffectiveRole)(this._extContext);
+    }
+    resolveWebviewView(webviewView, _context, _token) {
+        this._view = webviewView;
+        webviewView.webview.options = {
+            enableScripts: true,
+            localResourceRoots: [this._extensionUri],
+        };
+        webviewView.webview.html = this._getLoadingHtml();
+        // Handle messages from webview
+        webviewView.webview.onDidReceiveMessage(async (msg) => {
+            switch (msg.command) {
+                // Commands that open VS Code UI (QuickPick, panels) without replacing the
+                // webview HTML — clear busy immediately so buttons don't stay grayed.
+                case "resumeStory":
+                    vscode.commands.executeCommand("sfDevops.resumeStory");
+                    this._clearBusy();
+                    break;
+                case "startStory":
+                    vscode.commands.executeCommand("sfDevops.startStory");
+                    this._clearBusy();
+                    break;
+                case "commitAndPush":
+                    vscode.commands.executeCommand("sfDevops.commitAndPush");
+                    this._clearBusy();
+                    break;
+                case "promote":
+                    vscode.commands.executeCommand("sfDevops.promoteEnv", msg.env || undefined);
+                    this._clearBusy();
+                    break;
+                case "validate":
+                    if (msg.env) {
+                        vscode.commands.executeCommand("sfDevops.validateEnv", msg.env);
+                    }
+                    this._clearBusy();
+                    break;
+                case "resumePromotion":
+                    vscode.commands.executeCommand("sfDevops.resumePromotion");
+                    this._clearBusy();
+                    break;
+                case "cancelPromotion":
+                    vscode.commands.executeCommand("sfDevops.cancelPromotion");
+                    this._clearBusy();
+                    break;
+                case "syncBranch":
+                    vscode.commands.executeCommand("sfDevops.syncBranch");
+                    this._clearBusy();
+                    break;
+                case "refresh":
+                    this.refresh();
+                    break; // refresh replaces HTML — no explicit clearBusy needed
+                case "viewAuditLog":
+                    vscode.commands.executeCommand("sfDevops.viewAuditLog");
+                    this._clearBusy();
+                    break;
+                case "openDeploymentDashboard":
+                    vscode.commands.executeCommand("sfDevops.openDeploymentDashboard", msg.env);
+                    this._clearBusy();
+                    break;
+                case "changeRole":
+                    vscode.commands.executeCommand("sfDevops.changeRole");
+                    this._clearBusy();
+                    break;
+                case "viewBranchInBrowser":
+                    await this._viewBranchInBrowser();
+                    this._clearBusy();
+                    break;
+                case "viewWorkingFileDiff":
+                    if (msg.path) {
+                        await this._viewWorkingFileDiff(msg.path);
+                    }
+                    this._clearBusy();
+                    break;
+                case "focusCoverage":
+                    vscode.commands.executeCommand("sfDevops.runCoverage");
+                    this._clearBusy();
+                    break;
+                case "recheckSetup":
+                    this.refresh();
+                    break;
+                case "openAdminPanel":
+                    vscode.commands.executeCommand("sfDevops.openAdminPanel");
+                    this._clearBusy();
+                    break;
+                case "openDataMigration":
+                    vscode.commands.executeCommand("sfDevops.openDataMigration");
+                    this._clearBusy();
+                    break;
+                case "openPipelineView":
+                    vscode.commands.executeCommand("sfDevops.openPipelineView");
+                    this._clearBusy();
+                    break;
+                case "openDiffViewer":
+                    vscode.commands.executeCommand("sfDevops.openDiffViewer");
+                    this._clearBusy();
+                    break;
+                case "openStoryJourney":
+                    vscode.commands.executeCommand("sfDevops.openStoryJourney");
+                    this._clearBusy();
+                    break;
+                case "viewPendingActions":
+                    vscode.commands.executeCommand("sfDevops.viewPendingActions");
+                    this._clearBusy();
+                    break;
+                case "editEnvironmentsSetting":
+                    vscode.commands.executeCommand("workbench.action.openSettings", "sfDevops.environments");
+                    this._clearBusy();
+                    break;
+                case "openOrg":
+                    if (msg.value?.trim()) {
+                        await this._openOrgInBrowser(msg.value.trim());
+                    }
+                    this._clearBusy();
+                    break;
+                // Commands that call refresh() — busy clears naturally via HTML replacement.
+                case "openSetupCheck":
+                    this._forceShowSetup = true;
+                    this.refresh();
+                    break;
+                case "closeSetupCheck":
+                    this._forceShowSetup = false;
+                    this.refresh();
+                    break;
+                case "confirmSetup":
+                    this._forceShowSetup = false;
+                    await this._extContext.workspaceState.update(SETUP_CONFIRMED_KEY, true);
+                    this.refresh();
+                    break;
+                case "saveOrgAlias":
+                    if (msg.key && (0, RoleManager_1.canAccessConfig)(this._userRole)) {
+                        const value = (msg.value ?? "").trim();
+                        // "demo" isn't one of getOrgAliasSlots()' 4 canonical env-mirrored
+                        // slots (see config.ts) — same underlying machine-local store, just
+                        // its own named getter/setter so it's not silently lumped in with
+                        // "the 4 canonical slots" setOrgAliasSlot's own doc comment means.
+                        if (msg.key === "demo") {
+                            await (0, config_1.setDemoOrgAlias)(value);
+                        }
+                        else {
+                            await (0, config_1.setOrgAliasSlot)(msg.key, value);
+                        }
+                        this.refresh();
+                    }
+                    break;
+                case "loginOrg":
+                    if (msg.key && msg.value?.trim() && (0, RoleManager_1.canAccessConfig)(this._userRole)) {
+                        const alias = msg.value.trim();
+                        if (msg.key === "demo") {
+                            await (0, config_1.setDemoOrgAlias)(alias);
+                        }
+                        else {
+                            await (0, config_1.setOrgAliasSlot)(msg.key, alias);
+                        }
+                        const alreadyConnected = await (0, SfCli_1.isOrgConnected)(alias, this._gitHelper.getWorkspaceRoot());
+                        if (alreadyConnected) {
+                            vscode.window.showInformationMessage(`"${alias}" is already authenticated — no login needed.`);
+                        }
+                        else {
+                            const terminal = vscode.window.createTerminal(`sf org login: ${alias}`);
+                            terminal.show();
+                            terminal.sendText(`sf org login web --alias ${alias}`);
+                        }
+                        this.refresh();
+                    }
+                    break;
+                case "pushEnvBranch":
+                    if (msg.value && (0, RoleManager_1.canAccessConfig)(this._userRole)) {
+                        try {
+                            await this._gitHelper.createEnvBranchOnOrigin(msg.value);
+                            vscode.window.showInformationMessage(`✅ Pushed "${msg.value}" to origin.`);
+                        }
+                        catch (err) {
+                            vscode.window.showErrorMessage(`Could not push "${msg.value}": ${err}`);
+                        }
+                        this.refresh();
+                    }
+                    break;
+                case "recordSignoff":
+                    if (msg.env) {
+                        await this._recordSignoff(msg.env);
+                    }
+                    break;
+                case "acknowledgeDeletion":
+                    if (msg.env) {
+                        await this._recordDeletionAck(msg.env);
+                    }
+                    break;
+            }
+        });
+        // Only poll while the panel is actually visible — no work happens while the
+        // sidebar is collapsed or another view is focused. Rescheduled (not a fixed
+        // interval) so a manual refresh always resets the countdown honestly.
+        webviewView.onDidChangeVisibility(() => this._scheduleAutoRefresh());
+        webviewView.onDidDispose(() => this._clearAutoRefresh());
+        this.refresh();
+    }
+    /** Posts a clearBusy message to the webview — used after commands that dispatch VS Code UI
+     *  (QuickPick, panels) without replacing the webview HTML, so buttons don't stay grayed. */
+    _clearBusy() {
+        this._view?.webview.postMessage({ command: "clearBusy" });
+    }
+    _clearAutoRefresh() {
+        if (this._autoRefreshTimer) {
+            clearTimeout(this._autoRefreshTimer);
+            this._autoRefreshTimer = undefined;
+        }
+    }
+    _scheduleAutoRefresh() {
+        this._clearAutoRefresh();
+        if (this._view?.visible) {
+            this._autoRefreshTimer = setTimeout(() => this.refresh(), (0, config_1.getFallbackRefreshSeconds)() * 1000);
+        }
+    }
+    /** `sf org open` launches the org straight in the default browser itself — no need to parse a URL out of its JSON, just run it and surface a friendly error if the alias isn't actually authenticated. */
+    async _openOrgInBrowser(alias) {
+        try {
+            await (0, SfCli_1.execSf)(["org", "open", "--target-org", alias], {
+                cwd: this._gitHelper.getWorkspaceRoot(), timeout: 30000, maxBuffer: 2 * 1024 * 1024,
+            });
+        }
+        catch (err) {
+            vscode.window.showErrorMessage(`Could not open "${alias}" — it may not be authenticated yet. Use 🔑 to log in first. (${err?.message ?? err})`);
+        }
+    }
+    /** Opens VS Code's own diff editor for a working-tree file against HEAD — reuses the built-in diff view instead of the Dashboard's custom renderer, since this is a quick "what did I actually change" look, not a file-selection UI. */
+    async _viewWorkingFileDiff(relPath) {
+        const root = this._gitHelper.getWorkspaceRoot();
+        const resolvedRoot = path.resolve(root);
+        const absPath = path.resolve(root, relPath);
+        if (!absPath.startsWith(resolvedRoot + path.sep)) {
+            vscode.window.showErrorMessage(`Blocked: "${relPath}" resolves outside the workspace root.`);
+            return;
+        }
+        const fileUri = vscode.Uri.file(absPath);
+        const headUri = fileUri.with({ scheme: "git", query: JSON.stringify({ path: fileUri.fsPath, ref: "HEAD" }) });
+        await vscode.commands.executeCommand("vscode.diff", headUri, fileUri, `${relPath} (Working Tree)`);
+    }
+    async _viewBranchInBrowser() {
+        const branch = await this._gitHelper.currentBranch();
+        if (!branch) {
+            return;
+        }
+        const repoOverride = await this._gitHelper.resolveRepoIdentity(this._bbClient);
+        const url = this._bbClient.buildBranchUrl(branch, repoOverride);
+        if (!url) {
+            vscode.window.showWarningMessage("Could not determine the repo to open — set sfDevops.repoWorkspace and sfDevops.repoSlug.");
+            return;
+        }
+        await vscode.env.openExternal(vscode.Uri.parse(url));
+    }
+    /**
+     * Compares the branch this refresh() call is about to render against the one the LAST
+     * refresh() rendered — if they differ, and the difference wasn't caused by one of this
+     * extension's own checkouts (GitHelper.isRecentSelfInitiatedSwitch), sets a one-shot
+     * notice so the panel visibly acknowledges "something changed outside your clicks" instead
+     * of just silently redrawing as if nothing happened. Runs on every refresh() regardless of
+     * what triggered it (live GitWatcher event, the fallback timer, or a manual click) — that's
+     * fine, self-initiated switches from our own commands land here too and are filtered out
+     * the same way.
+     */
+    _noteBranchForExternalSwitchDetection(branch) {
+        const previous = this._lastKnownBranch;
+        this._lastKnownBranch = branch ?? undefined;
+        if (!branch || !previous || previous === branch) {
+            return;
+        }
+        if (this._gitHelper.isRecentSelfInitiatedSwitch()) {
+            return;
+        }
+        const storyId = (0, config_1.extractStoryId)(branch);
+        this._externalSwitchNotice = `🔀 Switched to ${storyId || branch} — branch changed outside the extension.`;
+    }
+    async refresh() {
+        if (!this._view) {
+            return;
+        }
+        // Set from whichever branch below actually runs, then reported once in `finally` —
+        // one call site regardless of which early return fires, so the status bar item can
+        // never end up out of sync with what the sidebar itself just decided to show.
+        let statusInfo = null;
+        try {
+            // Data Load role sees only the DM launcher — skip the full story pipeline view.
+            if ((0, config_2.isDataLoadRole)(this._userRole)) {
+                this._view.webview.html = this._getDataLoadRoleHtml();
+                return;
+            }
+            // Basic setup must be validated (and, the first time, explicitly confirmed)
+            // before anything else in this panel is shown.
+            const checks = await (0, SetupCheck_1.runSetupChecks)(this._gitHelper, this._bbClient, this._extContext, this._userRole);
+            const requiredPassed = checks.filter(c => c.required).every(c => c.passed);
+            const confirmed = this._extContext.workspaceState.get(SETUP_CONFIRMED_KEY, false);
+            // Demo is optional (not a pipeline stage — see DeploymentDashboardPanel's
+            // parallel Prod+Demo deploy), so it's never part of runSetupChecks' required
+            // orgAuthentication gate. Its own connected/not status is still worth showing in
+            // the same manager row the 4 real slots use, just resolved separately here.
+            const demoAlias = (0, config_1.getDemoOrgAlias)();
+            const demoConnected = demoAlias ? await (0, SfCli_1.isOrgConnected)(demoAlias, this._gitHelper.getWorkspaceRoot()) : false;
+            if (!requiredPassed) {
+                // Show setup gate but always allow bypass — user may know setup is fine
+                // and the check is stale (e.g., just connected an org). Do NOT reset the
+                // confirmed flag; a returning user shouldn't be locked out on a transient failure.
+                this._view.webview.html = this._getSetupGateHtml(checks, true, false, demoAlias, demoConnected);
+                return;
+            }
+            if (!confirmed) {
+                this._view.webview.html = this._getSetupGateHtml(checks, true, false, demoAlias, demoConnected);
+                return;
+            }
+            if (this._forceShowSetup) {
+                this._view.webview.html = this._getSetupGateHtml(checks, true, true, demoAlias, demoConnected);
+                return;
+            }
+            // A paused cherry-pick (conflict left for manual resolution) takes priority.
+            const pending = await this._gitHelper.getPendingOperation();
+            if (pending) {
+                const conflicts = await this._gitHelper.unmergedFiles();
+                this._view.webview.html = this._getConflictHtml(pending, conflicts);
+                return;
+            }
+            const branch = await this._gitHelper.currentBranch();
+            this._noteBranchForExternalSwitchDetection(branch);
+            const storyId = (0, config_1.extractStoryId)(branch);
+            const progress = await this._getStoryProgress(storyId);
+            const onFeature = (0, config_1.isFeatureBranch)(branch);
+            const behind = onFeature
+                ? await this._gitHelper.commitsBehind(branch, `origin/${(0, config_1.getBaseBranch)()}`)
+                : 0;
+            const localChanges = onFeature ? await this._getLocalChangesSummary() : null;
+            const coverageBlockedEnv = await this._getCoverageBlockedEnv(storyId);
+            const repoOverride = await this._gitHelper.resolveRepoIdentity(this._bbClient);
+            const signoffPassed = {};
+            if (storyId) {
+                for (const env of (0, config_1.getEnvironments)()) {
+                    signoffPassed[env.name] = env.signoffGate ? await this._gitHelper.isSignoffPassed(storyId, env.name) : true;
+                }
+            }
+            const timelines = storyId ? await (0, StoryProgress_1.getStoryTimelines)(this._gitHelper, storyId) : {};
+            const deletionAckPending = (onFeature && storyId) ? await this._getDeletionAckPending(storyId) : null;
+            const staleAgeDays = (onFeature && branch) ? await this._gitHelper.branchAgeDays(branch) : null;
+            const pendingActionsCount = await this._countPendingActions();
+            this._view.webview.html = this._getWebviewHtml(branch ?? "No branch", storyId, progress, behind, coverageBlockedEnv, repoOverride, signoffPassed, localChanges, timelines, deletionAckPending, staleAgeDays, pendingActionsCount);
+            this._externalSwitchNotice = undefined; // one-shot: shown once, then cleared
+            if (branch && storyId) {
+                statusInfo = { branch, storyId, stage: this._deriveCurrentStage(progress) };
+            }
+        }
+        catch (err) {
+            this._view.webview.html = this._getErrorHtml(String(err));
+        }
+        finally {
+            this._scheduleAutoRefresh();
+            this._onStatusChange?.(statusInfo);
+        }
+    }
+    /**
+     * Same "which stage is next" rule `_getWebviewHtml` uses for its pipeline's current-step
+     * highlight (dev while unpublished, otherwise the first promotable env not yet actually
+     * deployed) — duplicated here in miniature rather than threaded out of that method, since
+     * this only needs a small summary, not the full render. Null once every stage is deployed
+     * (terminal/complete state). Carries orgAlias/isProd too so the status bar item's "which
+     * org am I about to touch" cue never has to re-derive the environment on its own.
+     */
+    _deriveCurrentStage(progress) {
+        const publishEnv = (0, config_1.getPublishEnvironment)();
+        if (progress[publishEnv.name] !== "published") {
+            return { label: publishEnv.label, orgAlias: publishEnv.orgAlias, isProd: publishEnv.isProd };
+        }
+        const nextEnv = (0, config_1.getPromotableEnvironments)().find(e => progress[e.name] !== "deployed");
+        if (!nextEnv) {
+            return null;
+        }
+        return { label: nextEnv.label, orgAlias: nextEnv.orgAlias, isProd: nextEnv.isProd };
+    }
+    async _getStoryProgress(storyId) {
+        return (0, StoryProgress_1.getStoryProgress)(this._gitHelper, this._bbClient, storyId);
+    }
+    /**
+     * The name of the next environment if it's coverage-gated and this story hasn't passed
+     * that gate yet — used to proactively disable the Promote button instead of only
+     * blocking it after the click (promoteStory.ts still enforces this server-side too).
+     */
+    async _getCoverageBlockedEnv(storyId) {
+        if (!storyId) {
+            return null;
+        }
+        const gateEnv = (0, config_1.getCoverageGateEnvironment)();
+        if (!gateEnv) {
+            return null;
+        }
+        const apex = await this._gitHelper.featureApexClasses(storyId);
+        if (apex.length === 0) {
+            return null;
+        }
+        const passed = await this._gitHelper.isCoveragePassed(storyId);
+        return passed ? null : gateEnv.name;
+    }
+    /** Count of envs that have undeployed merges the current role can act on — shown as a badge on the ⚡ Actions button. */
+    async _countPendingActions() {
+        const envs = (0, config_1.getPromotableEnvironments)();
+        let count = 0;
+        for (const env of envs) {
+            if (!(0, config_1.canPromote)(this._userRole, env)) {
+                continue;
+            }
+            const sha = await this._gitHelper.remoteHeadSha(env.branch).catch(() => null);
+            const last = sha ? await this._gitHelper.getDeployState(env.name).catch(() => null) : null;
+            // Only count as pending when a prior deploy record exists AND the branch has moved on.
+            // Omitting this guard would inflate the count on fresh installs (no deploy history).
+            if (sha && last !== null && last.sha !== sha) {
+                count++;
+            }
+        }
+        return count;
+    }
+    /**
+     * Returns info about the first promotable env blocked by unacknowledged deleted files,
+     * or null if no block exists.
+     */
+    async _getDeletionAckPending(storyId) {
+        if (!storyId) {
+            return null;
+        }
+        let preview;
+        try {
+            preview = await this._gitHelper.previewStoryFiles(storyId);
+        }
+        catch {
+            return null;
+        }
+        const deleted = preview.filter(f => f.change === "deleted");
+        if (deleted.length === 0) {
+            return null;
+        }
+        const featureSha = await this._gitHelper.remoteHeadSha((0, config_1.featureBranchName)(storyId));
+        if (!featureSha) {
+            return null;
+        }
+        for (const env of (0, config_1.getPromotableEnvironments)()) {
+            const ack = await this._gitHelper.getDeletionAcknowledgement(storyId, env.name);
+            if (!ack || ack.sha !== featureSha) {
+                return { env: env.name, envLabel: env.label, files: deleted.map(f => f.path) };
+            }
+        }
+        return null;
+    }
+    async _recordDeletionAck(envName) {
+        const branch = await this._gitHelper.currentBranch();
+        const storyId = (0, config_1.extractStoryId)(branch);
+        if (!storyId) {
+            return;
+        }
+        const featureSha = await this._gitHelper.remoteHeadSha((0, config_1.featureBranchName)(storyId));
+        if (!featureSha) {
+            vscode.window.showWarningMessage("Could not determine the current feature branch SHA — push your branch first.");
+            return;
+        }
+        const env = (0, config_1.getEnvironments)().find(e => e.name === envName);
+        await this._gitHelper.setDeletionAcknowledgement(storyId, envName, featureSha);
+        await this._gitHelper.appendAudit({
+            operation: "acknowledgeDeletion",
+            storyId,
+            targetEnv: envName,
+            outcome: "success",
+            summary: `Deletion manually acknowledged for ${env?.label ?? envName} at SHA ${featureSha.slice(0, 8)}`,
+        });
+        vscode.window.showInformationMessage(`✅ Deletion acknowledged for ${env?.label ?? envName}. Promote/Validate is now unblocked.`);
+        this.refresh();
+    }
+    /**
+     * Local working-tree changes not yet published to dev — surfaced so "DEV: Published"
+     * doesn't silently go stale the moment you make another edit. `other` covers anything
+     * uncommitted that isn't staged (unstaged edits, new untracked files); it's auto-preserved
+     * via stash (not lost or silently swept in) if "Commit to Dev" is used while it's present.
+     */
+    async _getLocalChangesSummary() {
+        const stagedList = await this._gitHelper.stagedFiles();
+        const allChanged = await this._gitHelper.workingTreeFiles();
+        const stagedSet = new Set(stagedList);
+        const other = allChanged.filter(f => !stagedSet.has(f));
+        return (stagedList.length === 0 && other.length === 0) ? null : { staged: stagedList, other };
+    }
+    /** Prompts for an optional sign-off note, records it, and logs it to the audit trail. */
+    async _recordSignoff(envName) {
+        const branch = await this._gitHelper.currentBranch();
+        const storyId = (0, config_1.extractStoryId)(branch);
+        if (!storyId) {
+            return;
+        }
+        const env = (0, config_1.getEnvironments)().find(e => e.name === envName);
+        const confirm = await vscode.window.showWarningMessage(`Record sign-off for ${storyId} on ${env?.label ?? envName}? This unlocks promoting to the next stage.`, { modal: true }, "Yes, record sign-off");
+        if (!confirm) {
+            return;
+        }
+        const note = await vscode.window.showInputBox({
+            prompt: `Sign-off note for ${env?.label ?? envName} (optional)`,
+            placeHolder: "e.g. All test scenarios pass, approved by Jane",
+        });
+        await this._gitHelper.recordSignoff(storyId, envName, note ? { note } : {});
+        await this._gitHelper.appendAudit({
+            operation: "signoff", storyId, targetEnv: envName, outcome: "success",
+            summary: `Sign-off recorded for ${env?.label ?? envName}`,
+            details: note ? { note } : undefined,
+        });
+        vscode.window.showInformationMessage(`✅ Sign-off recorded for ${env?.label ?? envName}.`);
+        this.refresh();
+    }
+    // Per-stage guidance for the ℹ️ tooltip in the Story Progress pipeline — explains how
+    // that stage's mechanics work and what the next concrete action is, given its current
+    // state. Kept as plain text (goes into an HTML `title` attribute, not markup).
+    _stageInfoText(envCfg, state, isPublishStage) {
+        if (isPublishStage) {
+            switch (state) {
+                case "published":
+                    return `Published directly to ${envCfg.label} via Commit & Publish — no PR, no review. Next: promote it to the following stage.`;
+                default:
+                    return `The first stage — click "Commit & Publish" to push your changes straight to ${envCfg.label} (no PR, no review gate).`;
+            }
+        }
+        const roleNote = envCfg.requiredRole ? ` (requires the "${envCfg.requiredRole}" role to promote)` : "";
+        switch (state) {
+            case "branch-created":
+                return `Promotion branch created, but validation hasn't passed yet — a PR can't open until it does. Click ✔ Validate or 🚀 Promote (which validates for you) to run a real check-only deploy against ${envCfg.label}.`;
+            case "open":
+                return `Validated, and a promotion PR into ${envCfg.label} is open (or ready to be). Get it reviewed and merged — nothing deploys automatically when it merges.`;
+            case "merged":
+                return `The PR merged, but that alone doesn't deploy anything. Click 🚀 to run a real deploy against the ${envCfg.label} org.`;
+            case "deployed":
+                return `Deployed to ${envCfg.label}. This stage is complete for this story.`;
+            default:
+                return `Not started for this story. Click ⬆ to pick a story and promote it to ${envCfg.label} — this opens a PR${roleNote}; merging it is the review gate, deploying is a separate step after that.`;
+        }
+    }
+    /**
+     * Per-stage active/inactive badges (🟢 done vs ⚪ pending) plus an expandable accordion
+     * with the real timestamp behind each one — "what actually happened here, and when,"
+     * distinct from the single current/pending pipeline state above (which only ever shows
+     * ONE state per row). Dev/publish only has Publish+Deploy; every other stage has
+     * Validate+Promote+Deploy, matching the mandatory-validation sequence in promoteStory.ts.
+     */
+    _renderStageTimeline(timeline, isPublishStage) {
+        const stages = isPublishStage
+            ? [
+                { label: "Published", entry: timeline?.published },
+                { label: "Deployed", entry: timeline?.deployment },
+            ]
+            : [
+                { label: "Validated", entry: timeline?.validation },
+                { label: "Promoted (PR opened)", entry: timeline?.promotion },
+                { label: "Deployed", entry: timeline?.deployment },
+            ];
+        const when = (entry) => {
+            if (!entry?.done) {
+                return "Pending";
+            }
+            if (!entry.at) {
+                return "Done";
+            }
+            const d = new Date(entry.at);
+            return isNaN(d.getTime()) ? "Done" : d.toLocaleString();
+        };
+        const badges = stages.map(s => {
+            const done = Boolean(s.entry?.done);
+            return `<span class="stage-badge ${done ? "done" : "pending"}" title="${escapeHtml(s.label)}: ${escapeHtml(when(s.entry))}">${done ? "🟢" : "⚪"}</span>`;
+        }).join("");
+        const rows = stages.map(s => {
+            const done = Boolean(s.entry?.done);
+            return `<li><span class="stage-name">${done ? "🟢" : "⚪"} ${escapeHtml(s.label)}</span><span class="stage-when ${done ? "done" : "pending"}">${escapeHtml(when(s.entry))}</span></li>`;
+        }).join("");
+        const accordion = `<details class="stage-timeline"><summary>Timeline</summary><ul>${rows}</ul></details>`;
+        return { badges, accordion };
+    }
+    _getWebviewHtml(branch, storyId, progress, behindCount, coverageBlockedEnv, repoOverride, signoffPassed, localChanges, timelines, deletionAckPending = null, staleAgeDays = null, pendingActionsCount = 0) {
+        const onFeatureBranch = (0, config_1.isFeatureBranch)(branch);
+        const baseBranch = (0, config_1.getBaseBranch)();
+        const environments = (0, config_1.getEnvironments)();
+        const publishEnv = (0, config_1.getPublishEnvironment)();
+        const promotable = (0, config_1.getPromotableEnvironments)();
+        // Role gates — resolved once per render.
+        // Developer: commit/validate/coverage only; Lead: + promote/deploy/signoff; Admin: everything.
+        const isLead = this._userRole !== "Developer"; // Lead or Admin
+        const isAdminRole = (0, RoleManager_1.canAccessConfig)(this._userRole); // Admin only
+        const devPublished = progress[publishEnv.name] === "published";
+        // "merged" (PR landed on the env branch) is deliberately NOT treated as done here —
+        // only an actual `sf project deploy` (tracked as "deployed") completes a stage, so
+        // promotion to the NEXT env can't get ahead of what's really live in this one.
+        const nextEnv = promotable.find(e => progress[e.name] !== "deployed");
+        // Which single stage the pipeline view highlights as "you are here" — dev itself
+        // while it's still unpublished, otherwise whichever stage isn't deployed yet.
+        const currentEnvName = !devPublished ? publishEnv.name : (nextEnv?.name ?? null);
+        let actionButton = "";
+        if (onFeatureBranch) {
+            if (!devPublished) {
+                actionButton =
+                    `<button class="btn btn-primary" onclick="send('commitAndPush')">&#x2601; Commit &amp; Publish Feature Branch</button>`;
+            }
+            else if (nextEnv && progress[nextEnv.name] === "merged") {
+                // PR already merged into nextEnv's branch — the real next step is deploying
+                // it, not another promotion. Hand off straight to the Deployment Dashboard.
+                actionButton = isLead
+                    ? `<div class="info">&#x26A1; ${nextEnv.label}'s PR is merged &mdash; deploy it to finish this stage.</div>
+                       <button class="btn btn-primary" onclick="send('openDeploymentDashboard', '${nextEnv.name}')">&#x1F680; Deploy &mdash; ${nextEnv.label}</button>`
+                    : `<div class="info">&#x26A1; ${nextEnv.label}'s PR is merged &mdash; a Lead or Admin needs to deploy it to finish this stage.</div>`;
+            }
+            else if (nextEnv) {
+                // Validation is mandatory and gates the PR — so which button is "primary"
+                // (the actually-next step) depends on whether nextEnv's promotion branch has
+                // ALREADY passed it. Not yet validated ("none"/"branch-created"): Validate is
+                // next, Promote is just secondary (it still works — it validates first — but
+                // shouldn't look equally "ready" as Validate). Already validated ("open"):
+                // Promote (open the PR) is next, Validate becomes a secondary "re-validate."
+                const isValidated = progress[nextEnv.name] === "open";
+                const validateBtn = `<button class="btn ${isValidated ? "btn-secondary" : "btn-primary"}" onclick="send('validate', '${nextEnv.name}')">&#x2714; ${isValidated ? "Re-validate" : "Validate Only"} &mdash; ${nextEnv.label}</button>`;
+                const coverageBlocked = coverageBlockedEnv === nextEnv.name;
+                // The env the story is CURRENTLY sitting in — the one immediately before
+                // nextEnv in the pipeline — is what needs sign-off before promoting onward.
+                const nextIdx = environments.findIndex(e => e.name === nextEnv.name);
+                const currentEnv = nextIdx > 0 ? environments[nextIdx - 1] : undefined;
+                const signoffBlocked = Boolean(currentEnv?.signoffGate && !signoffPassed[currentEnv.name]);
+                const signoffAction = signoffBlocked
+                    ? (isLead
+                        ? `<div class="warning">&#x26A0; ${currentEnv.label} sign-off required before promoting to ${nextEnv.label}.</div>
+                           <button class="btn btn-secondary" onclick="send('recordSignoff', '${currentEnv.name}')">&#x2705; Record ${currentEnv.label} Sign-off</button>`
+                        : `<div class="warning">&#x26A0; ${currentEnv.label} sign-off by a Lead or Admin is required before promoting to ${nextEnv.label}.</div>`)
+                    : "";
+                const promoteClass = isValidated ? "btn-primary" : "btn-secondary";
+                const promoteBtn = !(0, config_1.canPromote)(this._userRole, nextEnv)
+                    ? `<div class="info">&#x2705; A "${nextEnv.requiredRole}" runs Promote to ${nextEnv.label} (opens a PR — deploying is a separate step after it's merged)</div>`
+                    : (coverageBlocked || signoffBlocked)
+                        ? `${coverageBlocked ? `<div class="warning">&#x26A0; Coverage check required before promoting to ${nextEnv.label} &mdash; <a href="#" onclick="send('focusCoverage')">run it here</a>.</div>` : ""}
+                       ${signoffAction}
+                       <button class="btn btn-primary" disabled title="Resolve the gate(s) above first">&#x1F680; Promote &mdash; ${nextEnv.label}</button>`
+                        : `<button class="btn ${promoteClass}" onclick="send('promote', '${nextEnv.name}')" title="${isValidated ? `Opens a PR into ${nextEnv.label} — deploying is a separate step once it's merged` : `Validates first, then opens a PR into ${nextEnv.label} once it passes`}">&#x1F680; Promote &mdash; ${nextEnv.label}</button>`;
+                actionButton = isValidated ? (promoteBtn + validateBtn) : (validateBtn + promoteBtn);
+            }
+            else {
+                actionButton = `<div class="info">&#x2705; ${(0, config_1.getTerminalStageMessage)()}</div>`;
+            }
+        }
+        // Vertical pipeline: every stage connected in one glance — done stages filled green,
+        // the CURRENT stage highlighted with its action attached directly to it (not a
+        // separate floating card you have to match up yourself), everything after it
+        // visibly still ahead. Replaces the old flat list of rows + a disconnected button.
+        //
+        // Only ONE stage is ever actionable at a time — currentIdx is that stage's position.
+        // A later stage can still carry real git history (e.g. a promotion PR merged into it
+        // before this hard gate existed, or before an earlier stage's deploy), but showing
+        // that raw state with live ⬆/🚀 buttons attached would look like two stages are
+        // simultaneously "ready to go" when the server would actually reject acting on the
+        // later one — see GitHelper.checkPrevEnvDeployed. Every stage after currentIdx is
+        // rendered as locked/waiting instead, regardless of its own underlying state.
+        const currentIdx = currentEnvName ? environments.findIndex(e => e.name === currentEnvName) : -1;
+        const envRows = environments.map((envCfg, idx) => {
+            const state = progress[envCfg.name];
+            const isCurrent = envCfg.name === currentEnvName;
+            const isDone = !isCurrent && (state === "published" || state === "deployed");
+            const isFuture = currentIdx !== -1 && idx > currentIdx;
+            const stepClass = isCurrent ? "current" : isFuture ? "future" : isDone ? "done" : "pending";
+            const isPublishStage = envCfg.name === publishEnv.name;
+            let icon = "○", label = "Pending";
+            let infoText;
+            let stageLinks = "";
+            let newChangesNote = "";
+            if (isFuture) {
+                // Deliberately ignores the row's own raw state (progress[envCfg.name]) — see
+                // the comment above envRows. currentIdx is always valid here (>= 0) since
+                // isFuture only true when currentIdx !== -1.
+                icon = "🔒";
+                label = `Waiting for ${environments[currentIdx].label}`;
+                infoText = `${envCfg.label} can't be promoted or deployed until ${environments[currentIdx].label} is actually deployed — one stage at a time keeps the pipeline linear.`;
+            }
+            else {
+                if (state === "published") {
+                    icon = "✅";
+                    label = "Published";
+                }
+                else if (state === "deployed") {
+                    icon = "✅";
+                    label = "Deployed";
+                }
+                else if (state === "merged") {
+                    icon = "⚡";
+                    label = "Merged — ready to deploy";
+                }
+                else if (state === "open") {
+                    icon = "🔄";
+                    label = "Validated / In PR";
+                }
+                else if (state === "branch-created") {
+                    icon = "🧪";
+                    label = "Branch created — validation required";
+                }
+                if (isDone) {
+                    icon = "✓";
+                }
+                // DEV already shows "Published", but there's more local work since then —
+                // flag it explicitly instead of letting the badge quietly go stale. The count
+                // alone used to be the whole story; now it expands to the actual file paths
+                // so you don't have to leave the panel to see what's about to be published.
+                if (isPublishStage && state === "published" && localChanges) {
+                    icon = isCurrent ? icon : "⚠️";
+                    const total = localChanges.staged.length + localChanges.other.length;
+                    label = `Published — ${total} new change(s) pending`;
+                    const parts = [];
+                    if (localChanges.staged.length > 0) {
+                        parts.push(`${localChanges.staged.length} staged`);
+                    }
+                    if (localChanges.other.length > 0) {
+                        parts.push(`${localChanges.other.length} in progress (preserved automatically)`);
+                    }
+                    const fileRow = (f, badge) => `<li><span class="file-path" onclick="viewWorkingDiff('${escapeHtml(f)}')" title="View diff">${escapeHtml(f)}</span><span class="story-badge">${badge}</span></li>`;
+                    const fileList = [
+                        ...localChanges.staged.map(f => fileRow(f, "staged")),
+                        ...localChanges.other.map(f => fileRow(f, "unstaged")),
+                    ].join("");
+                    newChangesNote = `<div class="env-note">${parts.join(", ")} — <a href="#" onclick="send('commitAndPush')">commit to dev</a>
+                      <details class="changed-files"><summary>Show files</summary><ul class="files">${fileList}</ul></details>
+                    </div>`;
+                }
+                // Promote/Deploy are available directly per stage, not just as generic toolbar
+                // buttons — pick a story for THIS stage's picker, or jump to THIS stage's tab
+                // in the Dashboard, without needing your current story to be at that exact
+                // point. Dev has no promotion step, but IS independently deployable (to the
+                // Dev org itself) once something's published — that used to have no visible
+                // trigger at all, which is exactly what made it unclear whether dev had ever
+                // really been deployed vs. just pushed to the branch.
+                if (isPublishStage) {
+                    if (state === "published" && isLead) {
+                        stageLinks += ` <a href="#" title="Open Dev in the Deployment Dashboard to deploy it to the Dev org" onclick="send('openDeploymentDashboard', '${envCfg.name}')">🚀</a>`;
+                    }
+                }
+                else {
+                    if (isLead) {
+                        stageLinks += ` <a href="#" title="Promote a story to ${envCfg.label} (pick from a list — opens a PR)" onclick="send('promote', '${envCfg.name}')">⬆</a>`;
+                    }
+                    if (isLead) {
+                        stageLinks += ` <a href="#" title="Open ${envCfg.label} in the Deployment Dashboard" onclick="send('openDeploymentDashboard', '${envCfg.name}')">🚀</a>`;
+                    }
+                }
+                if (state === "open" && storyId) {
+                    const promotionBranch = (0, config_1.promoBranchName)(storyId, envCfg.name, "promote");
+                    const prUrl = this._bbClient.buildPrUrl(promotionBranch, envCfg.branch, repoOverride);
+                    if (prUrl) {
+                        stageLinks += ` <a href="${prUrl}" title="Open this story's PR in browser to review it">🔗</a>`;
+                    }
+                }
+                infoText = this._stageInfoText(envCfg, state, isPublishStage);
+            }
+            const infoIcon = ` <a href="#" class="pinfo" title="${escapeHtml(infoText)}" onclick="return false;">ℹ️</a>`;
+            const cta = isCurrent && actionButton ? `<div class="pcta">${actionButton}</div>` : "";
+            const isLast = idx === environments.length - 1;
+            const { badges: stageBadges, accordion: stageAccordion } = this._renderStageTimeline(timelines[envCfg.name], isPublishStage);
+            return `<div class="pstep ${stepClass}">
+              <div class="pdot-col"><div class="pdot">${icon}</div>${isLast ? "" : `<div class="pline"></div>`}</div>
+              <div class="pbody">
+                <div class="pname">${envCfg.label}<span class="pstatus">${label}</span>${infoIcon}${stageLinks}</div>
+                <div class="stage-badges">${stageBadges}</div>
+                ${newChangesNote}
+                ${cta}
+                ${stageAccordion}
+              </div>
+            </div>`;
+        }).join("");
+        const moreActions = onFeatureBranch
+            ? `<div class="more-actions">
+                 ${devPublished ? `<a href="#" onclick="send('commitAndPush')">☁ Publish more changes</a> · ` : ""}
+                 <a href="#" onclick="send('syncBranch')">🔄 Sync with ${baseBranch}</a>
+               </div>`
+            : "";
+        const syncWarning = behindCount > 5
+            ? `<div class="warning">&#x26A0; ${behindCount} commits behind ${baseBranch} &mdash; <a href="#" onclick="send('syncBranch')">sync now</a></div>`
+            : "";
+        // One-shot acknowledgment that something changed HEAD outside this panel's own
+        // buttons (Source Control, terminal, another tool) — see
+        // _noteBranchForExternalSwitchDetection. Read directly off instance state (same
+        // pattern DeploymentDashboardPanel uses for _lastOutcome) rather than threaded through
+        // as a parameter, since it's cleared by refresh() right after this render.
+        const externalSwitchNotice = this._externalSwitchNotice
+            ? `<div class="info">${escapeHtml(this._externalSwitchNotice)}</div>`
+            : "";
+        const ticketUrl = (0, config_1.buildTicketUrl)(storyId);
+        const storyIdHtml = storyId
+            ? (ticketUrl
+                ? `<a href="${ticketUrl}" style="color:inherit;text-decoration:none">${storyId}</a>`
+                : storyId)
+            : "";
+        return `<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body       { font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; color: var(--vscode-foreground); }
+  .card      { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 10px; margin-bottom: 8px; }
+  .branch    { font-size: 11px; color: var(--vscode-textPreformat-foreground); word-break: break-all; }
+  .story-id  { font-size: 18px; font-weight: bold; margin: 4px 0; }
+  .pipeline  { margin: 2px 0 0; }
+  .pstep     { display: flex; gap: 8px; }
+  .pdot-col  { display: flex; flex-direction: column; align-items: center; width: 18px; flex-shrink: 0; }
+  .pdot      { width: 16px; height: 16px; min-height: 16px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 9px; line-height: 1; border: 2px solid var(--vscode-panel-border); background: var(--vscode-editor-background); color: var(--vscode-descriptionForeground); flex-shrink: 0; box-sizing: border-box; }
+  .pstep.done .pdot    { background: var(--vscode-charts-green); border-color: var(--vscode-charts-green); color: var(--vscode-editor-background); }
+  .pstep.current .pdot { border-color: var(--vscode-charts-blue); box-shadow: 0 0 0 2px var(--vscode-charts-blue); background: var(--vscode-editor-background); }
+  .pline     { width: 2px; flex: 1; min-height: 8px; background: var(--vscode-panel-border); margin: 2px 0; }
+  .pstep.done .pline { background: var(--vscode-charts-green); }
+  .pbody     { flex: 1; min-width: 0; padding-bottom: 12px; }
+  .pname     { font-weight: 600; font-size: 12px; }
+  .pstatus   { font-size: 11px; font-weight: normal; color: var(--vscode-descriptionForeground); margin-left: 6px; }
+  .pstep.current .pstatus { color: var(--vscode-charts-blue); }
+  .pstep.current .pname   { color: var(--vscode-charts-blue); }
+  .pstep.future  { opacity: 0.55; }
+  .pcta      { margin-top: 6px; }
+  .pcta .btn { margin: 3px 0; }
+  .pname a   { text-decoration: none; margin-left: 4px; font-size: 11px; }
+  .pname a.pinfo { cursor: help; }
+  .env-note  { font-size: 10px; color: var(--vscode-descriptionForeground); margin: 2px 0 0; }
+  .env-note a{ color: var(--vscode-textLink-foreground); }
+  .changed-files { margin-top: 2px; }
+  .changed-files summary { cursor: pointer; font-size: 10px; color: var(--vscode-textLink-foreground); }
+  .changed-files ul.files { list-style: none; margin: 3px 0 0; padding: 0; font-size: 10px; }
+  .changed-files ul.files li { display: flex; align-items: center; gap: 5px; padding: 1px 0; }
+  .changed-files .file-path { cursor: pointer; word-break: break-all; color: var(--vscode-foreground); }
+  .changed-files .file-path:hover { color: var(--vscode-textLink-foreground); text-decoration: underline; }
+  .changed-files .story-badge { font-size: 9px; color: var(--vscode-descriptionForeground); border: 1px solid var(--vscode-panel-border); border-radius: 3px; padding: 0 4px; flex-shrink: 0; }
+  .stage-badges { display: flex; gap: 3px; margin: 2px 0; }
+  .stage-badge  { font-size: 9px; cursor: default; opacity: 0.55; }
+  .stage-badge.done { opacity: 1; }
+  .stage-timeline { margin-top: 2px; }
+  .stage-timeline summary { cursor: pointer; font-size: 10px; color: var(--vscode-textLink-foreground); }
+  .stage-timeline ul { list-style: none; margin: 3px 0 0; padding: 0; font-size: 10px; }
+  .stage-timeline li { display: flex; justify-content: space-between; gap: 8px; padding: 1px 0; }
+  .stage-timeline .stage-name { color: var(--vscode-foreground); }
+  .stage-timeline .stage-when { color: var(--vscode-descriptionForeground); flex-shrink: 0; }
+  .stage-timeline .stage-when.done { color: var(--vscode-charts-green); }
+  .more-actions { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--vscode-panel-border); }
+  .more-actions a { color: var(--vscode-textLink-foreground); text-decoration: none; }
+  .more-actions a:hover { text-decoration: underline; }
+  .btn       { display: block; width: 100%; padding: 7px; margin: 4px 0; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .btn-primary   { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .btn-primary:hover { background: var(--vscode-button-hoverBackground); }
+  .btn-secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+  .btn-secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  .btn:disabled  { opacity: 0.5; cursor: default; }
+  .warning   { background: var(--vscode-inputValidation-warningBackground); border: 1px solid var(--vscode-inputValidation-warningBorder); color: var(--vscode-foreground); border-radius: 4px; padding: 6px 8px; font-size: 11px; margin-bottom: 6px; }
+  .info      { background: var(--vscode-textBlockQuote-background); border: 1px solid var(--vscode-textBlockQuote-border); color: var(--vscode-foreground); border-radius: 4px; padding: 6px 8px; font-size: 11px; margin: 4px 0; }
+  .divider   { border-top: 1px solid var(--vscode-panel-border); margin: 8px 0; }
+  a          { color: var(--vscode-textLink-foreground); }
+  .no-story  { color: var(--vscode-descriptionForeground); font-size: 11px; }
+  .toolbar   { display: flex; gap: 3px; margin-bottom: 8px; flex-wrap: wrap; }
+  .tbtn      { display: flex; align-items: center; justify-content: center; padding: 5px 7px; font-size: 14px; border: 1px solid var(--vscode-panel-border); border-radius: 4px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); cursor: pointer; text-decoration: none; white-space: nowrap; position: relative; }
+  .tbtn:hover{ background: var(--vscode-button-secondaryHoverBackground); }
+  .tbtn.tbtn-wide { font-size: 12px; padding: 5px 10px; }
+  .tbtn-badge { position: absolute; top: -5px; right: -5px; background: var(--vscode-badge-background, #c72); color: var(--vscode-badge-foreground, #fff); border-radius: 8px; font-size: 9px; font-weight: 700; min-width: 15px; height: 15px; display: flex; align-items: center; justify-content: center; padding: 0 3px; }
+  .countdown { opacity: 0.65; font-size: 9px; margin-left: 2px; }
+  .story-card { background: var(--vscode-button-secondaryBackground); border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+  .story-card .branch-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11.5px; font-weight: 600; margin-bottom: 5px; }
+  .story-card .story-row  { font-size: 11px; color: var(--vscode-descriptionForeground); margin-bottom: 6px; }
+  .story-card .action-row { display: flex; gap: 5px; }
+  .story-card .action-row button { flex: 1; font-size: 11px; padding: 4px 6px; }
+  .version-footer { text-align: center; font-size: 10px; opacity: 0.5; margin-top: 10px; color: var(--vscode-descriptionForeground); }
+  ${BUSY_BAR_CSS}
+</style>
+</head>
+<body>
+${BUSY_BAR_HTML}
+
+${externalSwitchNotice}
+${syncWarning}
+${deletionAckPending ? `<div class="warning">
+  ⚠ ${escapeHtml(storyId)} deletes ${deletionAckPending.files.length} component(s) not yet manually removed from ${escapeHtml(deletionAckPending.envLabel)}.
+  <br>Remove them from the org, then: <a href="#" onclick="send('acknowledgeDeletion', '${deletionAckPending.env}')">✅ Acknowledge manual deletion for ${escapeHtml(deletionAckPending.envLabel)}</a>
+</div>` : ""}
+${(() => {
+            const threshold = (0, config_1.getStaleStoryThresholdDays)();
+            if (staleAgeDays !== null && threshold > 0 && staleAgeDays > threshold) {
+                const days = Math.floor(staleAgeDays);
+                return `<div class="warning">⏳ This branch has had no new commits for <strong>${days} day${days === 1 ? "" : "s"}</strong> — it may be stale. Consider syncing with ${escapeHtml((0, config_1.getBaseBranch)())} to stay current. <a href="#" onclick="send('syncBranch')">Sync now</a></div>`;
+            }
+            return "";
+        })()}
+
+<!-- Toolbar: icon-only buttons, compact. Role-gated: Dev sees core actions; Lead + Admin see deploy/signoff; Admin sees setup. -->
+<div class="toolbar">
+  <a class="tbtn" href="#" onclick="send('changeRole')" title="Change Role (${escapeHtml(this._userRole)})">${this._userRole === "Admin" ? "🛡️" : this._userRole === "Lead" ? "🎯" : this._userRole === "Data Load" ? "📦" : "👨‍💻"}</a>
+  ${isAdminRole ? `<a class="tbtn" href="#" onclick="send('openAdminPanel')" title="Setup / Admin Panel">⚙️</a>` : ""}
+  <a class="tbtn" href="#" onclick="send('viewAuditLog')" title="Audit Trail">📋</a>
+  <a class="tbtn" href="#" onclick="send('openPipelineView')" title="Pipeline &amp; Story Journey">🗂️</a>
+  <a class="tbtn" href="#" onclick="send('openDiffViewer')" title="Compare Branches / View File Diffs">🔍</a>
+  ${isLead ? `<a class="tbtn" href="#" onclick="send('viewPendingActions')" title="Stories Pending My Action" style="position:relative">⚡${pendingActionsCount > 0 ? `<span class="tbtn-badge">${pendingActionsCount}</span>` : ""}</a>` : ""}
+  ${coverageBlockedEnv ? `<a class="tbtn" href="#" onclick="send('focusCoverage')" title="Run Coverage Check">🧪</a>` : ""}
+  <a class="tbtn" href="#" onclick="send('refresh')" title="Refresh">↻<span id="countdown" class="countdown"></span></a>
+</div>
+
+<!-- Top card: branch + story + action buttons inline -->
+<div class="story-card">
+  <div class="branch-row">
+    ${escapeHtml(branch)}
+    ${branch !== "No branch" ? `<a href="#" onclick="send('viewBranchInBrowser')" title="View in browser" style="font-size:12px;text-decoration:none">🔗</a>` : ""}
+  </div>
+  ${storyId ? `<div class="story-row">${storyIdHtml}</div>` : `<div class="story-row" style="font-style:italic">No active story</div>`}
+  <div class="action-row">
+    <button class="btn btn-primary" onclick="send('startStory')" title="Start New Story">🚀 New Story</button>
+    <button class="btn btn-secondary" onclick="send('resumeStory')" title="Continue with Existing Story">⏳ Existing</button>
+  </div>
+</div>
+
+${onFeatureBranch ? `
+<div class="card">
+  <b>Story Progress</b>
+  <div class="divider"></div>
+  <div class="pipeline">${envRows}</div>
+  ${moreActions}
+</div>
+` : ""}
+
+<div class="version-footer">v${escapeHtml(this._extContext.extension.packageJSON.version)}</div>
+
+<script>
+  const vscode = acquireVsCodeApi();
+  ${BUSY_BAR_JS}
+  function send(cmd, env) { showBusy(); vscode.postMessage({ command: cmd, env: env }); }
+  function viewWorkingDiff(path) { vscode.postMessage({ command: 'viewWorkingFileDiff', path: path }); }
+
+  (function () {
+    let secondsLeft = ${(0, config_1.getFallbackRefreshSeconds)()};
+    const el = document.getElementById('countdown');
+    function tick() {
+      if (!el) { return; }
+      el.textContent = secondsLeft + 's';
+      secondsLeft = Math.max(0, secondsLeft - 1);
+    }
+    tick();
+    setInterval(tick, 1000);
+  })();
+</script>
+</body>
+</html>`;
+    }
+    /**
+     * Gated view shown until every required setup check passes AND the user has clicked
+     * "Confirm" once for this workspace. Nothing else in the panel renders until then.
+     */
+    _getSetupGateHtml(checks, canConfirm, forced, demoAlias = "", demoConnected = false) {
+        const orgAliasSlots = (0, config_1.getOrgAliasSlots)();
+        const connectedAliases = checks.find(c => c.key === "orgAuthentication")?.connectedAliases;
+        const renderCheck = (c) => {
+            const icon = c.passed ? "✅" : (c.required ? "❌" : "⚠️");
+            const fixHtml = (!c.passed && c.fixSteps.length)
+                ? `<ol class="fix">${c.fixSteps.map(s => `<li>${escapeHtml(s)}</li>`).join("")}</ol>`
+                : "";
+            const orgAliasManager = c.key === "orgAuthentication"
+                ? this._renderOrgAliasSlots(orgAliasSlots, (0, RoleManager_1.canAccessConfig)(this._userRole), connectedAliases)
+                    + this._renderDemoOrgAliasRow(demoAlias, demoConnected, (0, RoleManager_1.canAccessConfig)(this._userRole))
+                : "";
+            const envBranchManager = c.key === "environmentBranches" && c.missingEnvBranches?.length
+                ? this._renderMissingEnvBranches(c.missingEnvBranches, (0, RoleManager_1.canAccessConfig)(this._userRole))
+                : "";
+            return `<div class="check ${c.passed ? "pass" : (c.required ? "fail" : "warn")}">
+  <div class="check-head"><span class="icon">${icon}</span><span class="label">${escapeHtml(c.label)}</span>${c.required ? "" : "<span class=\"opt\">optional</span>"}</div>
+  <div class="detail">${escapeHtml(c.detail)}</div>
+  ${fixHtml}${orgAliasManager}${envBranchManager}
+</div>`;
+        };
+        const failingChecks = checks.filter(c => !c.passed);
+        const passingChecks = checks.filter(c => c.passed);
+        const requiredFailing = checks.filter(c => c.required && !c.passed).length;
+        const defaultTab = failingChecks.length > 0 ? "action" : "ok";
+        const actionRows = failingChecks.length > 0
+            ? failingChecks.map(renderCheck).join("")
+            : `<div class="info" style="margin-top:8px">✅ No action required — all checks pass.</div>`;
+        const okRows = passingChecks.length > 0
+            ? passingChecks.map(renderCheck).join("")
+            : `<div class="info" style="margin-top:8px">No passing checks yet.</div>`;
+        return `<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body     { font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; color: var(--vscode-foreground); padding-bottom: 4px; }
+  h2       { font-size: 13px; margin: 4px 0 8px; }
+  .warning { background: var(--vscode-inputValidation-warningBackground); border: 1px solid var(--vscode-inputValidation-warningBorder); color: var(--vscode-foreground); border-radius: 4px; padding: 5px 8px; font-size: 11px; margin-bottom: 8px; }
+  .info    { background: var(--vscode-textBlockQuote-background); border: 1px solid var(--vscode-textBlockQuote-border); color: var(--vscode-foreground); border-radius: 4px; padding: 5px 8px; font-size: 11px; margin-bottom: 8px; }
+  /* Tabs */
+  .tab-bar { display: flex; gap: 2px; border-bottom: 1px solid var(--vscode-panel-border); margin-bottom: 8px; }
+  .tab-btn { flex: 1; background: none; border: none; border-bottom: 2px solid transparent; padding: 5px 4px; font-size: 11px; font-family: var(--vscode-font-family); color: var(--vscode-foreground); cursor: pointer; text-align: center; }
+  .tab-btn.active { border-bottom-color: #00C9B1; color: #00C9B1; font-weight: 600; }
+  .tab-pane { display: none; }
+  .tab-pane.visible { display: block; }
+  .badge-red { background: #F44336; color: #fff; border-radius: 10px; padding: 0 5px; font-size: 10px; font-weight: 700; margin-left: 3px; }
+  .badge-green { background: #4CAF50; color: #fff; border-radius: 10px; padding: 0 5px; font-size: 10px; font-weight: 700; margin-left: 3px; }
+  /* Checks */
+  .check   { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
+  .check.fail { border-color: var(--vscode-inputValidation-errorBorder); }
+  .check.warn { border-color: var(--vscode-inputValidation-warningBorder); }
+  .check-head { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+  .opt     { font-size: 10px; font-weight: normal; color: var(--vscode-descriptionForeground); margin-left: 4px; }
+  .detail  { font-size: 11px; color: var(--vscode-descriptionForeground); margin: 3px 0 0 22px; word-break: break-all; }
+  ol.fix   { margin: 6px 0 0 22px; padding-left: 16px; font-size: 11px; color: var(--vscode-editorWarning-foreground); }
+  ol.fix li { padding: 1px 0; }
+  .btn     { display: block; width: 100%; padding: 7px; margin: 6px 0 0; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .btn-primary   { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .btn-secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+  .org-manager { margin: 6px 0 0 22px; }
+  .org-row { display: flex; align-items: center; gap: 4px; margin: 3px 0; }
+  .org-status { font-size: 11px; width: 14px; flex-shrink: 0; text-align: center; }
+  .org-label { font-size: 11px; width: 32px; flex-shrink: 0; color: var(--vscode-descriptionForeground); }
+  .org-row input { flex: 1; font-size: 11px; padding: 3px 5px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 3px; }
+  .org-btn { font-size: 11px; padding: 3px 6px; border: 1px solid var(--vscode-panel-border); border-radius: 3px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); cursor: pointer; }
+  .org-readonly { flex: 1; font-size: 11px; color: var(--vscode-foreground); }
+  .muted-note { font-size: 10px; color: var(--vscode-descriptionForeground); margin-top: 2px; }
+  .action-bar { position: sticky; bottom: -8px; margin: 10px -8px -8px; padding: 8px; background: var(--vscode-sideBar-background, var(--vscode-editor-background)); border-top: 1px solid var(--vscode-panel-border); }
+  ${BUSY_BAR_CSS}
+</style>
+</head>
+<body>
+${BUSY_BAR_HTML}
+<h2>⚙ Setup ${forced ? `<a href="#" style="float:right;font-size:11px;font-weight:normal" onclick="send('closeSetupCheck')">✕</a>` : ""}</h2>
+
+<div class="tab-bar">
+  <button id="tab-btn-action" class="tab-btn${defaultTab === "action" ? " active" : ""}" onclick="showTab('action')">
+    Action Required<span class="badge-red">${failingChecks.length}</span>
+  </button>
+  <button id="tab-btn-ok" class="tab-btn${defaultTab === "ok" ? " active" : ""}" onclick="showTab('ok')">
+    All Good<span class="badge-green">${passingChecks.length}</span>
+  </button>
+</div>
+
+<div id="tab-pane-action" class="tab-pane${defaultTab === "action" ? " visible" : ""}">
+  ${requiredFailing > 0 ? `<div class="warning">⚠ ${requiredFailing} required item(s) need attention.</div>` : ""}
+  ${actionRows}
+</div>
+<div id="tab-pane-ok" class="tab-pane${defaultTab === "ok" ? " visible" : ""}">
+  ${okRows}
+</div>
+
+<div class="action-bar">
+${canConfirm ? `<button class="btn btn-primary" onclick="send('confirmSetup')">✅ Continue</button>` : ""}
+<button class="btn btn-secondary" onclick="send('openAdminPanel')">⚙ Open Admin Setup</button>
+<button class="btn btn-secondary" onclick="send('recheckSetup')">🔄 Re-check</button>
+${forced ? `<button class="btn btn-secondary" onclick="send('closeSetupCheck')">✕ Close</button>` : ""}
+</div>
+<script>
+  const vscode = acquireVsCodeApi();
+  ${BUSY_BAR_JS}
+  function send(cmd, env) { showBusy(); vscode.postMessage({ command: cmd, env: env }); }
+  function showTab(id) {
+    ['action','ok'].forEach(t => {
+      document.getElementById('tab-pane-' + t).classList.toggle('visible', t === id);
+      document.getElementById('tab-btn-' + t).classList.toggle('active', t === id);
+    });
+  }
+  function saveOrgAlias(key) {
+    showBusy();
+    const el = document.getElementById('alias-' + key);
+    vscode.postMessage({ command: 'saveOrgAlias', key: key, value: el ? el.value : '' });
+  }
+  function loginOrg(key) {
+    showBusy();
+    const el = document.getElementById('alias-' + key);
+    vscode.postMessage({ command: 'loginOrg', key: key, value: el ? el.value : '' });
+  }
+  function openOrg(alias) {
+    if (!alias) { return; }
+    vscode.postMessage({ command: 'openOrg', value: alias });
+  }
+  function openOrgFromInput(key) {
+    const el = document.getElementById('alias-' + key);
+    openOrg(el ? el.value : '');
+  }
+  function pushEnvBranch(branch) {
+    showBusy();
+    vscode.postMessage({ command: 'pushEnvBranch', value: branch });
+  }
+</script>
+</body>
+</html>`;
+    }
+    /**
+     * Inline management rows for the 4 canonical org-alias slots (Dev/QA/UAT/Prod) —
+     * view/edit/authenticate without hand-editing settings.json. Editing is Admin-only;
+     * other roles see the same values read-only.
+     */
+    _renderOrgAliasSlots(slots, editable, connectedAliases) {
+        const statusGlyph = (s) => {
+            if (!s.alias) {
+                return `<span class="org-status" title="No alias set">—</span>`;
+            }
+            const connected = connectedAliases?.[s.key];
+            return connected
+                ? `<span class="org-status" title="Connected">✅</span>`
+                : `<span class="org-status" title="Not authenticated — needs (re)login">❌</span>`;
+        };
+        const openBtn = (alias) => alias
+            ? `<button class="org-btn" title="Open ${escapeHtml(alias)} in the browser" onclick="openOrg('${escapeHtml(alias)}')">🌐</button>`
+            : "";
+        if (!editable) {
+            const rows = slots.map(s => `
+  <div class="org-row">
+    ${statusGlyph(s)}
+    <span class="org-label">${escapeHtml(s.label)}</span>
+    <span class="org-readonly">${escapeHtml(s.alias) || "(not set)"}</span>
+    ${openBtn(s.alias)}
+  </div>`).join("");
+            return `<div class="org-manager">${rows}<div class="muted-note">Ask an Admin to configure org aliases.</div></div>`;
+        }
+        const rows = slots.map(s => `
+  <div class="org-row">
+    ${statusGlyph(s)}
+    <span class="org-label">${escapeHtml(s.label)}</span>
+    <input type="text" id="alias-${s.key}" value="${escapeHtml(s.alias)}" placeholder="org alias / username">
+    <button class="org-btn" title="Save" onclick="saveOrgAlias('${s.key}')">💾</button>
+    <button class="org-btn" title="Authenticate if needed (opens a terminal only when not already connected)" onclick="loginOrg('${s.key}')">🔑</button>
+    <button class="org-btn" title="Open in the browser" onclick="openOrgFromInput('${s.key}')">🌐</button>
+  </div>`).join("");
+        return `<div class="org-manager">${rows}</div>`;
+    }
+    /**
+     * Demo isn't one of getOrgAliasSlots()'s environment-mirrored slots (it's not a
+     * pipeline stage — see DeploymentDashboardPanel's parallel Prod+Demo deploy) — this is
+     * its own optional row, rendered right after the real 4. Reuses the exact same
+     * save/login/open client functions the other slots use (saveOrgAlias/loginOrg/
+     * openOrgFromInput, keyed 'demo' the same way they're keyed by env name) — those
+     * handlers branch on key === "demo" server-side to call setDemoOrgAlias instead of
+     * setOrgAliasSlot, same underlying machine-local store either way.
+     */
+    _renderDemoOrgAliasRow(alias, connected, editable) {
+        const statusGlyph = !alias
+            ? `<span class="org-status" title="No alias set">—</span>`
+            : connected
+                ? `<span class="org-status" title="Connected">✅</span>`
+                : `<span class="org-status" title="Not authenticated — needs (re)login">❌</span>`;
+        const openBtn = alias
+            ? `<button class="org-btn" title="Open ${escapeHtml(alias)} in the browser" onclick="openOrg('${escapeHtml(alias)}')">🌐</button>`
+            : "";
+        if (!editable) {
+            return `<div class="org-manager">
+  <div class="org-row">
+    ${statusGlyph}
+    <span class="org-label">Demo</span>
+    <span class="org-readonly">${escapeHtml(alias) || "(not set)"}</span>
+    ${openBtn}
+  </div>
+  <div class="muted-note">Demo is optional — a secondary org the Dashboard can deploy the same Prod package to in parallel. Ask an Admin to configure it.</div>
+</div>`;
+        }
+        return `<div class="org-manager">
+  <div class="org-row">
+    ${statusGlyph}
+    <span class="org-label">Demo</span>
+    <input type="text" id="alias-demo" value="${escapeHtml(alias)}" placeholder="org alias / username (optional)">
+    <button class="org-btn" title="Save" onclick="saveOrgAlias('demo')">💾</button>
+    <button class="org-btn" title="Authenticate if needed (opens a terminal only when not already connected)" onclick="loginOrg('demo')">🔑</button>
+    <button class="org-btn" title="Open in the browser" onclick="openOrgFromInput('demo')">🌐</button>
+  </div>
+  <div class="muted-note">Optional — a secondary org the Deployment Dashboard can deploy the same Prod package to in parallel, from Prod's own pane.</div>
+</div>`;
+    }
+    /**
+     * One-click fix for "these environment branches don't exist on origin yet" — same
+     * Admin-only editing gate as org aliases, since creating branches other stories will
+     * promote into is a repo-shape decision, not a routine per-developer action. "Push"
+     * creates the branch on origin from the current base branch tip (GitHelper.createEnvBranchOnOrigin
+     * — no local checkout involved); "Edit settings" is the alternative fix path (the
+     * branches already exist under different names) opened straight to sfDevops.environments.
+     */
+    _renderMissingEnvBranches(missing, editable) {
+        if (!editable) {
+            return `<div class="org-manager"><div class="muted-note">Ask an Admin to push the missing branch(es) or update sfDevops.environments.</div></div>`;
+        }
+        const rows = missing.map(m => `
+  <div class="org-row">
+    <span class="org-status" title="Missing on origin">❌</span>
+    <span class="org-label">${escapeHtml(m.label)}</span>
+    <span class="org-readonly">${escapeHtml(m.branch)}</span>
+    <button class="org-btn" title="Create &quot;${escapeHtml(m.branch)}&quot; on origin from the base branch" onclick="pushEnvBranch('${escapeHtml(m.branch)}')">⬆ Push</button>
+  </div>`).join("");
+        return `<div class="org-manager">${rows}
+  <button class="org-btn" style="margin-top:4px" onclick="send('editEnvironmentsSetting')">⚙ Edit sfDevops.environments instead</button>
+</div>`;
+    }
+    _getDataLoadRoleHtml() {
+        return `<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { font-family: var(--vscode-font-family); font-size: 12px; padding: 16px; color: var(--vscode-foreground); background: var(--vscode-editor-background); }
+  h2   { font-size: 14px; margin: 0 0 6px; }
+  p    { font-size: 11px; color: var(--vscode-descriptionForeground); margin: 0 0 16px; }
+  .btn { display: block; width: 100%; padding: 10px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; font-family: var(--vscode-font-family); background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .btn:hover { opacity: 0.9; }
+  .role-tag { display: inline-block; font-size: 10px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border-radius: 10px; padding: 1px 7px; margin-bottom: 12px; }
+  .change-role { font-size: 11px; color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: none; display: block; margin-top: 12px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="role-tag">⬡ Data Load</div>
+<h2>Data Migration</h2>
+<p>Your role has access to data loading operations only.</p>
+<button class="btn" onclick="send('openDataMigration')">📦 Open Data Migration Panel</button>
+<a class="change-role" href="#" onclick="send('changeRole')">Switch Role</a>
+<script>
+  const vscode = acquireVsCodeApi();
+  function send(cmd) { vscode.postMessage({ command: cmd }); }
+</script>
+</body>
+</html>`;
+    }
+    _getLoadingHtml() {
+        return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><style>body{font-family:var(--vscode-font-family,-apple-system,sans-serif);padding:24px;color:var(--vscode-descriptionForeground,#888);background:var(--vscode-editor-background);}</style></head><body>Loading…</body></html>`;
+    }
+    _getErrorHtml(err) {
+        return `<html><body style="font-family:var(--vscode-font-family);padding:8px;color:var(--vscode-errorForeground)">Error: ${err}</body></html>`;
+    }
+    /** Rendered while a cherry-pick (dev-publish or promotion) is paused on conflicts. */
+    _getConflictHtml(pending, conflicts) {
+        const target = pending.kind === "dev-publish"
+            ? "dev branch"
+            : `${(pending.targetEnv ?? "").toUpperCase()} (${pending.mode === "validate" ? "validate" : "promote"})`;
+        const unresolved = conflicts.length;
+        const fileRows = conflicts.length
+            ? conflicts.map(f => `<div class="file">⚠ <a href="#" onclick="openConflict('${escapeHtml(f)}')" title="Open in editor">${escapeHtml(f)}</a></div>`).join("")
+            : `<div class="ok">✓ No unresolved conflicts left — click Resume.</div>`;
+        const status = unresolved
+            ? `<div class="count">${unresolved} file(s) still have conflicts</div>`
+            : `<div class="count ready">All conflicts resolved</div>`;
+        return `<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body     { font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; color: var(--vscode-foreground); }
+  .card    { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 10px; margin-bottom: 8px; }
+  .title   { font-weight: bold; font-size: 13px; margin-bottom: 4px; }
+  .branch  { font-size: 11px; color: var(--vscode-textPreformat-foreground); word-break: break-all; margin-bottom: 6px; }
+  .count   { font-size: 11px; color: var(--vscode-editorWarning-foreground); margin: 4px 0; }
+  .count.ready { color: var(--vscode-charts-green); }
+  .file    { font-size: 11px; color: var(--vscode-editorWarning-foreground); padding: 2px 0; word-break: break-all; }
+  .ok      { font-size: 11px; color: var(--vscode-charts-green); padding: 2px 0; }
+  .steps   { font-size: 11px; color: var(--vscode-descriptionForeground); margin: 6px 0; }
+  .btn     { display: block; width: 100%; padding: 7px; margin: 4px 0; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .btn-primary   { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .btn-secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+  ${BUSY_BAR_CSS}
+</style>
+</head>
+<body>
+${BUSY_BAR_HTML}
+<div class="card">
+  <div class="title">⚙ Paused — resolve conflicts</div>
+  <div class="branch">${pending.storyId} → ${target}</div>
+  ${status}
+  ${fileRows}
+  <div class="steps">1. Resolve conflicts in the Source Control view &nbsp; 2. Save &nbsp; 3. Resume</div>
+  <button class="btn btn-primary" onclick="send('resumePromotion')">▶ Resume</button>
+  <button class="btn btn-secondary" onclick="send('cancelPromotion')">✕ Cancel</button>
+  <div style="text-align:right; font-size:10px; color:var(--vscode-descriptionForeground); margin-top:4px">
+    <a href="#" onclick="send('refresh')" style="color:var(--vscode-textLink-foreground)">↻ refresh</a>
+  </div>
+</div>
+<script>
+  const vscode = acquireVsCodeApi();
+  ${BUSY_BAR_JS}
+  function send(cmd) { showBusy(); vscode.postMessage({ command: cmd }); }
+  function openConflict(path) { vscode.postMessage({ command: 'viewWorkingFileDiff', path: path }); }
+</script>
+</body>
+</html>`;
+    }
+}
+exports.StoryWebviewProvider = StoryWebviewProvider;
+StoryWebviewProvider.viewType = "sfDevopsStoryView";
+//# sourceMappingURL=StoryWebviewProvider.js.map
