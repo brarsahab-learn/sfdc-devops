@@ -11,7 +11,7 @@ interface ActionItem {
 }
 
 const ACTIONS: ActionItem[] = [
-    { label: "Data Migration",          icon: "database",      command: "sfDevops.openDataMigration",        tooltip: "Open Data Migration panel (Lead/Admin only)" },
+    { label: "Data Migration",          icon: "database",      command: "sfDevops.openDataMigration",        tooltip: "Open Data Migration panel" },
     { label: "Pipeline View",           icon: "graph",         command: "sfDevops.openPipelineView",         tooltip: "Open story pipeline kanban" },
     { label: "Deployment Dashboard",    icon: "rocket",        command: "sfDevops.openDeploymentDashboard",  tooltip: "Open deployment dashboard" },
     { label: "Admin / Setup",           icon: "shield",        command: "sfDevops.openAdminPanel",           tooltip: "Open admin and setup panel" },

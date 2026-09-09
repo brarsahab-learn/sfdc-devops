@@ -16,7 +16,7 @@ import type { GitHelper } from "./GitHelper";
 
 const ROLE_STATE_KEY             = "sfDevops.effectiveRole";
 const LEGACY_ROLE_PASSWORD_SECRET = "sfDevops.rolePasswordHash"; // migration only — do not use for new reads/writes
-const ELEVATED_ROLES = new Set(["Lead", "Admin"]);
+const ELEVATED_ROLES = new Set(["Lead", "Admin", "Data Load"]);
 
 function rolePasswordKey(role: string): string {
     return `sfDevops.rolePassword.${role}`;
@@ -199,6 +199,7 @@ export async function resetRolePasswordForce(
 
     await context.secrets.delete(rolePasswordKey("Lead"));
     await context.secrets.delete(rolePasswordKey("Admin"));
+    await context.secrets.delete(rolePasswordKey("Data Load"));
     await context.globalState.update(ROLE_STATE_KEY, "Developer");
 
     if (gitHelper) {

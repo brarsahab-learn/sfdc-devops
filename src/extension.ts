@@ -23,7 +23,7 @@ import { DiffViewerPanel } from "./providers/DiffViewerPanel";
 import { DataMigrationPanel } from "./providers/DataMigrationPanel";
 import { ActionsTreeProvider } from "./providers/ActionsTreeProvider";
 import {
-    findEnvironment, canPromote, getRoles,
+    findEnvironment, canPromote, getRoles, isDataLoadRole,
     isFeatureBranch, getBaseBranch, getStaleBranchThreshold, getPromotableEnvironments,
     initOrgAliasStore, getPublishEnvironment, getAuditLogRetentionDays,
 } from "./config";
@@ -389,7 +389,7 @@ async function checkPendingDeployments(gitHelper: GitHelper, context: vscode.Ext
     // Deployment notifications are only relevant for roles that can act on them.
     // Developers get no deploy access, so don't interrupt them with poller noise.
     const role = getEffectiveRole(context);
-    const canDeploy = role === "Lead" || role === "Admin";
+    const canDeploy = (role === "Lead" || role === "Admin") && !isDataLoadRole(role);
 
     await gitHelper.fetchRemote();
     // Ground rule: a promotion branch you're already tracking locally should never look

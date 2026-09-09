@@ -15,6 +15,7 @@ import {
 } from "../config";
 import { runSetupChecks, SetupCheckItem } from "../SetupCheck";
 import { getEffectiveRole, canAccessConfig } from "../RoleManager";
+import { isDataLoadRole } from "../config";
 import { isOrgConnected, execSf } from "../SfCli";
 import { getStoryProgress, getStoryTimelines, EnvTimeline } from "../StoryProgress";
 
@@ -168,6 +169,9 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                     this.refresh(); break;
                 case "openAdminPanel":
                     vscode.commands.executeCommand("sfDevops.openAdminPanel");
+                    this._clearBusy(); break;
+                case "openDataMigration":
+                    vscode.commands.executeCommand("sfDevops.openDataMigration");
                     this._clearBusy(); break;
                 case "openPipelineView":
                     vscode.commands.executeCommand("sfDevops.openPipelineView");
@@ -346,6 +350,12 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         let statusInfo: StoryStatusInfo | null = null;
 
         try {
+            // Data Load role sees only the DM launcher — skip the full story pipeline view.
+            if (isDataLoadRole(this._userRole)) {
+                this._view.webview.html = this._getDataLoadRoleHtml();
+                return;
+            }
+
             // Basic setup must be validated (and, the first time, explicitly confirmed)
             // before anything else in this panel is shown.
             const checks = await runSetupChecks(this._gitHelper, this._bbClient, this._extContext, this._userRole);
@@ -945,7 +955,7 @@ ${(() => {
 
 <!-- Toolbar: icon-only buttons, compact. Role-gated: Dev sees core actions; Lead + Admin see deploy/signoff; Admin sees setup. -->
 <div class="toolbar">
-  <a class="tbtn" href="#" onclick="send('changeRole')" title="Change Role (${escapeHtml(this._userRole)})">${this._userRole === "Admin" ? "🛡️" : this._userRole === "Lead" ? "🎯" : "👨‍💻"}</a>
+  <a class="tbtn" href="#" onclick="send('changeRole')" title="Change Role (${escapeHtml(this._userRole)})">${this._userRole === "Admin" ? "🛡️" : this._userRole === "Lead" ? "🎯" : this._userRole === "Data Load" ? "📦" : "👨‍💻"}</a>
   ${isAdminRole ? `<a class="tbtn" href="#" onclick="send('openAdminPanel')" title="Setup / Admin Panel">⚙️</a>` : ""}
   <a class="tbtn" href="#" onclick="send('viewAuditLog')" title="Audit Trail">📋</a>
   <a class="tbtn" href="#" onclick="send('openPipelineView')" title="Pipeline &amp; Story Journey">🗂️</a>
@@ -1255,6 +1265,34 @@ ${forced ? `<button class="btn btn-secondary" onclick="send('closeSetupCheck')">
         return `<div class="org-manager">${rows}
   <button class="org-btn" style="margin-top:4px" onclick="send('editEnvironmentsSetting')">⚙ Edit sfDevops.environments instead</button>
 </div>`;
+    }
+
+    private _getDataLoadRoleHtml(): string {
+        return `<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { font-family: var(--vscode-font-family); font-size: 12px; padding: 16px; color: var(--vscode-foreground); background: var(--vscode-editor-background); }
+  h2   { font-size: 14px; margin: 0 0 6px; }
+  p    { font-size: 11px; color: var(--vscode-descriptionForeground); margin: 0 0 16px; }
+  .btn { display: block; width: 100%; padding: 10px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; font-family: var(--vscode-font-family); background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .btn:hover { opacity: 0.9; }
+  .role-tag { display: inline-block; font-size: 10px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border-radius: 10px; padding: 1px 7px; margin-bottom: 12px; }
+  .change-role { font-size: 11px; color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: none; display: block; margin-top: 12px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="role-tag">⬡ Data Load</div>
+<h2>Data Migration</h2>
+<p>Your role has access to data loading operations only.</p>
+<button class="btn" onclick="send('openDataMigration')">📦 Open Data Migration Panel</button>
+<a class="change-role" href="#" onclick="send('changeRole')">Switch Role</a>
+<script>
+  const vscode = acquireVsCodeApi();
+  function send(cmd) { vscode.postMessage({ command: cmd }); }
+</script>
+</body>
+</html>`;
     }
 
     private _getLoadingHtml(): string {

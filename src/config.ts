@@ -196,7 +196,12 @@ export function sanitizeStoryId(input: string): string {
 // ── Roles ────────────────────────────────────────────────────────────────────
 
 export function getRoles(): string[] {
-    return cfg().get<string[]>("roles") || ["Developer", "Lead", "Admin"];
+    return cfg().get<string[]>("roles") || ["Developer", "Lead", "Admin", "Data Load"];
+}
+
+/** True if the role's primary purpose is data loading (restricts sidebar to DM only). */
+export function isDataLoadRole(role: string): boolean {
+    return role === "Data Load";
 }
 
 /**
