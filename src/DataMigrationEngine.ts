@@ -139,6 +139,45 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
     return chunks;
 }
 
+/** Extract the offending field name from a Salesforce error string. */
+function extractBadFieldName(msg: string): string | null {
+    const patterns = [
+        /No such column '([^']+)'/i,
+        /INVALID_FIELD[^:]*:[^[]*\[([^\]]+)\]/i,
+        /Unknown field:\s*([^\s,\n]+)/i,
+        /field not readable:\s*([^\s,]+)/i,
+    ];
+    for (const re of patterns) {
+        const m = msg.match(re);
+        if (m) { return m[1].trim(); }
+    }
+    return null;
+}
+
+/** Remove a field from a SOQL SELECT clause. Returns null if nothing is left to select. */
+function stripFieldFromQuery(query: string, field: string): string | null {
+    const m = query.match(/^(SELECT\s+)([\s\S]+?)(\s+FROM\b[\s\S]*)$/i);
+    if (!m) { return null; }
+    const fields = m[2].split(",").map(f => f.trim()).filter(
+        f => f.toLowerCase() !== field.toLowerCase() && f !== ""
+    );
+    if (fields.length === 0) { return null; }
+    return `${m[1]}${fields.join(", ")}${m[3]}`;
+}
+
+/** Count records in data JSON files exported by sf data export tree for a given sobject. */
+function countExportedRecords(dir: string): number {
+    let count = 0;
+    try {
+        for (const f of fs.readdirSync(dir)) {
+            if (!f.endsWith(".json") || f.endsWith("-plan.json")) { continue; }
+            const data = JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8"));
+            count += Array.isArray(data.records) ? data.records.length : 0;
+        }
+    } catch { /* ignore */ }
+    return count;
+}
+
 /**
  * Parse a Salesforce CLI error message and return a user-friendly field-level explanation.
  * Returns null if the error is not field-related.
@@ -212,48 +251,59 @@ export async function pullData(
         const tmpDir = path.join(tmpRoot, `${safeOrgName(obj.sobject)}-${Date.now()}`);
         fs.mkdirSync(tmpDir, { recursive: true });
 
-        try {
-            const { stdout } = await execSf(
-                ["data", "export", "tree", "--query", query, "--output-dir", tmpDir, "--plan",
-                 "--target-org", sourceOrg, "--json"],
-                { cwd: workspaceRoot, timeout: 300_000, maxBuffer: 100 * 1024 * 1024 },
-            );
-
-            const parsed = JSON.parse(stdout);
-            if (parsed.status !== 0) {
-                const rawMsg: string = parsed.message ?? "unknown error";
-                const fieldHint = parseFieldError(obj.sobject, rawMsg);
-                onLog(`Pull failed for ${obj.sobject}: ${rawMsg}`, "error");
-                if (fieldHint) { onLog(`  → ${fieldHint}`, "warn"); }
-                continue;
-            }
-
-            // Move all output files from tmpDir to seedDir (overwriting existing)
-            const exported = fs.readdirSync(tmpDir);
-            for (const file of exported) {
-                const src = path.join(tmpDir, file);
-                const dst = path.join(seedDir, file);
-                fs.copyFileSync(src, dst);
-                fs.unlinkSync(src);
-            }
-            fs.rmdirSync(tmpDir);
-
-            pulledObjects.push(obj.sobject);
-            onLog(`✓ Pulled ${obj.sobject}`, "success");
-        } catch (e: any) {
-            // Try to parse stdout from the thrown error (sf CLI exits non-zero on warnings too)
-            const rawOut: string = e?.stdout ?? "";
+        // Auto-heal loop: retry after stripping unrecognised fields from SELECT
+        for (let attempt = 0; attempt <= 20; attempt++) {
+            let rawMsg = "";
             try {
-                const parsed = JSON.parse(rawOut);
-                const msg: string = parsed?.message ?? parsed?.result?.message ?? e.message ?? String(e);
-                onLog(`Pull failed for ${obj.sobject}: ${msg}`, "error");
-                const fieldHint = parseFieldError(obj.sobject, msg);
+                const { stdout } = await execSf(
+                    ["data", "export", "tree", "--query", query, "--output-dir", tmpDir, "--plan",
+                     "--target-org", sourceOrg, "--json"],
+                    { cwd: workspaceRoot, timeout: 300_000, maxBuffer: 100 * 1024 * 1024 },
+                );
+                const parsed = JSON.parse(stdout);
+                if (parsed.status !== 0) {
+                    rawMsg = String(parsed.message ?? "unknown error");
+                } else {
+                    // Count records from exported files before moving
+                    const recordCount = countExportedRecords(tmpDir);
+
+                    // Move all output files from tmpDir to seedDir (overwriting existing)
+                    for (const file of fs.readdirSync(tmpDir)) {
+                        fs.copyFileSync(path.join(tmpDir, file), path.join(seedDir, file));
+                        fs.unlinkSync(path.join(tmpDir, file));
+                    }
+                    try { fs.rmdirSync(tmpDir); } catch { /* ignore */ }
+
+                    pulledObjects.push(obj.sobject);
+                    onLog(`✓ Pulled ${obj.sobject}: ${recordCount} record${recordCount !== 1 ? "s" : ""}`, "success");
+                    break; // success
+                }
+            } catch (e: any) {
+                const rawOut: string = e?.stdout ?? "";
+                try {
+                    const p = JSON.parse(rawOut);
+                    rawMsg = String(p?.message ?? p?.result?.message ?? e.message ?? String(e));
+                } catch {
+                    rawMsg = String(e?.message ?? String(e));
+                }
+            }
+
+            if (rawMsg) {
+                const badField = extractBadFieldName(rawMsg);
+                if (badField && attempt < 20) {
+                    const healed = stripFieldFromQuery(query, badField);
+                    if (healed && healed !== query) {
+                        onLog(`⚠️  Auto-removed unknown field '${badField}' from ${obj.sobject} SOQL — field not found in org. Retrying…`, "warn");
+                        query = healed;
+                        // Clear tmpDir for retry
+                        try { for (const f of fs.readdirSync(tmpDir)) { fs.unlinkSync(path.join(tmpDir, f)); } } catch { /* ignore */ }
+                        continue;
+                    }
+                }
+                onLog(`Pull failed for ${obj.sobject}: ${rawMsg}`, "error");
+                const fieldHint = parseFieldError(obj.sobject, rawMsg);
                 if (fieldHint) { onLog(`  → ${fieldHint}`, "warn"); }
-            } catch {
-                const msg: string = e?.message ?? String(e);
-                onLog(`Pull failed for ${obj.sobject}: ${msg}`, "error");
-                const fieldHint = parseFieldError(obj.sobject, msg);
-                if (fieldHint) { onLog(`  → ${fieldHint}`, "warn"); }
+                break;
             }
         }
 

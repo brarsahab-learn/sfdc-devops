@@ -19,6 +19,21 @@ import { log } from "../Log";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
+/** Count records stored in seed JSON files for a given sobject. */
+function countSeedRecords(seedDir: string, sobject: string): number {
+    if (!fs.existsSync(seedDir)) { return 0; }
+    let count = 0;
+    try {
+        for (const f of fs.readdirSync(seedDir)) {
+            if (!f.endsWith(".json") || f.endsWith("-plan.json")) { continue; }
+            if (!f.toLowerCase().includes(sobject.toLowerCase())) { continue; }
+            const data = JSON.parse(fs.readFileSync(path.join(seedDir, f), "utf-8"));
+            count += Array.isArray(data.records) ? data.records.length : 0;
+        }
+    } catch { /* ignore */ }
+    return count;
+}
+
 function esc(s: string): string {
     return String(s).replace(/[<>&"]/g, (c) => (({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" } as Record<string, string>)[c] ?? c));
 }
@@ -797,13 +812,22 @@ export class DataMigrationPanel {
 
         // ── Tab 3: Tracking ──────────────────────────────────────────────────
         const renderTrackingTab = () => {
-            const entries = Object.entries(tracking ?? {});
-            if (entries.length === 0) {
-                return `<p style="color:var(--vscode-descriptionForeground)">No tracking data for <strong>${esc(targetOrg || "(no target org)")}</strong>. Run a load operation first.</p>`;
+            const seedDir = path.resolve(this._workspaceRoot, config.seedDir);
+            const trackMap = tracking ?? {};
+
+            // Show any object that has seed data OR tracking entries
+            const allObjects = new Set<string>(Object.keys(trackMap));
+            for (const obj of (config.objects ?? []).filter(o => o.active !== false)) {
+                if (countSeedRecords(seedDir, obj.sobject) > 0) { allObjects.add(obj.sobject); }
+            }
+
+            if (allObjects.size === 0) {
+                return `<p style="color:var(--vscode-descriptionForeground)">No data yet for <strong>${esc(targetOrg || "(no target org)")}</strong>. Pull data first, then run a load.</p>`;
             }
 
             let rows = "";
-            for (const [obj, t] of entries) {
+            for (const obj of allObjects) {
+                const t = trackMap[obj] ?? {};
                 let created = 0, failed = 0, skipped = 0, pending = 0, blocked = 0;
                 for (const entry of Object.values(t)) {
                     if      (entry.status === "created") { created++; }
@@ -812,14 +836,20 @@ export class DataMigrationPanel {
                     else if (entry.status === "blocked") { blocked++; }
                     else                                 { pending++; }
                 }
-                const pulled = Object.keys(t).length;
+                const seedCount = countSeedRecords(seedDir, obj);
+                const loadTotal = created + failed + skipped + pending + blocked;
+                const progressPct = seedCount > 0 ? Math.round((created / seedCount) * 100) : 0;
+                const progressBar = seedCount > 0
+                    ? `<div style="width:80px;height:6px;background:var(--vscode-editorWidget-border);border-radius:3px;display:inline-block;vertical-align:middle;margin-left:4px"><div style="width:${progressPct}%;height:100%;background:#00c9b1;border-radius:3px"></div></div>`
+                    : "";
                 rows += `<tr>
                     <td><code>${esc(obj)}</code></td>
-                    <td>${pulled}</td>
-                    <td>${created}</td>
-                    <td class="${failed > 0 ? "cell-red" : ""}">${failed}</td>
+                    <td>${seedCount > 0 ? `<strong>${seedCount}</strong>` : "—"}</td>
+                    <td>${loadTotal > 0 ? loadTotal : "—"}</td>
+                    <td>${created}${progressBar}</td>
+                    <td class="${failed > 0 ? "cell-red" : ""}">${failed > 0 ? `<strong>${failed}</strong>` : "0"}</td>
                     <td>${skipped}</td>
-                    <td>${pending}</td>
+                    <td>${pending > 0 ? `<span style="color:var(--vscode-descriptionForeground)">${pending}</span>` : "0"}</td>
                     <td>${blocked}</td>
                     <td class="row-actions">
                         ${failed > 0 ? `<button class="btn btn-sm" onclick="send('retryFailed',{sobject:${JSON.stringify(obj)},targetOrg:${JSON.stringify(targetOrg)}})">Retry Failed</button>` : ""}
@@ -831,7 +861,7 @@ export class DataMigrationPanel {
             return `
             <div class="table-wrap">
                 <table class="data-table">
-                    <thead><tr><th>Object</th><th>Pulled</th><th>Created</th><th>Failed</th><th>Skipped</th><th>Pending</th><th>Blocked</th><th>Actions</th></tr></thead>
+                    <thead><tr><th>Object</th><th title="Records in seed files from last Pull">Pulled</th><th title="Records attempted in Load">Attempted</th><th>Created</th><th>Failed</th><th>Skipped</th><th>Pending</th><th>Blocked</th><th>Actions</th></tr></thead>
                     <tbody>${rows}</tbody>
                 </table>
             </div>
