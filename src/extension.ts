@@ -20,6 +20,7 @@ import { StoryPipelinePanel } from "./providers/StoryPipelinePanel";
 import { StoryJourneyPanel } from "./providers/StoryJourneyPanel";
 import { AdminPanel } from "./providers/AdminPanel";
 import { DiffViewerPanel } from "./providers/DiffViewerPanel";
+import { DataMigrationPanel } from "./providers/DataMigrationPanel";
 import {
     findEnvironment, canPromote, getRoles,
     isFeatureBranch, getBaseBranch, getStaleBranchThreshold, getPromotableEnvironments,
@@ -354,6 +355,10 @@ export async function activate(context: vscode.ExtensionContext) {
         // day-to-day sprint commands above. See PackagingEngine.ts.
         vscode.commands.registerCommand("sfDevops.prepare2gpBeta", async () => {
             await prepare2gpBetaCommand(bbClient, gitHelper, context);
+        }),
+        vscode.commands.registerCommand("sfDevops.openDataMigration", () => {
+            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+            DataMigrationPanel.createOrShow(context, root);
         })
     );
 
