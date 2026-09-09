@@ -2,7 +2,7 @@
 	"name": "salesforce-devops",
 	"displayName": "Salesforce-DevOps",
 	"description": "Generic, settings-driven Salesforce CI/CD workflow \u2014 1-click story management, pipeline status, environment promotion, and an org-per-branch 2GP packaging release gate",
-	"version": "5.2.1-beta.8",
+	"version": "5.2.1-beta.9",
 	"publisher": "your-company",
 	"engines": {
 		"vscode": "^1.85.0"
