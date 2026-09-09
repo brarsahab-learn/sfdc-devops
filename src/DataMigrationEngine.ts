@@ -564,12 +564,13 @@ function readSeedRecords(seedDir: string, sobject: string): Record<string, any>[
             return (raw?.records ?? raw) as Record<string, any>[];
         }
     }
-    // Check plan.json for file list
+    // Check plan.json for file list — may be our own manifest (object) or sf CLI plan (array)
     const planPath = path.join(seedDir, "plan.json");
     if (fs.existsSync(planPath)) {
         const plan = JSON.parse(fs.readFileSync(planPath, "utf-8"));
         // sf data export tree --plan produces [{sobject, saveRefs, resolveRefs, files:[]}]
-        const entry = (plan as any[]).find((e: any) =>
+        const planArray: any[] = Array.isArray(plan) ? plan : [];
+        const entry = planArray.find((e: any) =>
             e.sobject?.toLowerCase() === sobject.toLowerCase());
         if (entry?.files?.length) {
             const records: Record<string, any>[] = [];
