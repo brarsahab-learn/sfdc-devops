@@ -367,18 +367,17 @@ export async function checkExternalId(
         const parsed = JSON.parse(stdout);
         const fields: any[] = parsed?.result?.fields ?? [];
 
-        // Only consider fields explicitly marked as externalId — SF rejects any other field
-        // as an upsert key regardless of name. Pick the one matching our naming convention
-        // first (External_Id__c / ExternalId__c with optional namespace prefix), then fall
-        // back to any other marked field.
+        // Only fields explicitly flagged externalId: true can be used as SF upsert keys.
+        // Among those, prefer one matching our naming conventions (any namespace prefix,
+        // including multi-segment like ns1__ns2__External_Id__c, and both single/double
+        // underscore separators: ExternalId__c, External_Id__c, External__Id__c).
         const extIdFields = fields.filter(f => f.externalId === true);
         if (extIdFields.length === 0) {
             onLog(`ℹ  No ExternalId field found on ${sobject}`, "info");
             return null;
         }
         const preferred = extIdFields.find(f =>
-            /^(?:\w+__)?External_?Id__c$/i.test(f.name) ||
-            /^(?:\w+__)?ExternalId__c$/i.test(f.name)
+            /^(?:\w+__)*External_?_?Id__c$/i.test(f.name)
         ) ?? extIdFields[0];
         onLog(`✓ ExternalId field on ${sobject}: ${preferred.name}`, "success");
         return preferred.name as string;
@@ -673,37 +672,30 @@ export async function loadData(
     };
 
     // ------------------------------------------------------------------
-    // Pre-flight: ExternalId check (always re-verifies against target org).
-    // externalIdVerified in config is org-agnostic, so we can't trust it for a
-    // different org. Always describe → only skip auto-create if already found.
-    // Never blocks the load — falls back to insert mode if unavailable.
+    // Pre-flight: ExternalId check — run all describes in parallel (batches
+    // of 5) so we don't wait 2s × N objects before the load even starts.
     // ------------------------------------------------------------------
     if (!dryRun) {
-        for (const obj of activeObjects(config)) {
-            const found = await checkExternalId(targetOrg, obj.sobject, workspaceRoot, onLog);
-            if (found) {
-                obj.externalIdField = found;
-                obj.externalIdVerified = true;
-                writeDmConfig(workspaceRoot, config);
-            } else if (config.autoCreateExternalId) {
-                emit(`No ExternalId on ${obj.sobject} — attempting auto-create…`, "info");
-                try {
-                    const fieldName = await createExternalIdField(targetOrg, obj.sobject, workspaceRoot, onLog);
-                    obj.externalIdField = fieldName;
-                    obj.externalIdVerified = true;
-                    writeDmConfig(workspaceRoot, config);
-                } catch (e: any) {
-                    emit(`⚠️  Could not create ExternalId for ${obj.sobject}: ${e?.message ?? String(e)}`, "warn");
-                    emit(`   → Proceeding in insert-only mode for ${obj.sobject}. Records may duplicate on re-run.`, "warn");
-                    obj.externalIdField = undefined;
-                    obj.externalIdVerified = false;
-                }
-            } else {
-                emit(`ℹ  ${obj.sobject}: no ExternalId — using insert mode (re-runs may create duplicates).`, "info");
-                obj.externalIdField = undefined;
-                obj.externalIdVerified = false;
+        const allObjs = activeObjects(config);
+        emit(`Pre-flight: checking ExternalId fields on ${allObjs.length} object(s)…`, "info");
+        const chunks = chunkArray(allObjs, 5);
+        for (const chunk of chunks) {
+            const results = await Promise.allSettled(
+                chunk.map(obj => checkExternalId(targetOrg, obj.sobject, workspaceRoot, () => {}))
+            );
+            for (let i = 0; i < chunk.length; i++) {
+                const obj = chunk[i];
+                const r = results[i];
+                const found = r.status === "fulfilled" ? r.value : null;
+                obj.externalIdField  = found ?? undefined;
+                obj.externalIdVerified = !!found;
             }
         }
+        writeDmConfig(workspaceRoot, config);
+        const withExtId    = allObjs.filter(o => o.externalIdField);
+        const withoutExtId = allObjs.filter(o => !o.externalIdField);
+        if (withExtId.length)    { emit(`✓ Upsert mode: ${withExtId.map(o => o.sobject).join(", ")}`, "success"); }
+        if (withoutExtId.length) { emit(`⚠  Insert mode (no ExternalId field): ${withoutExtId.map(o => o.sobject).join(", ")}`, "warn"); }
     }
 
     // ------------------------------------------------------------------
@@ -834,8 +826,11 @@ export async function loadData(
         // Initialise tracking for this object if not present
         if (!tracking[obj.sobject]) { tracking[obj.sobject] = {}; }
 
-        const batches = chunkArray(allRecords, config.batchSize);
+        // sf data import tree is limited to 200 records per call; upsert bulk can handle more
+        const effectiveBatchSize = obj.externalIdField ? config.batchSize : Math.min(config.batchSize, 200);
+        const batches = chunkArray(allRecords, effectiveBatchSize);
         let objectSkipped = false;
+        const insertedThisObject: { refId: string; sfId: string }[] = [];
 
         for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
             // ---- Controller checkpoint ----
@@ -903,7 +898,8 @@ export async function loadData(
                     totalFailed += failed;
                     objStatusMap.get(obj.sobject)!.created += created;
                 },
-                config.batchSize,
+                effectiveBatchSize,
+                !obj.externalIdField ? insertedThisObject : undefined,
             );
 
             writeTracking(workspaceRoot, targetOrg, tracking);
@@ -911,6 +907,12 @@ export async function loadData(
         }
 
         writeTracking(workspaceRoot, targetOrg, tracking);
+
+        // After insert-mode: backfill ExternalId field so re-runs use upsert
+        if (!obj.externalIdField && insertedThisObject.length > 0 && !dryRun) {
+            await backfillExternalIds(obj, insertedThisObject, targetOrg, workspaceRoot, tmpDir, emit, config);
+            if (obj.externalIdField) { writeDmConfig(workspaceRoot, config); }
+        }
 
         const finalStatus = objectSkipped ? "skipped" : "done";
         objStatusMap.set(obj.sobject, { ...objStatusMap.get(obj.sobject)!, status: finalStatus });
@@ -950,6 +952,59 @@ export async function loadData(
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// backfillExternalIds — after insert mode, stamp ExternalId field values so
+// the next load run can switch to idempotent upsert instead of re-inserting.
+// ---------------------------------------------------------------------------
+
+async function backfillExternalIds(
+    obj: DmObjectConfig,
+    insertedRecords: { refId: string; sfId: string }[],
+    targetOrg: string,
+    workspaceRoot: string,
+    tmpDir: string,
+    emit: LogFn,
+    config: DmConfig,
+): Promise<void> {
+    if (insertedRecords.length === 0) { return; }
+
+    // Re-check for ExternalId field — may have been created after the pre-flight
+    const extField = await checkExternalId(targetOrg, obj.sobject, workspaceRoot, () => {});
+    if (!extField) {
+        emit(`ℹ  ${obj.sobject}: no ExternalId field found — records inserted without ExternalId. Add External_Id__c in Salesforce to enable idempotent re-runs.`, "info");
+        return;
+    }
+
+    emit(`Stamping ExternalId (${extField}) on ${insertedRecords.length} ${obj.sobject} record(s)…`, "info");
+
+    // Build CSV: Id + ExternalId field. Upsert-by-Id is a bulk update.
+    const header = `Id,${extField}`;
+    const rows   = insertedRecords.map(r => `${r.sfId},${r.refId}`);
+    const csvPath = path.join(tmpDir, `${safeOrgName(obj.sobject)}-backfill-${Date.now()}.csv`);
+    fs.writeFileSync(csvPath, [header, ...rows].join("\n"), "utf-8");
+
+    try {
+        await execSf(
+            ["data", "upsert", "bulk",
+             "--sobject", obj.sobject,
+             "--external-id-field", "Id",
+             "--file", csvPath,
+             "--target-org", targetOrg,
+             "--wait", "10",
+             "--json"],
+            { cwd: workspaceRoot, timeout: 120_000, maxBuffer: 10 * 1024 * 1024 },
+        );
+        emit(`✓ ExternalId stamped on ${insertedRecords.length} ${obj.sobject} record(s) — next load will use upsert mode`, "success");
+        // Update config so the next run picks up the field immediately
+        obj.externalIdField  = extField;
+        obj.externalIdVerified = true;
+    } catch (e: any) {
+        emit(`⚠  Could not stamp ExternalId on ${obj.sobject}: ${e?.message ?? String(e)}`, "warn");
+    } finally {
+        try { fs.unlinkSync(csvPath); } catch { /* ignore */ }
+    }
+}
+
 // loadBatch — recursive halving on LimitException
 // ---------------------------------------------------------------------------
 
@@ -964,6 +1019,7 @@ async function loadBatch(
     emit: LogFn,
     onCount: (created: number, failed: number) => void,
     maxBatchSize: number,
+    insertedRecords?: { refId: string; sfId: string }[],
 ): Promise<void> {
     let stdout = "";
     let attemptFailed = false;
@@ -1027,8 +1083,8 @@ async function loadBatch(
     if (limitException && processable.length > 1) {
         emit(`Governor limit hit for ${obj.sobject} batch of ${processable.length} — splitting`, "warn");
         const half = Math.ceil(processable.length / 2);
-        await loadBatch(obj, processable.slice(0, half), targetOrg, workspaceRoot, tmpDir, tracking, globalRefIndex, emit, onCount, maxBatchSize);
-        await loadBatch(obj, processable.slice(half), targetOrg, workspaceRoot, tmpDir, tracking, globalRefIndex, emit, onCount, maxBatchSize);
+        await loadBatch(obj, processable.slice(0, half), targetOrg, workspaceRoot, tmpDir, tracking, globalRefIndex, emit, onCount, maxBatchSize, insertedRecords);
+        await loadBatch(obj, processable.slice(half), targetOrg, workspaceRoot, tmpDir, tracking, globalRefIndex, emit, onCount, maxBatchSize, insertedRecords);
         return;
     }
 
@@ -1047,6 +1103,7 @@ async function loadBatch(
             if (sfIdByRef) {
                 tracking[obj.sobject][refId] = { status: "created", id: sfIdByRef, at: now() };
                 globalRefIndex.set(refId, sfIdByRef);
+                insertedRecords?.push({ refId, sfId: sfIdByRef });
                 batchCreated++;
                 continue;
             }
