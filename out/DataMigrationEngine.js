@@ -783,6 +783,17 @@ function parseImportResult(stdout) {
             limitException = true;
             return { created, createdByRef, failed, resultItems, limitException };
         }
+        // A Bulk API 2.0 upsert that succeeds with ZERO failed records never gets a `results`
+        // array at all — the CLI's whole `result` is just job-level counters:
+        // { jobId, processedRecords, successfulRecords, failedRecords }. Treating that as "empty
+        // items" (the old behavior) marked every record "failed: No result" despite Salesforce
+        // having created/updated them correctly. Recognize this shape and surface its jobId so
+        // the caller fetches the real per-record results (including each row's target Id) via
+        // `sf data bulk results`, exactly as it already does for the partial-failure case.
+        if (!Array.isArray(rawResults) && typeof rawResults?.jobId === "string"
+            && typeof rawResults?.processedRecords === "number") {
+            return { created, createdByRef, failed, resultItems, limitException, jobId: rawResults.jobId };
+        }
         const items = Array.isArray(rawResults) ? rawResults : [];
         for (const item of items) {
             const hasErrors = Array.isArray(item.errors) && item.errors.length > 0;

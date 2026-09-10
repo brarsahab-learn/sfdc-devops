@@ -43,6 +43,22 @@ function check(name, cond, extra) { console.log(`${cond ? "PASS" : "FAIL"}: ${na
     check("a plain CLI error has no jobId", result.jobId === undefined);
 }
 
+// ---- 2b. A FULLY SUCCESSFUL bulk upsert (zero failed records) has NO `results` array at all —
+// just job-level counters. This was the real bug behind "Created: 0" showing up for objects that
+// Apex proved had actually loaded correctly: treating this shape as "empty items" marked every
+// record failed with "No result" even though Salesforce created/updated them. jobId must be
+// extracted here too so the caller fetches the real per-record Ids via `sf data bulk results`. ----
+{
+    const fullSuccess = JSON.stringify({
+        status: 0,
+        result: { jobId: "750xx0000009ZZZ", processedRecords: 190, successfulRecords: 190, failedRecords: 0 },
+    });
+    const result = parseImportResult(fullSuccess);
+    check("full-success shape yields no items array, but still surfaces jobId", result.jobId === "750xx0000009ZZZ", result.jobId);
+    check("full-success shape isn't misread as any records failing", result.failed.length === 0);
+    check("full-success shape isn't misread as any records succeeding inline either (caller must fetch results)", result.created.length === 0 && result.resultItems.length === 0);
+}
+
 // ---- 3. parseCsv reads the failed-records CSV, including a quoted sf__Error with a comma ----
 {
     const csv = [

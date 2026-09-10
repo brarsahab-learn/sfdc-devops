@@ -867,8 +867,10 @@ export function parseImportResult(stdout: string): {
     failed: { refId: string; error: string }[];
     resultItems: { sfId: string; success: boolean; error: string; wasNewRecord: boolean }[]; // full positional list
     limitException: boolean;
-    jobId?: string; // Bulk API 2.0 job id — set only on the "N records failed" top-level error,
-                     // so the caller can fetch the real per-record reasons via `sf data bulk results`.
+    jobId?: string; // Bulk API 2.0 job id — set whenever the CLI's own response has no
+                     // per-record breakdown (both the "N records failed" top-level error, AND a
+                     // fully-successful upsert with zero failures — see below), so the caller can
+                     // fetch the real per-record results via `sf data bulk results`.
 } {
     const created: string[] = [];
     const createdByRef = new Map<string, string>();
@@ -905,6 +907,18 @@ export function parseImportResult(stdout: string): {
         if (typeof rawResults === "string" && rawResults.includes("LimitException")) {
             limitException = true;
             return { created, createdByRef, failed, resultItems, limitException };
+        }
+
+        // A Bulk API 2.0 upsert that succeeds with ZERO failed records never gets a `results`
+        // array at all — the CLI's whole `result` is just job-level counters:
+        // { jobId, processedRecords, successfulRecords, failedRecords }. Treating that as "empty
+        // items" (the old behavior) marked every record "failed: No result" despite Salesforce
+        // having created/updated them correctly. Recognize this shape and surface its jobId so
+        // the caller fetches the real per-record results (including each row's target Id) via
+        // `sf data bulk results`, exactly as it already does for the partial-failure case.
+        if (!Array.isArray(rawResults) && typeof (rawResults as any)?.jobId === "string"
+            && typeof (rawResults as any)?.processedRecords === "number") {
+            return { created, createdByRef, failed, resultItems, limitException, jobId: (rawResults as any).jobId };
         }
 
         const items: any[] = Array.isArray(rawResults) ? rawResults : [];
