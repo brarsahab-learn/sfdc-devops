@@ -1,0 +1,83 @@
+[09:47:54]  Pre-flight: checking ExternalId fields on 11 object(s)…
+[09:48:01]  ✓ Upsert mode: Product_Group__c, Team__c, Component_Master__c, Broker__c, Account, Product__c, Product_Team_Mapping__c, Broker_Office_Location__c, Product_Insurer_Mapping__c, Product_Component__c, Contact
+[09:48:02]  Loading Product_Group__c (1/11)...
+[09:48:02]  ✓ Product_Group__c: 0 created
+[09:48:02]  Loading Team__c (2/11)...
+[09:48:11]  ✓ Team__c: 0 created
+[09:48:11]  Loading Component_Master__c (3/11)...
+[09:49:00]  ✓ Component_Master__c: 0 created
+[09:49:00]  Loading Broker__c (4/11)...
+[09:49:54]  ✓ Broker__c: 0 created
+[09:49:54]  Loading Account (5/11)...
+[09:50:03]  ✓ Account: 0 created
+[09:50:03]  Loading Product__c (6/11)...
+[09:50:12]  Product__c: 0 created, 93 failed in batch
+[09:50:12]    ✗ Product__c[Product__cRef1]: FIELD_INTEGRITY_EXCEPTION:Product Group: id value of incorrect type: a0uQE000003Je4uYAC:Product_Group__c --
+[09:50:12]    ✗ Product__c[Product__cRef2]: FIELD_INTEGRITY_EXCEPTION:Product Group: id value of incorrect type: a0u9r000005ej3cAAA:Product_Group__c --
+[09:50:12]    ✗ Product__c[Product__cRef3]: FIELD_INTEGRITY_EXCEPTION:Product Group: id value of incorrect type: a0u9r000005ej3bAAA:Product_Group__c --
+[09:50:12]    ✗ Product__c[Product__cRef6]: FIELD_INTEGRITY_EXCEPTION:Product Group: id value of incorrect type: a0u9r000005ej3aAAA:Product_Group__c --
+[09:50:12]    ✗ Product__c[Product__cRef25]: FIELD_INTEGRITY_EXCEPTION:Product Group: id value of incorrect type: a0u9r000005ej3ZAAQ:Product_Group__c --
+[09:50:12]  ✓ Product__c: 0 created
+[09:50:12]  Loading Product_Team_Mapping__c (7/11)...
+[09:50:22]  Product_Team_Mapping__c: 0 created, 32 failed in batch
+[09:50:22]    ✗ Product_Team_Mapping__c[Product_Team_Mapping__cRef1]: FIELD_INTEGRITY_EXCEPTION:Product Group: id value of incorrect type: a0u9r000005ej3ZAAQ:Product_Group__c --
+[09:50:22]    ✗ Product_Team_Mapping__c[Product_Team_Mapping__cRef5]: FIELD_INTEGRITY_EXCEPTION:Product Group: id value of incorrect type: a0u9r000005ej3bAAA:Product_Group__c --
+[09:50:22]    ✗ Product_Team_Mapping__c[Product_Team_Mapping__cRef7]: FIELD_INTEGRITY_EXCEPTION:Product Group: id value of incorrect type: a0u9r000005ej3aAAA:Product_Group__c --
+[09:50:22]    ✗ Product_Team_Mapping__c[Product_Team_Mapping__cRef13]: FIELD_INTEGRITY_EXCEPTION:Product Group: id value of incorrect type: a0u9r000005ej3cAAA:Product_Group__c --
+[09:50:22]    ✗ Product_Team_Mapping__c[Product_Team_Mapping__cRef17]: FIELD_INTEGRITY_EXCEPTION:Product Group: id value of incorrect type: a0uQE000003Je4rYAC:Product_Group__c --
+[09:50:22]    ✗ Product_Team_Mapping__c[Product_Team_Mapping__cRef21]: FIELD_INTEGRITY_EXCEPTION:Product Group: id value of incorrect type: a0uQE000003Je4tYAC:Product_Group__c --
+[09:50:22]    ✗ Product_Team_Mapping__c[Product_Team_Mapping__cRef23]: FIELD_INTEGRITY_EXCEPTION:Product Group: id value of incorrect type: a0uQE000003Je4sYAC:Product_Group__c --
+[09:50:22]    ✗ Product_Team_Mapping__c[Product_Team_Mapping__cRef29]: FIELD_INTEGRITY_EXCEPTION:Product Group: id value of incorrect type: a0uQE000003Je4uYAC:Product_Group__c --
+[09:50:22]  ✓ Product_Team_Mapping__c: 0 created
+[09:50:22]  Loading Broker_Office_Location__c (8/11)...
+[09:50:31]  Broker_Office_Location__c: 0 created, 44 failed in batch
+[09:50:31]    ✗ Broker_Office_Location__c[Broker_Office_Location__cRef1]: INVALID_CROSS_REFERENCE_KEY:invalid cross reference id:--
+[09:50:31]  ✓ Broker_Office_Location__c: 0 created
+[09:50:31]  Loading Product_Insurer_Mapping__c (9/11)...
+[09:50:40]  Product_Insurer_Mapping__c: 0 created, 190 failed in batch
+[09:50:40]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef1]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXC8:--
+[09:50:40]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef91]: FIELD_INTEGRITY_EXCEPTION:Product: id value of incorrect type: a199j000002PwyvAAC:Product__c --
+[09:50:40]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef92]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXC9:--
+[09:50:40]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef183]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCA:--
+[09:50:49]  Product_Insurer_Mapping__c: 0 created, 190 failed in batch
+[09:50:49]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef191]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCA:--
+[09:50:49]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef204]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCB:--
+[09:50:49]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef294]: FIELD_INTEGRITY_EXCEPTION:Product: id value of incorrect type: a199j000002PwyvAAC:Product__c --
+[09:50:49]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef295]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCC:--
+[09:50:58]  Product_Insurer_Mapping__c: 0 created, 190 failed in batch
+[09:50:58]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef381]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCC:--
+[09:50:58]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef385]: FIELD_INTEGRITY_EXCEPTION:Product: id value of incorrect type: a199j000002PwyvAAC:Product__c --
+[09:50:58]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef386]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCD:--
+[09:50:58]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef477]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCE:--
+[09:50:58]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef568]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCF:--
+[09:51:09]  Product_Insurer_Mapping__c: 0 created, 190 failed in batch
+[09:51:09]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef571]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCF:--
+[09:51:09]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef658]: FIELD_INTEGRITY_EXCEPTION:Product: id value of incorrect type: a199j000002PwyvAAC:Product__c --
+[09:51:09]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef659]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCG:--
+[09:51:09]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef750]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCH:--
+[09:51:20]  Product_Insurer_Mapping__c: 0 created, 190 failed in batch
+[09:51:20]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef761]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCH:--
+[09:51:20]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef840]: FIELD_INTEGRITY_EXCEPTION:Product: id value of incorrect type: a199j000002PwyvAAC:Product__c --
+[09:51:20]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef841]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCI:--
+[09:51:20]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef932]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCJ:--
+[09:51:33]  Product_Insurer_Mapping__c: 0 created, 190 failed in batch
+[09:51:33]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef951]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCJ:--
+[09:51:33]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef1022]: FIELD_INTEGRITY_EXCEPTION:Product: id value of incorrect type: a199j000002PwyvAAC:Product__c --
+[09:51:33]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef1023]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCK:--
+[09:51:33]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef1114]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCL:--
+[09:51:43]  Product_Insurer_Mapping__c: 0 created, 190 failed in batch
+[09:51:43]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef1141]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCL:--
+[09:51:43]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef1204]: FIELD_INTEGRITY_EXCEPTION:Product: id value of incorrect type: a199j000002PwyvAAC:Product__c --
+[09:51:43]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef1205]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCM:--
+[09:51:43]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef1286]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCO:--
+[09:51:53]  Product_Insurer_Mapping__c: 0 created, 190 failed in batch
+[09:51:53]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef1331]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCO:--
+[09:51:53]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef1376]: FIELD_INTEGRITY_EXCEPTION:Product: id value of incorrect type: a199j000002PwyvAAC:Product__c --
+[09:51:53]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef1377]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCP:--
+[09:51:53]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef1380]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCM:--
+[09:51:53]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef1391]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCN:--
+[09:52:04]  Product_Insurer_Mapping__c: 0 created, 190 failed in batch
+[09:52:04]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef1521]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCP:--
+[09:52:04]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef1568]: FIELD_INTEGRITY_EXCEPTION:Product: id value of incorrect type: a199j000002PwyvAAC:Product__c --
+[09:52:04]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef1569]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCQ:--
+[09:52:04]    ✗ Product_Insurer_Mapping__c[Product_Insurer_Mapping__cRef1660]: INSUFFICIENT_ACCESS_ON_CROSS_REFERENCE_ENTITY:insufficient access rights on cross-reference id: 001QE00000jrXCR:--
