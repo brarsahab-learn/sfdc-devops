@@ -1,0 +1,6 @@
+{
+  "autoCreateExternalId": true,
+  "objects": [],
+  "seedDir": ".git/sf-devops-dm/seed",
+  "batchSize": 190
+}
