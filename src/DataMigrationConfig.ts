@@ -19,6 +19,11 @@ export interface DmConfig {
     objects:   DmObjectConfig[];
     seedDir:   string;
     batchSize: number;
+    // Opt-in: before a load, upsert a per-running-user override of the DataMigrationControls__c
+    // hierarchy custom setting (all automation-disabling fields set true) so triggers/flows/
+    // validation rules don't fire during the bulk upsert; restored to whatever it was — or
+    // deleted, if we created it — once the load ends (success, failure, or cancel).
+    disableAutomationDuringLoad?: boolean;
 }
 
 const CONFIG_FILE = ".sf-devops-dm.json";
@@ -40,6 +45,7 @@ export function readDmConfig(workspaceRoot: string): DmConfig {
             objects:   parsed.objects   ?? [],
             seedDir:   parsed.seedDir   ?? DEFAULT_CONFIG.seedDir,
             batchSize: parsed.batchSize ?? 190,
+            disableAutomationDuringLoad: parsed.disableAutomationDuringLoad ?? false,
         };
     } catch {
         return { ...DEFAULT_CONFIG, objects: [] };

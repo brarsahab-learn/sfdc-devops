@@ -37,6 +37,9 @@ exports.makeController = makeController;
 exports.summarizeObjectResult = summarizeObjectResult;
 exports.pullData = pullData;
 exports.checkExternalId = checkExternalId;
+exports.getRunningUserId = getRunningUserId;
+exports.enableAutomationControl = enableAutomationControl;
+exports.restoreAutomationControl = restoreAutomationControl;
 exports.parseCsv = parseCsv;
 exports.parseImportResult = parseImportResult;
 exports.loadData = loadData;
@@ -411,6 +414,97 @@ async function checkExternalId(targetOrg, sobject, workspaceRoot, onLog) {
     }
 }
 // ---------------------------------------------------------------------------
+// Automation control — opt-in (config.disableAutomationDuringLoad). Before a load, upsert a
+// per-running-user override of the DataMigrationControls__c hierarchy custom setting so
+// triggers/flows/validation rules/etc. don't fire while the bulk upsert runs, then put it back
+// exactly as it was (or remove it, if we created it) once the load ends — success, failure, or
+// cancel all go through the same restore path in loadData's finally block.
+// ---------------------------------------------------------------------------
+const AUTOMATION_CONTROL_SOBJECT = "DataMigrationControls__c";
+const AUTOMATION_CONTROL_FIELDS = [
+    "Disable_Emails_Notifications__c",
+    "Disable_Flows__c",
+    "Disable_Lookup_Filters__c",
+    "Disable_Notification_Flows__c",
+    "Disable_Triggers__c",
+    "Disable_Validation_Rules__c",
+];
+async function getRunningUserId(targetOrg, workspaceRoot) {
+    try {
+        const { stdout: orgInfo } = await (0, SfCli_1.execSf)(["org", "display", "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
+        const username = JSON.parse(orgInfo)?.result?.username;
+        if (typeof username !== "string" || !username) {
+            return null;
+        }
+        const { stdout } = await (0, SfCli_1.execSf)(["data", "query", "--query", `SELECT Id FROM User WHERE Username = '${username.replace(/'/g, "\\'")}'`,
+            "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
+        const records = JSON.parse(stdout)?.result?.records ?? [];
+        return records[0]?.Id ?? null;
+    }
+    catch {
+        return null;
+    }
+}
+/** Sets every field in AUTOMATION_CONTROL_FIELDS to true on the running user's override of
+ *  DataMigrationControls__c, creating that override if none exists yet. Returns enough state to
+ *  undo this exactly via restoreAutomationControl — or null if it couldn't be set up at all
+ *  (missing object/fields, no access, user not resolvable), in which case the load proceeds
+ *  without automation control rather than failing outright. */
+async function enableAutomationControl(targetOrg, workspaceRoot, emit) {
+    const userId = await getRunningUserId(targetOrg, workspaceRoot);
+    if (!userId) {
+        emit(`⚠ Could not resolve the running user in ${targetOrg} — skipping automation control`, "warn");
+        return null;
+    }
+    try {
+        const { stdout } = await (0, SfCli_1.execSf)(["data", "query", "--query",
+            `SELECT Id, ${AUTOMATION_CONTROL_FIELDS.join(", ")} FROM ${AUTOMATION_CONTROL_SOBJECT} WHERE SetupOwnerId = '${userId}'`,
+            "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
+        const existing = (JSON.parse(stdout)?.result?.records ?? [])[0];
+        const trueValues = AUTOMATION_CONTROL_FIELDS.map(f => `${f}=true`).join(" ");
+        if (existing) {
+            await (0, SfCli_1.execSf)(["data", "update", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
+                "--record-id", existing.Id, "--values", trueValues, "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
+            const originalValues = {};
+            for (const f of AUTOMATION_CONTROL_FIELDS) {
+                originalValues[f] = existing[f] === true;
+            }
+            emit(`✓ Automation disabled for load — existing ${AUTOMATION_CONTROL_SOBJECT} override for the running user updated (original values will be restored after)`, "success");
+            return { recordId: existing.Id, created: false, originalValues };
+        }
+        const { stdout: createOut } = await (0, SfCli_1.execSf)(["data", "create", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
+            "--values", `SetupOwnerId=${userId} ${trueValues}`, "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
+        const newId = JSON.parse(createOut)?.result?.id;
+        if (typeof newId !== "string" || !newId) {
+            throw new Error("create record returned no id");
+        }
+        emit(`✓ Automation disabled for load — created a ${AUTOMATION_CONTROL_SOBJECT} override for the running user (will be removed after)`, "success");
+        return { recordId: newId, created: true };
+    }
+    catch (e) {
+        emit(`⚠ Could not set up ${AUTOMATION_CONTROL_SOBJECT} for ${targetOrg}: ${e?.message ?? String(e)} — continuing without automation control`, "warn");
+        return null;
+    }
+}
+async function restoreAutomationControl(targetOrg, workspaceRoot, state, emit) {
+    try {
+        if (state.created) {
+            await (0, SfCli_1.execSf)(["data", "delete", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
+                "--record-id", state.recordId, "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
+            emit(`✓ Removed the ${AUTOMATION_CONTROL_SOBJECT} override created for this load`, "success");
+        }
+        else if (state.originalValues) {
+            const restoreValues = AUTOMATION_CONTROL_FIELDS.map(f => `${f}=${state.originalValues[f]}`).join(" ");
+            await (0, SfCli_1.execSf)(["data", "update", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
+                "--record-id", state.recordId, "--values", restoreValues, "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
+            emit(`✓ Restored the running user's original ${AUTOMATION_CONTROL_SOBJECT} values`, "success");
+        }
+    }
+    catch (e) {
+        emit(`✗ Could not restore ${AUTOMATION_CONTROL_SOBJECT} after the load — check it manually in ${targetOrg}: ${e?.message ?? String(e)}`, "error");
+    }
+}
+// ---------------------------------------------------------------------------
 // Load data helpers
 // ---------------------------------------------------------------------------
 /** Minimal RFC4180 CSV parser — handles quoted fields with embedded commas, quotes, and
@@ -736,7 +830,26 @@ function kahnSort(nodes, deps) {
 // ---------------------------------------------------------------------------
 // loadData (main function)
 // ---------------------------------------------------------------------------
+/** Public entry point — wraps loadDataImpl with automation control (config.
+ *  disableAutomationDuringLoad) so it's set up once before the load and torn down exactly once
+ *  after, regardless of how loadDataImpl exits (success, thrown error, or an early return from
+ *  cancellation). Keeping this as a thin wrapper avoids restructuring loadDataImpl's own control
+ *  flow, which already returns early from several places. */
 async function loadData(targetOrg, workspaceRoot, config, onLog, onProgress, controller, options) {
+    if (!config.disableAutomationDuringLoad || options?.dryRun) {
+        return loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress, controller, options);
+    }
+    const automationState = await enableAutomationControl(targetOrg, workspaceRoot, onLog);
+    try {
+        return await loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress, controller, options);
+    }
+    finally {
+        if (automationState) {
+            await restoreAutomationControl(targetOrg, workspaceRoot, automationState, onLog);
+        }
+    }
+}
+async function loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress, controller, options) {
     const ctrl = asInternal(controller);
     const startMs = Date.now();
     const seedDir = resolvedSeedDir(workspaceRoot, config, options);

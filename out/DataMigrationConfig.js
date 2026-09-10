@@ -72,6 +72,7 @@ function readDmConfig(workspaceRoot) {
             objects: parsed.objects ?? [],
             seedDir: parsed.seedDir ?? DEFAULT_CONFIG.seedDir,
             batchSize: parsed.batchSize ?? 190,
+            disableAutomationDuringLoad: parsed.disableAutomationDuringLoad ?? false,
         };
     }
     catch {

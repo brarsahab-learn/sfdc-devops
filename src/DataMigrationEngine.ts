@@ -486,6 +486,132 @@ export async function checkExternalId(
 }
 
 // ---------------------------------------------------------------------------
+// Automation control — opt-in (config.disableAutomationDuringLoad). Before a load, upsert a
+// per-running-user override of the DataMigrationControls__c hierarchy custom setting so
+// triggers/flows/validation rules/etc. don't fire while the bulk upsert runs, then put it back
+// exactly as it was (or remove it, if we created it) once the load ends — success, failure, or
+// cancel all go through the same restore path in loadData's finally block.
+// ---------------------------------------------------------------------------
+
+const AUTOMATION_CONTROL_SOBJECT = "DataMigrationControls__c";
+const AUTOMATION_CONTROL_FIELDS = [
+    "Disable_Emails_Notifications__c",
+    "Disable_Flows__c",
+    "Disable_Lookup_Filters__c",
+    "Disable_Notification_Flows__c",
+    "Disable_Triggers__c",
+    "Disable_Validation_Rules__c",
+];
+
+interface AutomationControlState {
+    recordId: string;
+    created: boolean; // true: we inserted this override — delete it on restore.
+                       // false: it already existed — restore its original field values.
+    originalValues?: Record<string, boolean>;
+}
+
+export async function getRunningUserId(targetOrg: string, workspaceRoot: string): Promise<string | null> {
+    try {
+        const { stdout: orgInfo } = await execSf(
+            ["org", "display", "--target-org", targetOrg, "--json"],
+            { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
+        );
+        const username = JSON.parse(orgInfo)?.result?.username;
+        if (typeof username !== "string" || !username) { return null; }
+        const { stdout } = await execSf(
+            ["data", "query", "--query", `SELECT Id FROM User WHERE Username = '${username.replace(/'/g, "\\'")}'`,
+             "--target-org", targetOrg, "--json"],
+            { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
+        );
+        const records: any[] = JSON.parse(stdout)?.result?.records ?? [];
+        return (records[0]?.Id as string) ?? null;
+    } catch {
+        return null;
+    }
+}
+
+/** Sets every field in AUTOMATION_CONTROL_FIELDS to true on the running user's override of
+ *  DataMigrationControls__c, creating that override if none exists yet. Returns enough state to
+ *  undo this exactly via restoreAutomationControl — or null if it couldn't be set up at all
+ *  (missing object/fields, no access, user not resolvable), in which case the load proceeds
+ *  without automation control rather than failing outright. */
+export async function enableAutomationControl(
+    targetOrg: string,
+    workspaceRoot: string,
+    emit: LogFn,
+): Promise<AutomationControlState | null> {
+    const userId = await getRunningUserId(targetOrg, workspaceRoot);
+    if (!userId) {
+        emit(`⚠ Could not resolve the running user in ${targetOrg} — skipping automation control`, "warn");
+        return null;
+    }
+
+    try {
+        const { stdout } = await execSf(
+            ["data", "query", "--query",
+             `SELECT Id, ${AUTOMATION_CONTROL_FIELDS.join(", ")} FROM ${AUTOMATION_CONTROL_SOBJECT} WHERE SetupOwnerId = '${userId}'`,
+             "--target-org", targetOrg, "--json"],
+            { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
+        );
+        const existing = (JSON.parse(stdout)?.result?.records ?? [])[0];
+        const trueValues = AUTOMATION_CONTROL_FIELDS.map(f => `${f}=true`).join(" ");
+
+        if (existing) {
+            await execSf(
+                ["data", "update", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
+                 "--record-id", existing.Id, "--values", trueValues, "--target-org", targetOrg, "--json"],
+                { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
+            );
+            const originalValues: Record<string, boolean> = {};
+            for (const f of AUTOMATION_CONTROL_FIELDS) { originalValues[f] = existing[f] === true; }
+            emit(`✓ Automation disabled for load — existing ${AUTOMATION_CONTROL_SOBJECT} override for the running user updated (original values will be restored after)`, "success");
+            return { recordId: existing.Id as string, created: false, originalValues };
+        }
+
+        const { stdout: createOut } = await execSf(
+            ["data", "create", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
+             "--values", `SetupOwnerId=${userId} ${trueValues}`, "--target-org", targetOrg, "--json"],
+            { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
+        );
+        const newId = JSON.parse(createOut)?.result?.id;
+        if (typeof newId !== "string" || !newId) { throw new Error("create record returned no id"); }
+        emit(`✓ Automation disabled for load — created a ${AUTOMATION_CONTROL_SOBJECT} override for the running user (will be removed after)`, "success");
+        return { recordId: newId, created: true };
+    } catch (e: any) {
+        emit(`⚠ Could not set up ${AUTOMATION_CONTROL_SOBJECT} for ${targetOrg}: ${e?.message ?? String(e)} — continuing without automation control`, "warn");
+        return null;
+    }
+}
+
+export async function restoreAutomationControl(
+    targetOrg: string,
+    workspaceRoot: string,
+    state: AutomationControlState,
+    emit: LogFn,
+): Promise<void> {
+    try {
+        if (state.created) {
+            await execSf(
+                ["data", "delete", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
+                 "--record-id", state.recordId, "--target-org", targetOrg, "--json"],
+                { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
+            );
+            emit(`✓ Removed the ${AUTOMATION_CONTROL_SOBJECT} override created for this load`, "success");
+        } else if (state.originalValues) {
+            const restoreValues = AUTOMATION_CONTROL_FIELDS.map(f => `${f}=${state.originalValues![f]}`).join(" ");
+            await execSf(
+                ["data", "update", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
+                 "--record-id", state.recordId, "--values", restoreValues, "--target-org", targetOrg, "--json"],
+                { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
+            );
+            emit(`✓ Restored the running user's original ${AUTOMATION_CONTROL_SOBJECT} values`, "success");
+        }
+    } catch (e: any) {
+        emit(`✗ Could not restore ${AUTOMATION_CONTROL_SOBJECT} after the load — check it manually in ${targetOrg}: ${e?.message ?? String(e)}`, "error");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Load data helpers
 // ---------------------------------------------------------------------------
 
@@ -803,7 +929,34 @@ function kahnSort(nodes: string[], deps: Record<string, string[]>): string[] {
 // loadData (main function)
 // ---------------------------------------------------------------------------
 
+/** Public entry point — wraps loadDataImpl with automation control (config.
+ *  disableAutomationDuringLoad) so it's set up once before the load and torn down exactly once
+ *  after, regardless of how loadDataImpl exits (success, thrown error, or an early return from
+ *  cancellation). Keeping this as a thin wrapper avoids restructuring loadDataImpl's own control
+ *  flow, which already returns early from several places. */
 export async function loadData(
+    targetOrg: string,
+    workspaceRoot: string,
+    config: DmConfig,
+    onLog: LogFn,
+    onProgress: ProgFn,
+    controller: DmRunController,
+    options?: DmRunOptions,
+): Promise<{ loaded: number; failed: number; skipped: number; blocked: number }> {
+    if (!config.disableAutomationDuringLoad || options?.dryRun) {
+        return loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress, controller, options);
+    }
+    const automationState = await enableAutomationControl(targetOrg, workspaceRoot, onLog);
+    try {
+        return await loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress, controller, options);
+    } finally {
+        if (automationState) {
+            await restoreAutomationControl(targetOrg, workspaceRoot, automationState, onLog);
+        }
+    }
+}
+
+async function loadDataImpl(
     targetOrg: string,
     workspaceRoot: string,
     config: DmConfig,
