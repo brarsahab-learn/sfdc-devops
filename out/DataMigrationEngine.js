@@ -1596,14 +1596,93 @@ async function rollbackData(targetOrg, workspaceRoot, config, onLog, options) {
         fs.writeFileSync(csvPath, csvLines.join("\n"), "utf-8");
         let objDeleted = 0;
         let objDeleteFailed = 0;
+        let deleteBulkStdout = "";
         try {
-            const { stdout } = await (0, SfCli_1.execSf)(["data", "delete", "bulk",
+            const result = await (0, SfCli_1.execSf)(["data", "delete", "bulk",
                 "--sobject", obj.sobject,
                 "--file", csvPath,
                 "--target-org", targetOrg,
                 "--wait", "10",
                 "--json"], { cwd: workspaceRoot, timeout: 180000, maxBuffer: 20 * 1024 * 1024 });
-            const parsed = JSON.parse(stdout);
+            deleteBulkStdout = result.stdout;
+        }
+        catch (e) {
+            deleteBulkStdout = e?.stdout ?? "";
+            if (!deleteBulkStdout) {
+                onLog(`Delete bulk failed for ${obj.sobject}: ${e?.message ?? String(e)}`, "error");
+                for (const [refId,] of createdEntries) {
+                    tracking[obj.sobject][refId] = { status: "delete-failed", error: e?.message ?? "execSf error", at: now() };
+                    objDeleteFailed++;
+                }
+                deleted += objDeleted;
+                deleteFailed += objDeleteFailed;
+                fs.unlinkSync(csvPath);
+                (0, DataMigrationConfig_1.writeTracking)(workspaceRoot, targetOrg, tracking);
+                onLog(`✓ ${obj.sobject}: ${objDeleted} deleted, ${objDeleteFailed} failed`, objDeleteFailed > 0 ? "warn" : "success");
+                continue;
+            }
+        }
+        // sf data delete bulk (Bulk API 2.0) returns job-level counters in result,
+        // not a per-record results array. Extract jobId and per-record outcomes.
+        let parsed = {};
+        try {
+            parsed = JSON.parse(deleteBulkStdout);
+        }
+        catch { /* ignore */ }
+        // Extract jobId from result shape or from error message/actions text
+        const jobResult = parsed?.result;
+        const jobId = typeof jobResult?.jobId === "string" ? jobResult.jobId :
+            typeof jobResult?.id === "string" ? jobResult.id :
+                (() => {
+                    const searchText = [parsed?.message ?? "", ...(Array.isArray(parsed?.actions) ? parsed.actions : [])].join(" ");
+                    return searchText.match(/\b(750[a-zA-Z0-9]{12,18})\b/)?.[1];
+                })();
+        if (jobId) {
+            // Fetch real per-record results from the completed bulk job
+            const allResults = await fetchBulkJobAllResults(jobId, targetOrg, tmpDir, "Id", onLog);
+            if (allResults) {
+                // Build a set of target Salesforce IDs that were successfully deleted
+                const deletedSfIds = new Set(allResults.successes.map(s => s.sfId).filter(Boolean));
+                const failuresBySfId = new Map(allResults.failures.map(f => [f.extIdVal, f.error]));
+                for (const [refId, entry] of createdEntries) {
+                    const sfId = entry.id;
+                    if (deletedSfIds.has(sfId)) {
+                        tracking[obj.sobject][refId] = { status: "deleted", at: now() };
+                        objDeleted++;
+                    }
+                    else {
+                        const err = failuresBySfId.get(sfId) ?? "Unknown delete error";
+                        tracking[obj.sobject][refId] = { status: "delete-failed", error: err, at: now() };
+                        objDeleteFailed++;
+                    }
+                }
+            }
+            else {
+                // fetchBulkJobAllResults failed — fall back to job-level counters
+                const successful = jobResult?.successfulRecords ?? jobResult?.numberRecordsProcessed ?? 0;
+                const failed = jobResult?.failedRecords ?? jobResult?.numberRecordsFailed ?? 0;
+                // Mark all as deleted if counters say all succeeded, otherwise unknown
+                if (failed === 0 && successful >= createdEntries.length) {
+                    for (const [refId,] of createdEntries) {
+                        tracking[obj.sobject][refId] = { status: "deleted", at: now() };
+                        objDeleted++;
+                    }
+                }
+                else {
+                    onLog(`  ⚠ Could not get per-record delete results for ${obj.sobject} — ${successful} deleted, ${failed} failed per job counters`, "warn");
+                    objDeleted += successful;
+                    objDeleteFailed += failed;
+                    // Mark what we can
+                    for (const [refId,] of createdEntries) {
+                        if (!tracking[obj.sobject][refId] || tracking[obj.sobject][refId].status === "created") {
+                            tracking[obj.sobject][refId] = { status: "deleted", at: now() };
+                        }
+                    }
+                }
+            }
+        }
+        else {
+            // No jobId — try legacy per-record results array (older CLI versions)
             const results = parsed?.result?.results ?? [];
             for (const [idx, [refId,]] of createdEntries.entries()) {
                 const r = results[idx];
@@ -1618,18 +1697,14 @@ async function rollbackData(targetOrg, workspaceRoot, config, onLog, options) {
                 }
             }
         }
-        catch (e) {
-            onLog(`Delete bulk failed for ${obj.sobject}: ${e?.message ?? String(e)}`, "error");
-            for (const [refId,] of createdEntries) {
-                tracking[obj.sobject][refId] = { status: "delete-failed", error: e?.message ?? "execSf error", at: now() };
-                objDeleteFailed++;
-            }
-        }
         deleted += objDeleted;
         deleteFailed += objDeleteFailed;
         fs.unlinkSync(csvPath);
         (0, DataMigrationConfig_1.writeTracking)(workspaceRoot, targetOrg, tracking);
-        onLog(`✓ ${obj.sobject}: ${objDeleted} deleted`, "success");
+        const deleteMsg = objDeleteFailed > 0
+            ? `${objDeleted} deleted, ${objDeleteFailed} failed`
+            : `${objDeleted} deleted`;
+        onLog(`✓ ${obj.sobject}: ${deleteMsg}`, objDeleteFailed > 0 ? "warn" : "success");
     }
     // Clean up tmp dir if empty
     try {

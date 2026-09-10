@@ -1839,8 +1839,9 @@ export async function rollbackData(
         let objDeleted = 0;
         let objDeleteFailed = 0;
 
+        let deleteBulkStdout = "";
         try {
-            const { stdout } = await execSf(
+            const result = await execSf(
                 ["data", "delete", "bulk",
                  "--sobject", obj.sobject,
                  "--file", csvPath,
@@ -1849,8 +1850,81 @@ export async function rollbackData(
                  "--json"],
                 { cwd: workspaceRoot, timeout: 180_000, maxBuffer: 20 * 1024 * 1024 },
             );
+            deleteBulkStdout = result.stdout;
+        } catch (e: any) {
+            deleteBulkStdout = (e as any)?.stdout ?? "";
+            if (!deleteBulkStdout) {
+                onLog(`Delete bulk failed for ${obj.sobject}: ${e?.message ?? String(e)}`, "error");
+                for (const [refId,] of createdEntries) {
+                    tracking[obj.sobject][refId] = { status: "delete-failed", error: e?.message ?? "execSf error", at: now() };
+                    objDeleteFailed++;
+                }
+                deleted += objDeleted;
+                deleteFailed += objDeleteFailed;
+                fs.unlinkSync(csvPath);
+                writeTracking(workspaceRoot, targetOrg, tracking);
+                onLog(`✓ ${obj.sobject}: ${objDeleted} deleted, ${objDeleteFailed} failed`, objDeleteFailed > 0 ? "warn" : "success");
+                continue;
+            }
+        }
 
-            const parsed = JSON.parse(stdout);
+        // sf data delete bulk (Bulk API 2.0) returns job-level counters in result,
+        // not a per-record results array. Extract jobId and per-record outcomes.
+        let parsed: any = {};
+        try { parsed = JSON.parse(deleteBulkStdout); } catch { /* ignore */ }
+
+        // Extract jobId from result shape or from error message/actions text
+        const jobResult = parsed?.result;
+        const jobId: string | undefined =
+            typeof jobResult?.jobId === "string" ? jobResult.jobId :
+            typeof jobResult?.id    === "string" ? jobResult.id :
+            (() => {
+                const searchText = [parsed?.message ?? "", ...(Array.isArray(parsed?.actions) ? parsed.actions : [])].join(" ");
+                return searchText.match(/\b(750[a-zA-Z0-9]{12,18})\b/)?.[1];
+            })();
+
+        if (jobId) {
+            // Fetch real per-record results from the completed bulk job
+            const allResults = await fetchBulkJobAllResults(jobId, targetOrg, tmpDir, "Id", onLog);
+            if (allResults) {
+                // Build a set of target Salesforce IDs that were successfully deleted
+                const deletedSfIds = new Set(allResults.successes.map(s => s.sfId).filter(Boolean));
+                const failuresBySfId = new Map(allResults.failures.map(f => [f.extIdVal, f.error]));
+                for (const [refId, entry] of createdEntries) {
+                    const sfId = entry.id!;
+                    if (deletedSfIds.has(sfId)) {
+                        tracking[obj.sobject][refId] = { status: "deleted", at: now() };
+                        objDeleted++;
+                    } else {
+                        const err = failuresBySfId.get(sfId) ?? "Unknown delete error";
+                        tracking[obj.sobject][refId] = { status: "delete-failed", error: err, at: now() };
+                        objDeleteFailed++;
+                    }
+                }
+            } else {
+                // fetchBulkJobAllResults failed — fall back to job-level counters
+                const successful: number = jobResult?.successfulRecords ?? jobResult?.numberRecordsProcessed ?? 0;
+                const failed: number     = jobResult?.failedRecords    ?? jobResult?.numberRecordsFailed    ?? 0;
+                // Mark all as deleted if counters say all succeeded, otherwise unknown
+                if (failed === 0 && successful >= createdEntries.length) {
+                    for (const [refId,] of createdEntries) {
+                        tracking[obj.sobject][refId] = { status: "deleted", at: now() };
+                        objDeleted++;
+                    }
+                } else {
+                    onLog(`  ⚠ Could not get per-record delete results for ${obj.sobject} — ${successful} deleted, ${failed} failed per job counters`, "warn");
+                    objDeleted   += successful;
+                    objDeleteFailed += failed;
+                    // Mark what we can
+                    for (const [refId,] of createdEntries) {
+                        if (!tracking[obj.sobject][refId] || tracking[obj.sobject][refId].status === "created") {
+                            tracking[obj.sobject][refId] = { status: "deleted", at: now() };
+                        }
+                    }
+                }
+            }
+        } else {
+            // No jobId — try legacy per-record results array (older CLI versions)
             const results: any[] = parsed?.result?.results ?? [];
             for (const [idx, [refId,]] of createdEntries.entries()) {
                 const r = results[idx];
@@ -1863,12 +1937,6 @@ export async function rollbackData(
                     objDeleteFailed++;
                 }
             }
-        } catch (e: any) {
-            onLog(`Delete bulk failed for ${obj.sobject}: ${e?.message ?? String(e)}`, "error");
-            for (const [refId,] of createdEntries) {
-                tracking[obj.sobject][refId] = { status: "delete-failed", error: e?.message ?? "execSf error", at: now() };
-                objDeleteFailed++;
-            }
         }
 
         deleted += objDeleted;
@@ -1876,7 +1944,10 @@ export async function rollbackData(
 
         fs.unlinkSync(csvPath);
         writeTracking(workspaceRoot, targetOrg, tracking);
-        onLog(`✓ ${obj.sobject}: ${objDeleted} deleted`, "success");
+        const deleteMsg = objDeleteFailed > 0
+            ? `${objDeleted} deleted, ${objDeleteFailed} failed`
+            : `${objDeleted} deleted`;
+        onLog(`✓ ${obj.sobject}: ${deleteMsg}`, objDeleteFailed > 0 ? "warn" : "success");
     }
 
     // Clean up tmp dir if empty
