@@ -139,6 +139,22 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
     return chunks;
 }
 
+/** Renders a per-object load summary that distinguishes genuine new records from upsert updates
+ *  and from records that needed no work at all — plain "0 created" reads as a failure even when
+ *  every record already existed correctly in the target org (e.g. a re-run after a prior success,
+ *  or an idempotent upsert that only matched existing records). */
+export function summarizeObjectResult(status: { created: number; updated: number; alreadyDone: number; total: number }): string {
+    const { created, updated, alreadyDone, total } = status;
+    const parts: string[] = [];
+    if (created > 0) { parts.push(`${created} created`); }
+    if (updated > 0) { parts.push(`${updated} updated`); }
+    if (alreadyDone > 0) { parts.push(`${alreadyDone} already up to date`); }
+    if (parts.length === 0) {
+        return total > 0 ? "0 processed" : "0 created";
+    }
+    return parts.join(", ");
+}
+
 /** Extract the offending field name from a Salesforce error string. */
 function extractBadFieldName(msg: string): string | null {
     const patterns = [
@@ -236,6 +252,14 @@ export async function pullData(
     const startMs = Date.now();
     const pulledObjects: string[] = [];
 
+    // Each object below is pulled with its OWN isolated `sf data export tree` call, so that
+    // command's built-in cross-file @refId linking never sees other objects and just leaves
+    // lookup fields as raw source-org Ids — those Ids don't exist in the target org and every
+    // load then fails on FIELD_INTEGRITY_EXCEPTION / INVALID_CROSS_REFERENCE_KEY. We resolve
+    // these ourselves once each parent's data is available (see resolveObjectLookupRefs below).
+    const idMapsBySobject = new Map<string, Map<string, string>>();
+    const refFieldsBySobject = new Map<string, { field: string; referenceTo: string[] }[]>();
+
     for (let i = 0; i < objects.length; i++) {
         if (ctrl.state === "cancelled") { break; }
 
@@ -243,6 +267,15 @@ export async function pullData(
         onLog(`Pulling ${obj.sobject} (${i + 1}/${objects.length})...`, "info");
 
         let query = obj.query?.trim() || `SELECT Id FROM ${obj.sobject}`;
+
+        // "Id" must be selected for every object — it's how we map this object's own records
+        // back to their referenceId, which lets OTHER objects' lookups to this one resolve to
+        // "@refId" instead of a raw source-org Id (see resolveObjectLookupRefs below).
+        const selectMatch = query.match(/^SELECT\s+([\s\S]+?)\s+FROM\b/i);
+        const topLevelFields = (selectMatch?.[1] ?? "").split(",").map(f => f.trim().split(/\s+/)[0]);
+        if (!topLevelFields.some(f => f.toLowerCase() === "id")) {
+            query = query.replace(/^SELECT\s+/i, "SELECT Id, ");
+        }
 
         if (options?.dryRun && !/LIMIT\s+\d+/i.test(query)) {
             query += ` LIMIT ${options.dryRunSampleSize ?? 5}`;
@@ -275,6 +308,20 @@ export async function pullData(
                     try { fs.rmdirSync(tmpDir); } catch { /* ignore */ }
 
                     pulledObjects.push(obj.sobject);
+                    idMapsBySobject.set(obj.sobject, buildIdToRefMap(seedDir, obj.sobject));
+
+                    // Resolve this object's OWN lookups against every parent pulled so far
+                    // (dependency order means most parents are already available). Any that
+                    // reference a not-yet-pulled parent are caught by the final sweep below.
+                    if (!options?.dryRun) {
+                        const refFields = await getReferenceFields(obj.sobject, sourceOrg, workspaceRoot);
+                        refFieldsBySobject.set(obj.sobject, refFields);
+                        const { resolved } = resolveObjectLookupRefs(seedDir, obj.sobject, refFields, idMapsBySobject);
+                        if (resolved > 0) {
+                            onLog(`  → Resolved ${resolved} lookup reference(s) on ${obj.sobject} to @refId`, "info");
+                        }
+                    }
+
                     onLog(`✓ Pulled ${obj.sobject}: ${recordCount} record${recordCount !== 1 ? "s" : ""}`, "success");
                     break; // success
                 }
@@ -335,6 +382,26 @@ export async function pullData(
         });
     }
 
+    // Final sweep: re-resolve every object's lookups now that ALL objects have been pulled —
+    // catches a child pulled before its parent (out of dependency order), which the per-object
+    // pass above couldn't resolve yet since that parent's id map didn't exist at the time.
+    if (!options?.dryRun) {
+        let totalResolved = 0;
+        let totalUnresolved = 0;
+        for (const sobject of pulledObjects) {
+            const refFields = refFieldsBySobject.get(sobject) ?? [];
+            const { resolved, unresolved } = resolveObjectLookupRefs(seedDir, sobject, refFields, idMapsBySobject);
+            totalResolved += resolved;
+            totalUnresolved += unresolved;
+        }
+        if (totalResolved > 0) {
+            onLog(`✓ Resolved ${totalResolved} additional cross-object lookup reference(s) after all objects were pulled`, "success");
+        }
+        if (totalUnresolved > 0) {
+            onLog(`⚠  ${totalUnresolved} lookup reference(s) point to a parent record that wasn't pulled (filtered out by its SOQL, or the object isn't in this migration) — those will load with their raw source-org Id and likely fail`, "warn");
+        }
+    }
+
     // Write a summary plan.json (not the sf export plan — our own manifest)
     if (!options?.dryRun) {
         const planPath = path.join(seedDir, "plan.json");
@@ -346,6 +413,97 @@ export async function pullData(
     }
 
     return { pulled: pulledObjects.length, objects: pulledObjects };
+}
+
+/** Describe an object and return its lookup/master-detail fields with their target object(s) —
+ *  used to resolve cross-object lookups into "@refId" placeholders after a per-object pull
+ *  (each object is pulled with its own isolated `sf data export tree` call, so that command's
+ *  own built-in cross-file reference linking never has visibility across objects — see
+ *  resolvePulledLookupRefs). */
+async function getReferenceFields(
+    sobject: string,
+    org: string,
+    workspaceRoot: string,
+): Promise<{ field: string; referenceTo: string[] }[]> {
+    try {
+        const { stdout } = await execSf(
+            ["sobject", "describe", "--sobject", sobject, "--target-org", org, "--json"],
+            { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 10 * 1024 * 1024 },
+        );
+        const parsed = JSON.parse(stdout);
+        const fields: any[] = parsed?.result?.fields ?? [];
+        return fields
+            .filter(f => f.type === "reference" && Array.isArray(f.referenceTo) && f.referenceTo.length > 0)
+            .map(f => ({ field: f.name as string, referenceTo: f.referenceTo as string[] }));
+    } catch {
+        return [];
+    }
+}
+
+/** Build a map of {Salesforce record Id -> our referenceId} for every record already pulled for
+ *  one sobject, from its seed file. Used to resolve OTHER objects' lookup fields that point to
+ *  this object's records. */
+export function buildIdToRefMap(seedDir: string, sobject: string): Map<string, string> {
+    const map = new Map<string, string>();
+    for (const record of readSeedRecords(seedDir, sobject)) {
+        const id = record.Id as string | undefined;
+        const refId = record.attributes?.referenceId as string | undefined;
+        if (id && refId) { map.set(id, refId); }
+    }
+    return map;
+}
+
+/** Rewrites one object's seed file in place, replacing any lookup field value that's a raw
+ *  Salesforce Id of an already-pulled parent record with "@<parentRefId>" — the same placeholder
+ *  syntax `sf data export tree` itself uses, which loadData's substituteRefs() already resolves
+ *  against the target org's newly-created/matched Ids at load time. A field is left untouched
+ *  (and reported) when it points to an object we have no id map for yet — either that parent
+ *  hasn't been pulled yet, or it's genuinely outside this migration (e.g. a lookup to User). */
+export function resolveObjectLookupRefs(
+    seedDir: string,
+    sobject: string,
+    referenceFields: { field: string; referenceTo: string[] }[],
+    idMapsBySobject: Map<string, Map<string, string>>,
+): { resolved: number; unresolved: number } {
+    if (referenceFields.length === 0) { return { resolved: 0, unresolved: 0 }; }
+    const candidates = [
+        path.join(seedDir, `${sobject}s.json`),
+        path.join(seedDir, `${sobject}.json`),
+    ];
+    const filePath = candidates.find(fp => fs.existsSync(fp));
+    if (!filePath) { return { resolved: 0, unresolved: 0 }; }
+
+    const raw = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    const records: Record<string, any>[] = raw?.records ?? raw;
+    let resolved = 0, unresolved = 0;
+
+    for (const record of records) {
+        for (const { field, referenceTo } of referenceFields) {
+            const value = record[field];
+            if (typeof value !== "string" || value === "" || value.startsWith("@")) { continue; }
+            let ref: string | undefined;
+            for (const parentType of referenceTo) {
+                ref = idMapsBySobject.get(parentType)?.get(value);
+                if (ref) { break; }
+            }
+            if (ref) {
+                record[field] = `@${ref}`;
+                resolved++;
+            } else if (referenceTo.some(t => idMapsBySobject.has(t))) {
+                // A parent we DID pull, but this specific Id wasn't among its records —
+                // genuinely unresolved (parent record excluded by its own SOQL filter, etc.).
+                unresolved++;
+            }
+            // else: parentType isn't one of our migrated objects at all (e.g. a lookup to
+            // User/Owner) — leave the raw Id as-is, that's correct for an in-org reference.
+        }
+    }
+
+    if (resolved > 0 || unresolved > 0) {
+        raw.records = records;
+        fs.writeFileSync(filePath, JSON.stringify(raw, null, 2), "utf-8");
+    }
+    return { resolved, unresolved };
 }
 
 // ---------------------------------------------------------------------------
@@ -674,7 +832,7 @@ export function parseImportResult(stdout: string): {
     created: string[];
     createdByRef: Map<string, string>;
     failed: { refId: string; error: string }[];
-    resultItems: { sfId: string; success: boolean; error: string }[]; // full positional list
+    resultItems: { sfId: string; success: boolean; error: string; wasNewRecord: boolean }[]; // full positional list
     limitException: boolean;
     jobId?: string; // Bulk API 2.0 job id — set only on the "N records failed" top-level error,
                      // so the caller can fetch the real per-record reasons via `sf data bulk results`.
@@ -682,7 +840,7 @@ export function parseImportResult(stdout: string): {
     const created: string[] = [];
     const createdByRef = new Map<string, string>();
     const failed: { refId: string; error: string }[] = [];
-    const resultItems: { sfId: string; success: boolean; error: string }[] = [];
+    const resultItems: { sfId: string; success: boolean; error: string; wasNewRecord: boolean }[] = [];
     let limitException = false;
 
     try {
@@ -723,7 +881,12 @@ export function parseImportResult(stdout: string): {
                 const refId = (item.referenceId ?? item.refId ?? "") as string;
                 created.push(sfId);
                 if (refId) { createdByRef.set(refId, sfId); }
-                resultItems.push({ sfId, success: true, error: "" });
+                // Bulk upsert reports `created: false` for a row that matched an existing
+                // record and was updated rather than inserted. Import tree has no such concept
+                // (every row it returns is a genuine new record) — item.created is absent there,
+                // so this defaults to true.
+                const wasNewRecord = item.created !== false;
+                resultItems.push({ sfId, success: true, error: "", wasNewRecord });
             } else {
                 const errText = hasErrors
                     ? (item.errors as any[]).map((e: any) => e.message ?? String(e)).join("; ")
@@ -732,7 +895,7 @@ export function parseImportResult(stdout: string): {
                 if (errStr.includes("LimitException")) { limitException = true; }
                 const refId = (item.referenceId ?? item.refId ?? "") as string;
                 failed.push({ refId, error: errStr });
-                resultItems.push({ sfId: "", success: false, error: errStr });
+                resultItems.push({ sfId: "", success: false, error: errStr, wasNewRecord: false });
             }
         }
     } catch {
@@ -842,9 +1005,9 @@ export async function loadData(
     // ------------------------------------------------------------------
     // Object statuses for progress events
     // ------------------------------------------------------------------
-    const objStatusMap = new Map<string, { status: "done" | "running" | "pending" | "skipped"; created: number; total: number }>();
+    const objStatusMap = new Map<string, { status: "done" | "running" | "pending" | "skipped"; created: number; updated: number; alreadyDone: number; total: number }>();
     for (const o of objectsToProcess) {
-        objStatusMap.set(o.sobject, { status: "pending", created: 0, total: 0 });
+        objStatusMap.set(o.sobject, { status: "pending", created: 0, updated: 0, alreadyDone: 0, total: 0 });
     }
 
     let totalLoaded = 0;
@@ -911,7 +1074,7 @@ export async function loadData(
         const allRecords = readSeedRecords(seedDir, obj.sobject);
         if (allRecords.length === 0) {
             emit(`No seed records found for ${obj.sobject} — skipping`, "warn");
-            objStatusMap.set(obj.sobject, { status: "skipped", created: 0, total: 0 });
+            objStatusMap.set(obj.sobject, { status: "skipped", created: 0, updated: 0, alreadyDone: 0, total: 0 });
             continue;
         }
 
@@ -953,7 +1116,10 @@ export async function loadData(
                 const refId = (raw.attributes?.referenceId as string | undefined) ?? `${obj.sobject}Ref${globalRecIdx}`;
 
                 // Skip already-created records
-                if (tracking[obj.sobject][refId]?.status === "created") { continue; }
+                if (tracking[obj.sobject][refId]?.status === "created") {
+                    objStatusMap.get(obj.sobject)!.alreadyDone++;
+                    continue;
+                }
 
                 const { record: subbed, missingRefs } = substituteRefs(raw, globalRefIndex);
                 if (missingRefs.length > 0) {
@@ -987,10 +1153,11 @@ export async function loadData(
                 obj, processable, targetOrg, workspaceRoot, tmpDir,
                 tracking, globalRefIndex,
                 emit,
-                (created, failed) => {
-                    totalLoaded += created;
+                (created, updated, failed) => {
+                    totalLoaded += created + updated;
                     totalFailed += failed;
                     objStatusMap.get(obj.sobject)!.created += created;
+                    objStatusMap.get(obj.sobject)!.updated += updated;
                 },
                 effectiveBatchSize,
                 !obj.externalIdField ? insertedThisObject : undefined,
@@ -1010,7 +1177,7 @@ export async function loadData(
 
         const finalStatus = objectSkipped ? "skipped" : "done";
         objStatusMap.set(obj.sobject, { ...objStatusMap.get(obj.sobject)!, status: finalStatus });
-        emit(`✓ ${obj.sobject}: ${objStatusMap.get(obj.sobject)!.created} created`, "success");
+        emit(`✓ ${obj.sobject}: ${summarizeObjectResult(objStatusMap.get(obj.sobject)!)}`, "success");
     }
 
     // ------------------------------------------------------------------
@@ -1111,7 +1278,7 @@ async function loadBatch(
     tracking: TrackingFile,
     globalRefIndex: Map<string, string>,
     emit: LogFn,
-    onCount: (created: number, failed: number) => void,
+    onCount: (created: number, updated: number, failed: number) => void,
     maxBatchSize: number,
     insertedRecords?: { refId: string; sfId: string }[],
 ): Promise<void> {
@@ -1201,10 +1368,11 @@ async function loadBatch(
     //                  (bulk results have no referenceId, so createdByRef is empty)
     if (resultItems.length > 0 || createdByRef.size > 0 || attemptFailed) {
         let batchCreated = 0;
+        let batchUpdated = 0;
         let batchFailed = 0;
         for (let i = 0; i < processable.length; i++) {
             const { refId } = processable[i];
-            // Import tree path: lookup by referenceId
+            // Import tree path: lookup by referenceId — always a genuine new record
             const sfIdByRef = createdByRef.get(refId);
             if (sfIdByRef) {
                 tracking[obj.sobject][refId] = { status: "created", id: sfIdByRef, at: now() };
@@ -1213,12 +1381,14 @@ async function loadBatch(
                 batchCreated++;
                 continue;
             }
-            // Upsert bulk path: positional result (full list includes successes AND failures)
+            // Upsert bulk path: positional result (full list includes successes AND failures).
+            // "created" tracking status covers both — it means "exists correctly in the target
+            // org", regardless of whether this run inserted it or matched+updated an existing one.
             const posResult = resultItems[i];
             if (posResult?.success) {
                 tracking[obj.sobject][refId] = { status: "created", id: posResult.sfId, at: now() };
                 globalRefIndex.set(refId, posResult.sfId);
-                batchCreated++;
+                if (posResult.wasNewRecord) { batchCreated++; } else { batchUpdated++; }
             } else {
                 const failedByRef = failed.find(f => f.refId === refId);
                 const err = failedByRef?.error ?? posResult?.error ?? (attemptFailed ? "Batch failed" : "No result");
@@ -1226,9 +1396,13 @@ async function loadBatch(
                 batchFailed++;
             }
         }
-        onCount(batchCreated, batchFailed);
+        onCount(batchCreated, batchUpdated, batchFailed);
         if (batchFailed > 0) {
-            emit(`${obj.sobject}: ${batchCreated} created, ${batchFailed} failed in batch`, "warn");
+            const parts = [];
+            if (batchCreated > 0) { parts.push(`${batchCreated} created`); }
+            if (batchUpdated > 0) { parts.push(`${batchUpdated} updated`); }
+            if (parts.length === 0) { parts.push("0 created"); }
+            emit(`${obj.sobject}: ${parts.join(", ")}, ${batchFailed} failed in batch`, "warn");
             const seenHints = new Set<string>();
             for (const f of failed) {
                 const hint = parseFieldError(obj.sobject, f.error);
@@ -1248,7 +1422,7 @@ async function loadBatch(
         for (const { refId } of processable) {
             tracking[obj.sobject][refId] = { status: "failed", error: "No parseable result", at: now() };
         }
-        onCount(0, processable.length);
+        onCount(0, 0, processable.length);
         emit(`${obj.sobject}: batch failed — no parseable result`, "error");
     }
 }

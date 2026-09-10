@@ -3,6 +3,7 @@
 src/**
 test/**
 node_modules/**
+temp/**
 **/*.ts
 **/*.map
 .gitignore
