@@ -71,6 +71,8 @@ export class AdminPanel {
     }
 
     private async _saveEnvironments(envs: EnvironmentSetting[]): Promise<void> {
+        const role = getEffectiveRole(this._ctx);
+        if (!canAccessConfig(role)) { return; }
         try {
             await saveEnvironments(envs);
             vscode.window.showInformationMessage("Pipeline branch configuration saved.");
@@ -99,6 +101,8 @@ export class AdminPanel {
     }
 
     private async _setOrgAlias(key: string, alias: string): Promise<void> {
+        const role = getEffectiveRole(this._ctx);
+        if (!canAccessConfig(role)) { return; }
         await setOrgAliasSlot(key, alias.trim());
         await this._refresh();
     }
@@ -298,6 +302,7 @@ ${isAdmin ? `
   </div>
 </div>
 
+<script type="application/json" id="__sfdo-env-data__">${envData}</script>
 <script>
   const vscode = acquireVsCodeApi();
   function send(cmd, arg) { vscode.postMessage({ command: cmd, days: typeof arg === 'number' ? arg : undefined }); }
@@ -308,7 +313,7 @@ ${isAdmin ? `
 
   /* ── Pipeline / Branch editor ── */
   var envs = (function() {
-    try { return JSON.parse('${envData}').map(function(e) { return Object.assign({}, e); }); }
+    try { return JSON.parse(document.getElementById('__sfdo-env-data__').textContent).map(function(e) { return Object.assign({}, e); }); }
     catch(e) { return []; }
   })();
 

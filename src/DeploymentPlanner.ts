@@ -13,6 +13,7 @@ export function isLikelyTestClass(name: string): boolean {
     return /(_Test|Test|Tests)$/.test(name) || /^Test/.test(name);
 }
 
+/** "NoTestRun" is an internal sentinel — DeploymentEngine omits --test-level when this value is returned; it is never passed to the SF CLI directly. */
 export const VALID_TEST_LEVELS = ["NoTestRun", "RunSpecifiedTests", "RunLocalTests", "RunAllTestsInOrg"];
 
 /**
@@ -44,7 +45,10 @@ export function resolveEffectiveTestLevel(
     if (apexClassesInSelection.length > 0) { return { testLevel: "RunLocalTests" }; }
     // No Apex in the deployment package.
     if (!isProd) { return { testLevel: "NoTestRun" }; }
-    return { testLevel: VALID_TEST_LEVELS.includes(configuredLevel) ? configuredLevel : "RunLocalTests" };
+    // Production deployments must always run tests — never allow NoTestRun for prod
+    const validProdLevel = (configuredLevel !== "NoTestRun" && VALID_TEST_LEVELS.includes(configuredLevel))
+        ? configuredLevel : "RunLocalTests";
+    return { testLevel: validProdLevel };
 }
 
 /** Apex class basenames (excluding test classes themselves) among the given files — used to figure out which tests to auto-pick for exactly what's being deployed/validated. */
@@ -139,13 +143,22 @@ export function groupChangesByStory(
 
     // Flag files shared across more than one group — surfaced for the user to decide,
     // never auto-resolved (see the deferred dependency-resolution work in the plan).
-    for (let i = 0; i < groups.length; i++) {
-        for (let j = i + 1; j < groups.length; j++) {
-            const a = groups[i], b = groups[j];
-            const shareFiles = a.files.some(f => b.files.some(g => g.path === f.path));
-            if (shareFiles) {
-                if (!a.sharedWith.includes(b.storyId)) { a.sharedWith.push(b.storyId); }
-                if (!b.sharedWith.includes(a.storyId)) { b.sharedWith.push(a.storyId); }
+    // Map-based O(n*m) approach instead of O(n²*m²) nested loops.
+    const fileToGroupIndices = new Map<string, number[]>();
+    groups.forEach((g, i) => {
+        for (const f of g.files) {
+            const arr = fileToGroupIndices.get(f.path) ?? [];
+            arr.push(i);
+            fileToGroupIndices.set(f.path, arr);
+        }
+    });
+    for (const indices of fileToGroupIndices.values()) {
+        if (indices.length < 2) { continue; }
+        for (let a = 0; a < indices.length; a++) {
+            for (let b = a + 1; b < indices.length; b++) {
+                const ga = groups[indices[a]], gb = groups[indices[b]];
+                if (!ga.sharedWith.includes(gb.storyId)) { ga.sharedWith.push(gb.storyId); }
+                if (!gb.sharedWith.includes(ga.storyId)) { gb.sharedWith.push(ga.storyId); }
             }
         }
     }

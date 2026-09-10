@@ -360,8 +360,7 @@ export async function activate(context: vscode.ExtensionContext) {
             await prepare2gpBetaCommand(bbClient, gitHelper, context);
         }),
         vscode.commands.registerCommand("sfDevops.openDataMigration", () => {
-            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-            DataMigrationPanel.createOrShow(context, root);
+            DataMigrationPanel.createOrShow(context, gitHelper.getWorkspaceRoot());
         })
     );
 
@@ -380,7 +379,7 @@ export async function activate(context: vscode.ExtensionContext) {
     });
 
     // ── Warn if feature branch is behind prod on startup ────────────────────
-    checkBranchStaleness(gitHelper, storyProvider);
+    checkBranchStaleness(gitHelper, storyProvider).catch(e => console.error("[sfDevops] checkBranchStaleness failed:", e));
 
     envProvider.refresh();
 }

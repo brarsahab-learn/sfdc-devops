@@ -818,6 +818,7 @@ export class DeploymentDashboardPanel {
 
     /** Diff between two environment branches — used by the "diff vs next env" preview list. */
     private async _viewFileDiff(msg: { targetEnv: string; beforeRef: string; beforeLabel: string; afterRef: string; afterLabel: string; path: string }) {
+        if (!msg.path || msg.path.includes('..') || msg.path.startsWith('/')) { return; }
         const before = await this._gitHelper.fileContentAtRef(msg.beforeRef, msg.path);
         const after  = await this._gitHelper.fileContentAtRef(msg.afterRef, msg.path);
         this._panel.webview.postMessage({
@@ -829,6 +830,7 @@ export class DeploymentDashboardPanel {
 
     /** Diff between what's actually deployed (or the previous stage, if never deployed) and this environment's pending branch content — used by clicking a file row in the left tree. A small targeted lookup, not a full _buildViewModel() rebuild. */
     private async _viewPendingFileDiff(msg: { env: string; path: string }) {
+        if (!msg.path || msg.path.includes('..') || msg.path.startsWith('/')) { return; }
         const publishEnv = getPublishEnvironment();
         const promotable = getPromotableEnvironments();
         const env = [publishEnv, ...promotable].find(e => e.name === msg.env);

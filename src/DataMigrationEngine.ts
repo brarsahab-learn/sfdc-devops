@@ -131,6 +131,13 @@ function now(): string {
     return new Date().toISOString();
 }
 
+function csvEscape(val: string): string {
+    if (val.includes(",") || val.includes('"') || val.includes("\n")) {
+        return `"${val.replace(/"/g, '""')}"`;
+    }
+    return val;
+}
+
 function chunkArray<T>(arr: T[], size: number): T[][] {
     const chunks: T[][] = [];
     for (let i = 0; i < arr.length; i += size) {
@@ -470,7 +477,25 @@ export function resolveObjectLookupRefs(
         path.join(seedDir, `${sobject}s.json`),
         path.join(seedDir, `${sobject}.json`),
     ];
-    const filePath = candidates.find(fp => fs.existsSync(fp));
+    let filePath = candidates.find(fp => fs.existsSync(fp));
+    // Fallback: scan all .json files for one whose records have attributes.type matching sobject.
+    // Handles sf data export tree files with timestamps, relationship suffixes, etc.
+    if (!filePath) {
+        try {
+            for (const entry of fs.readdirSync(seedDir)) {
+                if (!entry.endsWith(".json") || entry === "plan.json") { continue; }
+                const fp = path.join(seedDir, entry);
+                try {
+                    const raw = JSON.parse(fs.readFileSync(fp, "utf-8"));
+                    const recs: any[] = raw?.records ?? (Array.isArray(raw) ? raw : []);
+                    if (recs.length > 0 && recs[0]?.attributes?.type?.toLowerCase() === sobject.toLowerCase()) {
+                        filePath = fp;
+                        break;
+                    }
+                } catch { /* skip unparseable files */ }
+            }
+        } catch { /* seedDir unreadable */ }
+    }
     if (!filePath) { return { resolved: 0, unresolved: 0 }; }
 
     const raw = JSON.parse(fs.readFileSync(filePath, "utf-8"));
@@ -586,8 +611,9 @@ export async function createExternalIdField(
 
     onLog(`Deploy job started: ${jobId}`, "info");
 
-    // Poll until done
-    for (;;) {
+    // Poll until done — 100 × 3000ms ≈ 5 minutes maximum
+    const maxPolls = 100;
+    for (let poll = 0; poll < maxPolls; poll++) {
         await sleep(3000);
         const { stdout: reportOut } = await execSf(
             ["project", "deploy", "report", "--job-id", jobId, "--target-org", targetOrg, "--json"],
@@ -601,6 +627,9 @@ export async function createExternalIdField(
             const errors = (report?.result?.details?.componentFailures ?? [])
                 .map((f: any) => f.problem).join("; ");
             throw new Error(`Deploy failed for ${sobject} External_Id__c: ${errors || status}`);
+        }
+        if (poll === maxPolls - 1) {
+            throw new Error(`ExternalId field deploy timed out after 5 minutes`);
         }
     }
 
@@ -671,7 +700,7 @@ function applyNamespace(record: Record<string, any>, ns: string): Record<string,
     if (!ns) { return record; }
     const result: Record<string, any> = {};
     for (const [key, value] of Object.entries(record)) {
-        if ((key.endsWith("__c") || key.endsWith("__r")) && !key.includes("__")) {
+        if ((key.endsWith("__c") || key.endsWith("__r")) && (key.match(/__/g) || []).length === 1) {
             result[`${ns}__${key}`] = value;
         } else {
             result[key] = value;
@@ -780,6 +809,67 @@ async function fetchBulkJobFailures(
             try { fs.unlinkSync(path.join(tmpDir, `${jobId}${suffix}`)); } catch { /* ignore */ }
         }
         return out;
+    } catch {
+        return null;
+    }
+}
+
+/** Fetch both success and failure records from a completed Bulk API 2.0 job.
+ * Returns null if the `sf data bulk results` call fails or produces no CSV paths.
+ * Fixes the case where execSf throws for partial failures (non-zero exit) but some
+ * records actually succeeded — the success CSV always has the full truth.
+ */
+async function fetchBulkJobAllResults(
+    jobId: string,
+    targetOrg: string,
+    tmpDir: string,
+    extField: string,
+): Promise<{
+    successes: { extIdVal: string; sfId: string; wasNewRecord: boolean }[];
+    failures: { extIdVal: string; error: string }[];
+} | null> {
+    try {
+        const { stdout } = await execSf(
+            ["data", "bulk", "results", "--job-id", jobId, "--target-org", targetOrg, "--json"],
+            { cwd: tmpDir, timeout: 60_000, maxBuffer: 20 * 1024 * 1024 },
+        );
+        const parsed = JSON.parse(stdout);
+
+        const successes: { extIdVal: string; sfId: string; wasNewRecord: boolean }[] = [];
+        const failures: { extIdVal: string; error: string }[] = [];
+
+        const successFilePath: string | undefined = parsed?.result?.successFilePath;
+        if (successFilePath) {
+            const csvPath = path.isAbsolute(successFilePath) ? successFilePath : path.join(tmpDir, successFilePath);
+            if (fs.existsSync(csvPath)) {
+                for (const r of parseCsv(fs.readFileSync(csvPath, "utf-8"))) {
+                    successes.push({
+                        extIdVal: r[extField] ?? "",
+                        sfId: r["sf__Id"] ?? r["Id"] ?? "",
+                        wasNewRecord: r["sf__Created"] === "true",
+                    });
+                }
+            }
+        }
+
+        const failedFilePath: string | undefined = parsed?.result?.failedFilePath;
+        if (failedFilePath) {
+            const csvPath = path.isAbsolute(failedFilePath) ? failedFilePath : path.join(tmpDir, failedFilePath);
+            if (fs.existsSync(csvPath)) {
+                for (const r of parseCsv(fs.readFileSync(csvPath, "utf-8"))) {
+                    failures.push({
+                        extIdVal: r[extField] ?? "",
+                        error: r["sf__Error"] || "Unknown error (see failed-records CSV)",
+                    });
+                }
+            }
+        }
+
+        for (const suffix of ["-success-records.csv", "-failed-records.csv", "-unprocessed-records.csv"]) {
+            try { fs.unlinkSync(path.join(tmpDir, `${jobId}${suffix}`)); } catch { /* ignore */ }
+        }
+
+        return { successes, failures };
     } catch {
         return null;
     }
@@ -1018,6 +1108,9 @@ export async function loadData(
     const tmpDir = path.join(workspaceRoot, ".git", "sf-devops-dm", "tmp-load");
     fs.mkdirSync(tmpDir, { recursive: true });
 
+    // Computed once and cached — avoids synchronous disk reads on every batch progress emit.
+    let cachedGrandTotal: number | null = null;
+
     const buildProgressEvent = (
         obj: DmObjectConfig,
         objIdx: number,
@@ -1028,10 +1121,13 @@ export async function loadData(
     ): DmProgressEvent => {
         const elapsedMs = Date.now() - startMs;
         const recordsDone = totalLoaded + totalFailed + totalSkipped + totalBlocked + batchDone;
-        const grandTotal = objectsToProcess.reduce((sum, o) => {
-            const recs = readSeedRecords(seedDir, o.sobject);
-            return sum + recs.length;
-        }, 0);
+        if (cachedGrandTotal === null) {
+            cachedGrandTotal = objectsToProcess.reduce((sum, o) => {
+                const recs = readSeedRecords(seedDir, o.sobject);
+                return sum + recs.length;
+            }, 0);
+        }
+        const grandTotal = cachedGrandTotal;
         const remaining = Math.max(0, grandTotal - recordsDone);
         const estimatedRemainingMs = recordsDone > 0
             ? Math.round((elapsedMs / recordsDone) * remaining)
@@ -1112,7 +1208,7 @@ export async function loadData(
 
             for (let recIdx = 0; recIdx < batch.length; recIdx++) {
                 const raw = batch[recIdx];
-                const globalRecIdx = batchIdx * config.batchSize + recIdx;
+                const globalRecIdx = batchIdx * effectiveBatchSize + recIdx;
                 const refId = (raw.attributes?.referenceId as string | undefined) ?? `${obj.sobject}Ref${globalRecIdx}`;
 
                 // Skip already-created records
@@ -1240,7 +1336,7 @@ async function backfillExternalIds(
 
     // Build CSV: Id + ExternalId field. Upsert-by-Id is a bulk update.
     const header = `Id,${extField}`;
-    const rows   = insertedRecords.map(r => `${r.sfId},${r.refId}`);
+    const rows   = insertedRecords.map(r => `${csvEscape(r.sfId)},${csvEscape(r.refId)}`);
     const csvPath = path.join(tmpDir, `${safeOrgName(obj.sobject)}-backfill-${Date.now()}.csv`);
     fs.writeFileSync(csvPath, [header, ...rows].join("\n"), "utf-8");
 
@@ -1285,6 +1381,7 @@ async function loadBatch(
     let stdout = "";
     let attemptFailed = false;
 
+    let loadFilePath: string | undefined;
     try {
         if (obj.externalIdField) {
             // Upsert via bulk CSV.
@@ -1298,6 +1395,7 @@ async function loadBatch(
             }));
             const csv = buildCsv(records, extField);
             const csvPath = path.join(tmpDir, `${safeOrgName(obj.sobject)}-${Date.now()}.csv`);
+            loadFilePath = csvPath;
             fs.writeFileSync(csvPath, csv, "utf-8");
 
             const result = await execSf(
@@ -1311,7 +1409,6 @@ async function loadBatch(
                 { cwd: workspaceRoot, timeout: 180_000, maxBuffer: 50 * 1024 * 1024 },
             );
             stdout = result.stdout;
-            fs.unlinkSync(csvPath);
         } else {
             // Import tree JSON
             const treePayload = {
@@ -1321,6 +1418,7 @@ async function loadBatch(
                 })),
             };
             const jsonPath = path.join(tmpDir, `${safeOrgName(obj.sobject)}-${Date.now()}.json`);
+            loadFilePath = jsonPath;
             fs.writeFileSync(jsonPath, JSON.stringify(treePayload, null, 2), "utf-8");
 
             const result = await execSf(
@@ -1331,24 +1429,54 @@ async function loadBatch(
                 { cwd: workspaceRoot, timeout: 180_000, maxBuffer: 50 * 1024 * 1024 },
             );
             stdout = result.stdout;
-            fs.unlinkSync(jsonPath);
         }
     } catch (e: any) {
         stdout = e?.stdout ?? "";
         attemptFailed = true;
+    } finally {
+        if (loadFilePath && fs.existsSync(loadFilePath)) {
+            try { fs.unlinkSync(loadFilePath); } catch { /* ignore */ }
+        }
     }
 
     const parsedResult = parseImportResult(stdout);
     const { created, createdByRef, resultItems, limitException, jobId } = parsedResult;
     let failed = parsedResult.failed;
 
-    // Bulk API 2.0 only ever reports "N records failed" with no per-record reason — fetch the
-    // real ones (e.g. REQUIRED_FIELD_MISSING, DUPLICATE_VALUE) via `sf data bulk results` so the
-    // log shows what actually broke instead of a single opaque summary line.
+    // Bulk API 2.0 exits non-zero even when SOME records succeed — fetch both success and
+    // failure CSVs so we can correctly mark successes without re-inserting them on retry,
+    // and surface per-record errors instead of the opaque "N records failed" summary.
     if (jobId && obj.externalIdField) {
-        const realFailures = await fetchBulkJobFailures(jobId, targetOrg, tmpDir, obj.externalIdField);
-        if (realFailures && realFailures.length > 0) {
-            failed = realFailures;
+        const extField = obj.externalIdField;
+        const allResults = await fetchBulkJobAllResults(jobId, targetOrg, tmpDir, extField);
+        if (allResults) {
+            // Build lookup maps keyed by the ExternalId field value that was in the CSV.
+            // The CSV column always contains record[extField] ?? refId (see CSV construction above),
+            // so matching on that value correctly handles both native and synthetic ExternalIds.
+            const successByExtId = new Map(allResults.successes.map(s => [s.extIdVal, s]));
+            const failureByExtId = new Map(allResults.failures.map(f => [f.extIdVal, f]));
+
+            // Rebuild resultItems positionally so the main mapping loop works correctly.
+            resultItems.length = 0;
+            for (const p of processable) {
+                const extIdVal = String(p.record[extField] ?? p.refId);
+                const success = successByExtId.get(extIdVal);
+                const failure = failureByExtId.get(extIdVal);
+                if (success) {
+                    resultItems.push({ sfId: success.sfId, success: true, error: "", wasNewRecord: success.wasNewRecord });
+                } else {
+                    resultItems.push({ sfId: "", success: false, error: failure?.error ?? "Unknown error", wasNewRecord: false });
+                }
+            }
+
+            // If we successfully reconstructed full results, clear the attemptFailed flag so
+            // the main mapping loop uses resultItems instead of the fallback "all failed" path.
+            if (resultItems.length === processable.length) {
+                attemptFailed = false;
+            }
+
+            // Update failed list with correct per-record errors keyed by extIdVal.
+            failed = allResults.failures.map(f => ({ refId: f.extIdVal, error: f.error }));
         }
     }
 
@@ -1524,14 +1652,7 @@ export async function autoSortByDependencies(
     // ------------------------------------------------------------------
     const inDegree = new Map<string, number>();
     for (const o of objects) { inDegree.set(o.sobject, 0); }
-    for (const [, deps] of finalDeps) {
-        for (const dep of deps) {
-            // dep must come BEFORE the object that depends on it — dep has no extra in-degree here;
-            // the object that references dep gets +1 for each of its dependencies.
-        }
-    }
-    // Re-build: for each node, its in-degree = number of objects that must come before it
-    // An object A depends on B means B → A, so A's in-degree increases
+    // For each node, in-degree = number of dependencies (objects that must load before it)
     for (const o of objects) {
         for (const dep of finalDeps.get(o.sobject)!) {
             inDegree.set(o.sobject, (inDegree.get(o.sobject) ?? 0) + 1);
@@ -1580,7 +1701,6 @@ export async function autoSortByDependencies(
         }
     }
 
-    writeDmConfig(workspaceRoot, config);
     onLog("✓ Dependency sort complete", "success");
     return config;
 }
@@ -1625,6 +1745,9 @@ export async function rollbackData(
         const csvPath = path.join(tmpDir, `${safeOrgName(obj.sobject)}-rollback-${Date.now()}.csv`);
         fs.writeFileSync(csvPath, csvLines.join("\n"), "utf-8");
 
+        let objDeleted = 0;
+        let objDeleteFailed = 0;
+
         try {
             const { stdout } = await execSf(
                 ["data", "delete", "bulk",
@@ -1642,24 +1765,27 @@ export async function rollbackData(
                 const r = results[idx];
                 if (r?.success === true || r?.deleted === true) {
                     tracking[obj.sobject][refId] = { status: "deleted", at: now() };
-                    deleted++;
+                    objDeleted++;
                 } else {
                     const err = (r?.errors ?? []).map((e: any) => e.message).join("; ") || "unknown";
                     tracking[obj.sobject][refId] = { status: "delete-failed", error: err, at: now() };
-                    deleteFailed++;
+                    objDeleteFailed++;
                 }
             }
         } catch (e: any) {
             onLog(`Delete bulk failed for ${obj.sobject}: ${e?.message ?? String(e)}`, "error");
             for (const [refId,] of createdEntries) {
                 tracking[obj.sobject][refId] = { status: "delete-failed", error: e?.message ?? "execSf error", at: now() };
-                deleteFailed++;
+                objDeleteFailed++;
             }
         }
 
+        deleted += objDeleted;
+        deleteFailed += objDeleteFailed;
+
         fs.unlinkSync(csvPath);
         writeTracking(workspaceRoot, targetOrg, tracking);
-        onLog(`✓ ${obj.sobject}: ${deleted} deleted`, "success");
+        onLog(`✓ ${obj.sobject}: ${objDeleted} deleted`, "success");
     }
 
     // Clean up tmp dir if empty

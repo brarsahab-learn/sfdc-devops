@@ -85,6 +85,7 @@ export class DataMigrationPanel {
     // new run starts — unlike a one-shot postMessage, it survives the _refresh() that follows.
     private _lastError: string | null = null;
     private _availableOrgs: { alias: string; username: string }[] = [];
+    private _trackingCache: { org: string; data: Record<string, Record<string, { status: string }>> } | undefined;
 
     // ── static entry point ───────────────────────────────────────────────────
 
@@ -163,11 +164,18 @@ export class DataMigrationPanel {
                     this._refresh();
                     break;
 
-                case "saveConfig":
-                    writeDmConfig(this._workspaceRoot, msg.config as DmConfig);
-                    this._config = msg.config as DmConfig;
+                case "saveConfig": {
+                    const incomingConfig = msg.config as DmConfig;
+                    const resolvedSeedDir = path.resolve(this._workspaceRoot, incomingConfig.seedDir || "");
+                    if (!resolvedSeedDir.startsWith(this._workspaceRoot)) {
+                        this._panel.webview.postMessage({ command: "logLine", text: "Invalid seedDir: must be inside the workspace.", level: "error" });
+                        break;
+                    }
+                    writeDmConfig(this._workspaceRoot, incomingConfig);
+                    this._config = incomingConfig;
                     this._refresh();
                     break;
+                }
 
                 case "addObject": {
                     const cfg = readDmConfig(this._workspaceRoot);
@@ -208,9 +216,13 @@ export class DataMigrationPanel {
                 }
 
                 case "autoSort": {
+                    if (!msg.targetOrg) {
+                        this._panel.webview.postMessage({ command: "logLine", text: "Select a target org before auto-sorting.", level: "warn" });
+                        break;
+                    }
                     await this._runExtBusy("Auto-sorting…", async () => {
                         let cfg = readDmConfig(this._workspaceRoot);
-                        cfg = await autoSortByDependencies(msg.targetOrg || "", this._workspaceRoot, cfg, () => {});
+                        cfg = await autoSortByDependencies(msg.targetOrg, this._workspaceRoot, cfg, () => {});
                         writeDmConfig(this._workspaceRoot, cfg);
                         this._config = cfg;
                     });
@@ -219,10 +231,13 @@ export class DataMigrationPanel {
 
                 case "setSourceOrg":
                     setSourceOrg(this._ctx, msg.alias);
+                    this._refresh();
                     break;
 
                 case "setTargetOrg":
                     setTargetOrg(this._ctx, msg.alias);
+                    this._trackingCache = undefined;
+                    this._refresh();
                     break;
 
                 case "pull":
@@ -490,7 +505,13 @@ export class DataMigrationPanel {
         const role        = getEffectiveRole(this._ctx);
         const envs        = getEnvironments();
         const trackingOrg = this._trackingViewOrg || targetOrg;
-        const tracking    = trackingOrg ? readTracking(this._workspaceRoot, trackingOrg) : {};
+        let tracking: Record<string, Record<string, { status: string }>> = {};
+        if (trackingOrg) {
+            if (!this._trackingCache || this._trackingCache.org !== trackingOrg) {
+                this._trackingCache = { org: trackingOrg, data: readTracking(this._workspaceRoot, trackingOrg) };
+            }
+            tracking = this._trackingCache.data;
+        }
         const hasLog      = fs.existsSync(lastRunLogPath(this._workspaceRoot));
         const seedInfo    = getSeedInfo(this._workspaceRoot, config);
 
@@ -590,6 +611,7 @@ export class DataMigrationPanel {
         } finally {
             this._loadState = "done";
             this._loadController = undefined;
+            this._trackingCache = undefined;
             this._refresh();
         }
     }
@@ -601,24 +623,28 @@ export class DataMigrationPanel {
         this._pullLog = [];
         this._activeTab = "pull";
         this._dryRunMode = dryRun;
-        const ctrl = makeController();
-        this._pullController = ctrl;
-        this._loadController = ctrl; // shared controller for cancel
+        const pullCtrl = makeController();
+        this._pullController = pullCtrl;
+        // _loadController intentionally NOT set here — keeps skipObject from leaking into load phase
         const { onLog: pullLog, onProgress: pullProg } = this._makeLogHandlers(this._pullLog);
         this._refresh();
+        let loadActuallyRan = false;
         try {
-            await pullData(sourceOrg, this._workspaceRoot, this._config, pullLog, pullProg, ctrl, { dryRun, dryRunSampleSize: 5 });
+            await pullData(sourceOrg, this._workspaceRoot, this._config, pullLog, pullProg, pullCtrl, { dryRun, dryRunSampleSize: 5 });
             if (!dryRun) { writeJobLog(pullLogsDir(this._workspaceRoot), this._pullLog); }
             this._pullState = "done";
 
-            if (ctrl.state !== "cancelled") {
-                // Load phase
+            if (pullCtrl.state !== "cancelled") {
+                // Load phase — use a fresh controller so pull-phase skip/pause state doesn't bleed in
+                const loadCtrl = makeController();
+                this._loadController = loadCtrl;
+                loadActuallyRan = true;
                 this._loadState = "running";
                 this._loadLog = [];
                 this._activeTab = "load";
                 const { onLog: loadLog, onProgress: loadProg } = this._makeLogHandlers(this._loadLog);
                 this._refresh();
-                await loadData(targetOrg, this._workspaceRoot, this._config, loadLog, loadProg, ctrl, { dryRun });
+                await loadData(targetOrg, this._workspaceRoot, this._config, loadLog, loadProg, loadCtrl, { dryRun });
                 if (!dryRun) { writeJobLog(loadLogsDir(this._workspaceRoot, targetOrg), this._loadLog); }
             }
             this._panel.webview.postMessage({ command: "runDone", op: "pullAndLoad", dryRun });
@@ -626,9 +652,15 @@ export class DataMigrationPanel {
             this._reportError(`Pull + Load failed: ${String(err)}`);
         } finally {
             this._pullState = this._pullState === "running" ? "done" : this._pullState;
-            this._loadState = "done";
+            // Only mark load as done if load actually ran; if pull was cancelled before load, reset to idle
+            if (loadActuallyRan) {
+                this._loadState = this._loadState === "running" ? "done" : this._loadState;
+            } else {
+                this._loadState = "idle";
+            }
             this._pullController = undefined;
             this._loadController = undefined;
+            this._trackingCache = undefined;
             this._refresh();
         }
     }
@@ -655,6 +687,7 @@ export class DataMigrationPanel {
         } finally {
             this._loadState = "done";
             this._loadController = undefined;
+            this._trackingCache = undefined;
             this._refresh();
         }
     }
@@ -667,6 +700,7 @@ export class DataMigrationPanel {
             delete trk[sobject];
             writeTracking(this._workspaceRoot, trackOrg, trk);
         }
+        this._trackingCache = undefined;
         vscode.window.showInformationMessage(`Tracking cleared for ${sobject} in ${trackOrg}.`);
         this._refresh();
     }
@@ -684,7 +718,9 @@ export class DataMigrationPanel {
                 const total = Object.keys(entries).length;
                 rows.push([obj, total, counts.created, counts.failed, counts.skipped, counts.pending, counts.blocked].join(","));
             }
-            const outPath = path.join(this._workspaceRoot, `dm-tracking-${targetOrg}-${Date.now()}.csv`);
+            const exportDir = path.join(this._workspaceRoot, ".git", "sf-devops-dm", "exports");
+            fs.mkdirSync(exportDir, { recursive: true });
+            const outPath = path.join(exportDir, `dm-tracking-${safeOrgName(targetOrg)}-${Date.now()}.csv`);
             fs.writeFileSync(outPath, rows.join("\n"), "utf8");
             const doc = await vscode.workspace.openTextDocument(outPath);
             await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
@@ -723,15 +759,20 @@ export class DataMigrationPanel {
         await this._runExtBusy("Checking ExternalIds…", async () => {
             const { onLog } = this._makeLogHandlers(this._loadLog);
             const cfg = readDmConfig(this._workspaceRoot);
-            for (const obj of cfg.objects.filter((o) => o.active !== false)) {
-                try {
-                    const fieldName = await checkExternalId(targetOrg, obj.sobject, this._workspaceRoot, onLog);
-                    obj.externalIdVerified = !!fieldName;
-                    if (fieldName) { obj.externalIdField = fieldName; }
-                    onLog(`${obj.sobject}: ${fieldName ? "✓ " + fieldName : "✗ not found"}`, fieldName ? "success" : "warn");
-                } catch (err) {
-                    onLog(`${obj.sobject}: check error — ${String(err)}`, "error");
-                }
+            const active = cfg.objects.filter((o) => o.active !== false);
+            const chunkSize = 5;
+            for (let i = 0; i < active.length; i += chunkSize) {
+                const chunk = active.slice(i, i + chunkSize);
+                await Promise.allSettled(chunk.map(async (obj) => {
+                    try {
+                        const fieldName = await checkExternalId(targetOrg, obj.sobject, this._workspaceRoot, onLog);
+                        obj.externalIdVerified = !!fieldName;
+                        if (fieldName) { obj.externalIdField = fieldName; }
+                        onLog(`${obj.sobject}: ${fieldName ? "✓ " + fieldName : "✗ not found"}`, fieldName ? "success" : "warn");
+                    } catch (err) {
+                        onLog(`${obj.sobject}: check error — ${String(err)}`, "error");
+                    }
+                }));
             }
             writeDmConfig(this._workspaceRoot, cfg);
             this._config = cfg;
@@ -776,7 +817,9 @@ export class DataMigrationPanel {
     private async _handleExportDryRunReport(): Promise<void> {
         try {
             const lines = this._loadLog.length > 0 ? this._loadLog : this._pullLog;
-            const outPath = path.join(this._workspaceRoot, `dm-dryrun-report-${Date.now()}.csv`);
+            const exportDir = path.join(this._workspaceRoot, ".git", "sf-devops-dm", "exports");
+            fs.mkdirSync(exportDir, { recursive: true });
+            const outPath = path.join(exportDir, `dm-dryrun-report-${Date.now()}.log`);
             fs.writeFileSync(outPath, lines.join("\n"), "utf8");
             const doc = await vscode.workspace.openTextDocument(outPath);
             await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
@@ -1162,12 +1205,16 @@ export class DataMigrationPanel {
                 const status = obj.externalIdVerified
                     ? `<span class="badge badge-green">✅ Verified</span>`
                     : `<span class="badge badge-amber">⚠️ Not set</span>`;
+                const createBtn = !obj.externalIdVerified
+                    ? `<button class="btn btn-sm btn-primary" ${dis} onclick="send('createExtId',{sobject:${esc(JSON.stringify(obj.sobject))},targetOrg:${esc(JSON.stringify(targetOrg))}})">Create</button>`
+                    : "";
                 rows += `<tr>
                     <td><code>${esc(obj.sobject)}</code></td>
                     <td>${esc(obj.externalIdField ?? "—")}</td>
                     <td>${status}</td>
                     <td class="row-actions">
                         <button class="btn btn-sm" ${dis} onclick="send('checkExtId',{sobject:${esc(JSON.stringify(obj.sobject))},targetOrg:${esc(JSON.stringify(targetOrg))}})">Re-check</button>
+                        ${createBtn}
                     </td>
                 </tr>`;
             }
@@ -1462,14 +1509,19 @@ function submitAddObject() {
 }
 
 // ── Live progress updates ────────────────────────────────────────────────────
-let _elapsedSecs = 0;
-let _elapsedTimer = null;
+// Kill any orphaned timer from a previous page render — _refresh() replaces the entire HTML,
+// so the old IIFE's local _elapsedTimer handle is lost, creating a leaked setInterval each time.
+// Storing on window ensures there is always at most one timer running.
+if (window._elapsedTimer) { clearInterval(window._elapsedTimer); window._elapsedTimer = null; }
+let _elapsedSecs = window._elapsedSecs || 0;
 
-function startElapsedTimer() {
-    _elapsedSecs = 0;
-    if (_elapsedTimer) { clearInterval(_elapsedTimer); }
-    _elapsedTimer = setInterval(function() {
+function startElapsedTimer(reset) {
+    if (reset !== false) { window._elapsedSecs = 0; _elapsedSecs = 0; }
+    else { _elapsedSecs = window._elapsedSecs || 0; }
+    if (window._elapsedTimer) { clearInterval(window._elapsedTimer); }
+    window._elapsedTimer = setInterval(function() {
         _elapsedSecs++;
+        window._elapsedSecs = _elapsedSecs;
         const m = String(Math.floor(_elapsedSecs / 60)).padStart(2,'0');
         const s = String(_elapsedSecs % 60).padStart(2,'0');
         const text = m + ':' + s;
@@ -1481,12 +1533,14 @@ function startElapsedTimer() {
 }
 
 function stopElapsedTimer() {
-    if (_elapsedTimer) { clearInterval(_elapsedTimer); _elapsedTimer = null; }
+    if (window._elapsedTimer) { clearInterval(window._elapsedTimer); window._elapsedTimer = null; }
+    window._elapsedSecs = 0;
+    _elapsedSecs = 0;
 }
 
-// Start timer if panel loaded mid-run (pull, load/paused, or an ExternalId check/create/auto-sort)
+// Reconnect timer if panel re-rendered while a run is still in progress (don't reset elapsed)
 if (DATA.busy) {
-    startElapsedTimer();
+    startElapsedTimer(false);
 }
 
 function updateProgress(data) {
@@ -1495,18 +1549,18 @@ function updateProgress(data) {
 
     const barObj = document.getElementById('progress-bar-obj');
     const lblObj = document.getElementById('progress-label-obj');
-    if (barObj && data.objectTotal > 0) {
-        const pct = Math.round((data.objectDone / data.objectTotal) * 100);
+    if (barObj && data.batchCount > 0) {
+        const pct = Math.round((data.batchIndex / data.batchCount) * 100);
         barObj.style.width = pct + '%';
-        if (lblObj) { lblObj.textContent = data.objectDone + ' / ' + data.objectTotal; }
+        if (lblObj) { lblObj.textContent = data.batchIndex + ' / ' + data.batchCount; }
     }
 
     const barAll = document.getElementById('progress-bar-overall');
     const lblAll = document.getElementById('progress-label-overall');
-    if (barAll && data.totalObjects > 0) {
-        const pct = Math.round((data.objectsCompleted / data.totalObjects) * 100);
+    if (barAll && data.objectCount > 0) {
+        const pct = Math.round((data.objectIndex / data.objectCount) * 100);
         barAll.style.width = pct + '%';
-        if (lblAll) { lblAll.textContent = 'Overall: ' + data.objectsCompleted + ' / ' + data.totalObjects; }
+        if (lblAll) { lblAll.textContent = 'Overall: ' + data.objectIndex + ' / ' + data.objectCount; }
     }
 }
 

@@ -14,6 +14,10 @@ import {
 } from "../config";
 import { sharedCss, cspMeta, loadingHtml } from "../ui/shared";
 
+function esc(s: string): string {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
 interface JourneyEvent {
     timestamp: string;            // ISO 8601 — used for sort
     source: "audit" | "git";
@@ -116,7 +120,7 @@ export class StoryJourneyPanel {
             this._panel.title = `Journey — ${this._storyId}`;
             this._panel.webview.html = this._renderHtml(this._storyId, events, pipeline, storyIds);
         } catch (err) {
-            this._panel.webview.html = `<body style="padding:20px;color:#f48771;font-family:sans-serif">Error: ${String(err)}</body>`;
+            this._panel.webview.html = `<!DOCTYPE html><html><head><meta charset="utf-8">${cspMeta(this._panel.webview)}</head><body style="padding:20px;color:#f48771;font-family:sans-serif">Error: ${esc(String(err))}</body></html>`;
         } finally {
             this._refreshing = false;
         }

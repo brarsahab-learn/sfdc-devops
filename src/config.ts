@@ -34,38 +34,44 @@ export function initOrgAliasStore(context: vscode.ExtensionContext): void {
 
 const ORG_ALIASES_KEY = "sfDevops.orgAliases";
 
-// In-memory guard prevents concurrent calls from racing before the async write lands.
-let _orgAliasesMigrationDone = false;
+// Promise-based guard: the migration runs exactly once and callers that write
+// aliases must wait for it to complete before touching workspaceState.
+// readOrgAliases() stays synchronous so getEnvironments() doesn't cascade to async.
+let _orgAliasMigrationPromise: Promise<void> | null = null;
 
-/**
- * Migrate org alias data from globalState to workspaceState on first use,
- * so each workspace/project has independent org alias mappings.
- */
-function _migrateOrgAliasesIfNeeded(): void {
+async function _doMigration(): Promise<void> {
     if (!_extContext) { return; }
-    if (_orgAliasesMigrationDone) { return; }
     const alreadyMigrated = _extContext.workspaceState.get<boolean>("sfDevops.orgAliasesMigrated");
-    _orgAliasesMigrationDone = true; // set immediately so concurrent calls bail out
     if (alreadyMigrated) { return; }
     const legacy = _extContext.globalState.get<Record<string, string>>(ORG_ALIASES_KEY);
     if (legacy && Object.keys(legacy).length > 0) {
         const existing = _extContext.workspaceState.get<Record<string, string>>(ORG_ALIASES_KEY) ?? {};
-        // Only copy if workspace has no aliases yet (avoid overwriting project-specific data)
         if (Object.keys(existing).length === 0) {
-            _extContext.workspaceState.update(ORG_ALIASES_KEY, legacy);
+            await _extContext.workspaceState.update(ORG_ALIASES_KEY, legacy);
         }
     }
-    _extContext.workspaceState.update("sfDevops.orgAliasesMigrated", true);
+    await _extContext.workspaceState.update("sfDevops.orgAliasesMigrated", true);
+}
+
+function _ensureMigration(): void {
+    if (!_extContext) { return; }
+    _orgAliasMigrationPromise = _orgAliasMigrationPromise ?? _doMigration();
+}
+
+/** Resolves once the org-alias migration from globalState → workspaceState has completed. Call once from activate(). */
+export async function ensureOrgAliasMigration(): Promise<void> {
+    _ensureMigration();
+    await (_orgAliasMigrationPromise ?? Promise.resolve());
 }
 
 function readOrgAliases(): Record<string, string> {
-    _migrateOrgAliasesIfNeeded();
+    _ensureMigration(); // kick off migration lazily; reads current workspaceState
     return _extContext?.workspaceState.get<Record<string, string>>(ORG_ALIASES_KEY) ?? {};
 }
 
 async function writeOrgAlias(key: string, alias: string): Promise<void> {
     if (!_extContext) { return; }
-    _migrateOrgAliasesIfNeeded();
+    await ensureOrgAliasMigration(); // writes must wait for migration before touching workspaceState
     const data = readOrgAliases();
     data[key] = alias;
     await _extContext.workspaceState.update(ORG_ALIASES_KEY, data);
@@ -136,10 +142,18 @@ export function promoBranchName(storyId: string, env: string, mode: "validate" |
  * jiraProjectKey setting, then to a generic Jira-shaped key, so existing configs
  * keep working.
  */
+let _ticketKeyPatternWarningShown = false;
+
 export function getTicketKeyPattern(): RegExp {
     const explicit = cfg().get<string>("ticketKeyPattern");
     if (explicit) {
-        try { return new RegExp(explicit); } catch { /* fall through to default */ }
+        try { return new RegExp(explicit); }
+        catch (e) {
+            if (!_ticketKeyPatternWarningShown) {
+                _ticketKeyPatternWarningShown = true;
+                vscode.window.showWarningMessage(`sfDevops: Invalid ticketKeyPattern "${explicit}" — ${(e as Error).message}. Using default pattern.`);
+            }
+        }
     }
     const projectKey = cfg().get<string>("jiraProjectKey");
     if (projectKey) {
@@ -160,7 +174,7 @@ export function getTicketBaseUrl(): string {
 export function buildTicketUrl(storyId: string): string | undefined {
     const base = getTicketBaseUrl();
     if (!base || !storyId) { return undefined; }
-    return fillTemplate(base, { storyId });
+    return fillTemplate(base, { storyId: encodeURIComponent(storyId) });
 }
 
 /**
@@ -292,7 +306,7 @@ export function getEnvironments(): ResolvedEnvironment[] {
         })
         .map((entry, index): ResolvedEnvironment => {
             const e: EnvironmentSetting = typeof entry === "string" ? { name: entry } : entry;
-            const isProd = e.isProd ?? (e.name === "prod");
+            const isProd = e.isProd ?? (["prod", "production", "release", "live"].includes(e.name.toLowerCase()));
             // The legacy sfDevops.devOrgAlias/prodOrgAlias settings were never part of an
             // environments[] entry itself — they're separate top-level settings keyed by
             // ROLE (first/publish stage, or whichever stage is Prod), not by name. Fall
@@ -322,6 +336,23 @@ export function getEnvironments(): ResolvedEnvironment[] {
                 locked: e.locked ?? false,
             };
         });
+}
+
+let _prodEnvWarningShown = false;
+
+/**
+ * Warn once per session if no environment is identified as production.
+ * Call once from activate() so the user is alerted before any deploy operations.
+ */
+export function checkProdEnvironmentConfig(): void {
+    if (_prodEnvWarningShown) { return; }
+    _prodEnvWarningShown = true;
+    const hasProd = getEnvironments().some(e => e.isProd);
+    if (!hasProd) {
+        vscode.window.showWarningMessage(
+            'sfDevops: No production environment configured. Set "isProd": true on your production environment in settings.json to enable production safety guards.'
+        );
+    }
 }
 
 /**

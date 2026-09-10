@@ -17,6 +17,7 @@ import { runSetupChecks, SetupCheckItem } from "../SetupCheck";
 import { getEffectiveRole, canAccessConfig } from "../RoleManager";
 import { isDataLoadRole } from "../config";
 import { isOrgConnected, execSf } from "../SfCli";
+import { cspMeta } from "../ui/shared";
 import { getStoryProgress, getStoryTimelines, EnvTimeline } from "../StoryProgress";
 
 const SETUP_CONFIRMED_KEY = "sfDevops.setupConfirmed";
@@ -35,7 +36,12 @@ export interface StoryStatusInfo {
 }
 
 function escapeHtml(s: string): string {
-    return String(s).replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]!));
+    return String(s).replace(/[<>&"]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]!));
+}
+
+/** Escapes a value for use inside a JS single-quote string literal in an HTML attribute. */
+function jsStr(s: string): string {
+    return String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/"/g, "&quot;");
 }
 
 // Shared busy-state bar for all three panel templates (main, setup gate, conflict) — a click
@@ -101,6 +107,10 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
     /** Resolved fresh on every use — "Change Role" can update this at runtime, so it must never be cached. */
     private get _userRole(): string {
         return getEffectiveRole(this._extContext);
+    }
+
+    private _csp(): string {
+        return cspMeta(this._view!.webview);
     }
 
     public resolveWebviewView(
@@ -220,6 +230,11 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                 case "loginOrg":
                     if (msg.key && msg.value?.trim() && canAccessConfig(this._userRole)) {
                         const alias = msg.value.trim();
+                        if (!/^[a-zA-Z0-9._@-]+$/.test(alias)) {
+                            vscode.window.showErrorMessage(`Invalid org alias "${alias}" — only letters, numbers, dots, hyphens, underscores, and @ are allowed.`);
+                            this._clearBusy();
+                            break;
+                        }
                         if (msg.key === "demo") { await setDemoOrgAlias(alias); } else { await setOrgAliasSlot(msg.key as OrgAliasSlot["key"], alias); }
                         const alreadyConnected = await isOrgConnected(alias, this._gitHelper.getWorkspaceRoot());
                         if (alreadyConnected) {
@@ -370,10 +385,9 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
             const demoConnected = demoAlias ? await isOrgConnected(demoAlias, this._gitHelper.getWorkspaceRoot()) : false;
 
             if (!requiredPassed) {
-                // Show setup gate but always allow bypass — user may know setup is fine
-                // and the check is stale (e.g., just connected an org). Do NOT reset the
-                // confirmed flag; a returning user shouldn't be locked out on a transient failure.
-                this._view.webview.html = this._getSetupGateHtml(checks, true, false, demoAlias, demoConnected);
+                // Required checks failing — show gate but hide the Continue button so users
+                // cannot confirm a broken setup and reach the main view with a bad config.
+                this._view.webview.html = this._getSetupGateHtml(checks, false, false, demoAlias, demoConnected);
                 return;
             }
             if (!confirmed) {
@@ -686,9 +700,9 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                 // PR already merged into nextEnv's branch — the real next step is deploying
                 // it, not another promotion. Hand off straight to the Deployment Dashboard.
                 actionButton = isLead
-                    ? `<div class="info">&#x26A1; ${nextEnv.label}'s PR is merged &mdash; deploy it to finish this stage.</div>
-                       <button class="btn btn-primary" onclick="send('openDeploymentDashboard', '${nextEnv.name}')">&#x1F680; Deploy &mdash; ${nextEnv.label}</button>`
-                    : `<div class="info">&#x26A1; ${nextEnv.label}'s PR is merged &mdash; a Lead or Admin needs to deploy it to finish this stage.</div>`;
+                    ? `<div class="info">&#x26A1; ${escapeHtml(nextEnv.label)}'s PR is merged &mdash; deploy it to finish this stage.</div>
+                       <button class="btn btn-primary" onclick="send('openDeploymentDashboard', '${jsStr(nextEnv.name)}')">&#x1F680; Deploy &mdash; ${escapeHtml(nextEnv.label)}</button>`
+                    : `<div class="info">&#x26A1; ${escapeHtml(nextEnv.label)}'s PR is merged &mdash; a Lead or Admin needs to deploy it to finish this stage.</div>`;
             } else if (nextEnv) {
                 // Validation is mandatory and gates the PR — so which button is "primary"
                 // (the actually-next step) depends on whether nextEnv's promotion branch has
@@ -698,7 +712,7 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                 // Promote (open the PR) is next, Validate becomes a secondary "re-validate."
                 const isValidated = progress[nextEnv.name] === "open";
                 const validateBtn =
-                    `<button class="btn ${isValidated ? "btn-secondary" : "btn-primary"}" onclick="send('validate', '${nextEnv.name}')">&#x2714; ${isValidated ? "Re-validate" : "Validate Only"} &mdash; ${nextEnv.label}</button>`;
+                    `<button class="btn ${isValidated ? "btn-secondary" : "btn-primary"}" onclick="send('validate', '${jsStr(nextEnv.name)}')">&#x2714; ${isValidated ? "Re-validate" : "Validate Only"} &mdash; ${escapeHtml(nextEnv.label)}</button>`;
                 const coverageBlocked = coverageBlockedEnv === nextEnv.name;
 
                 // The env the story is CURRENTLY sitting in — the one immediately before
@@ -708,19 +722,19 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                 const signoffBlocked = Boolean(currentEnv?.signoffGate && !signoffPassed[currentEnv.name]);
                 const signoffAction = signoffBlocked
                     ? (isLead
-                        ? `<div class="warning">&#x26A0; ${currentEnv!.label} sign-off required before promoting to ${nextEnv.label}.</div>
-                           <button class="btn btn-secondary" onclick="send('recordSignoff', '${currentEnv!.name}')">&#x2705; Record ${currentEnv!.label} Sign-off</button>`
-                        : `<div class="warning">&#x26A0; ${currentEnv!.label} sign-off by a Lead or Admin is required before promoting to ${nextEnv.label}.</div>`)
+                        ? `<div class="warning">&#x26A0; ${escapeHtml(currentEnv!.label)} sign-off required before promoting to ${escapeHtml(nextEnv.label)}.</div>
+                           <button class="btn btn-secondary" onclick="send('recordSignoff', '${jsStr(currentEnv!.name)}')">&#x2705; Record ${escapeHtml(currentEnv!.label)} Sign-off</button>`
+                        : `<div class="warning">&#x26A0; ${escapeHtml(currentEnv!.label)} sign-off by a Lead or Admin is required before promoting to ${escapeHtml(nextEnv.label)}.</div>`)
                     : "";
 
                 const promoteClass = isValidated ? "btn-primary" : "btn-secondary";
                 const promoteBtn = !canPromote(this._userRole, nextEnv)
-                    ? `<div class="info">&#x2705; A "${nextEnv.requiredRole}" runs Promote to ${nextEnv.label} (opens a PR — deploying is a separate step after it's merged)</div>`
+                    ? `<div class="info">&#x2705; A "${escapeHtml(nextEnv.requiredRole ?? "")}" runs Promote to ${escapeHtml(nextEnv.label)} (opens a PR — deploying is a separate step after it's merged)</div>`
                     : (coverageBlocked || signoffBlocked)
-                    ? `${coverageBlocked ? `<div class="warning">&#x26A0; Coverage check required before promoting to ${nextEnv.label} &mdash; <a href="#" onclick="send('focusCoverage')">run it here</a>.</div>` : ""}
+                    ? `${coverageBlocked ? `<div class="warning">&#x26A0; Coverage check required before promoting to ${escapeHtml(nextEnv.label)} &mdash; <a href="#" onclick="send('focusCoverage')">run it here</a>.</div>` : ""}
                        ${signoffAction}
-                       <button class="btn btn-primary" disabled title="Resolve the gate(s) above first">&#x1F680; Promote &mdash; ${nextEnv.label}</button>`
-                    : `<button class="btn ${promoteClass}" onclick="send('promote', '${nextEnv.name}')" title="${isValidated ? `Opens a PR into ${nextEnv.label} — deploying is a separate step once it's merged` : `Validates first, then opens a PR into ${nextEnv.label} once it passes`}">&#x1F680; Promote &mdash; ${nextEnv.label}</button>`;
+                       <button class="btn btn-primary" disabled title="Resolve the gate(s) above first">&#x1F680; Promote &mdash; ${escapeHtml(nextEnv.label)}</button>`
+                    : `<button class="btn ${promoteClass}" onclick="send('promote', '${jsStr(nextEnv.name)}')" title="${isValidated ? `Opens a PR into ${escapeHtml(nextEnv.label)} — deploying is a separate step once it's merged` : `Validates first, then opens a PR into ${escapeHtml(nextEnv.label)} once it passes`}">&#x1F680; Promote &mdash; ${escapeHtml(nextEnv.label)}</button>`;
                 actionButton = isValidated ? (promoteBtn + validateBtn) : (validateBtn + promoteBtn);
             } else {
                 actionButton = `<div class="info">&#x2705; ${getTerminalStageMessage()}</div>`;
@@ -781,7 +795,7 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                     if (localChanges.staged.length > 0) { parts.push(`${localChanges.staged.length} staged`); }
                     if (localChanges.other.length > 0)  { parts.push(`${localChanges.other.length} in progress (preserved automatically)`); }
                     const fileRow = (f: string, badge: string) =>
-                        `<li><span class="file-path" onclick="viewWorkingDiff('${escapeHtml(f)}')" title="View diff">${escapeHtml(f)}</span><span class="story-badge">${badge}</span></li>`;
+                        `<li><span class="file-path" onclick="viewWorkingDiff('${jsStr(f)}')" title="View diff">${escapeHtml(f)}</span><span class="story-badge">${badge}</span></li>`;
                     const fileList = [
                         ...localChanges.staged.map(f => fileRow(f, "staged")),
                         ...localChanges.other.map(f => fileRow(f, "unstaged")),
@@ -800,12 +814,12 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                 // really been deployed vs. just pushed to the branch.
                 if (isPublishStage) {
                     if (state === "published" && isLead) {
-                        stageLinks += ` <a href="#" title="Open Dev in the Deployment Dashboard to deploy it to the Dev org" onclick="send('openDeploymentDashboard', '${envCfg.name}')">🚀</a>`;
+                        stageLinks += ` <a href="#" title="Open Dev in the Deployment Dashboard to deploy it to the Dev org" onclick="send('openDeploymentDashboard', '${jsStr(envCfg.name)}')">🚀</a>`;
                     }
                 } else {
-                    if (isLead) { stageLinks += ` <a href="#" title="Promote a story to ${envCfg.label} (pick from a list — opens a PR)" onclick="send('promote', '${envCfg.name}')">⬆</a>`; }
+                    if (isLead) { stageLinks += ` <a href="#" title="Promote a story to ${escapeHtml(envCfg.label)} (pick from a list — opens a PR)" onclick="send('promote', '${jsStr(envCfg.name)}')">⬆</a>`; }
                     if (isLead) {
-                        stageLinks += ` <a href="#" title="Open ${envCfg.label} in the Deployment Dashboard" onclick="send('openDeploymentDashboard', '${envCfg.name}')">🚀</a>`;
+                        stageLinks += ` <a href="#" title="Open ${escapeHtml(envCfg.label)} in the Deployment Dashboard" onclick="send('openDeploymentDashboard', '${jsStr(envCfg.name)}')">🚀</a>`;
                     }
                 }
                 if (state === "open" && storyId) {
@@ -864,6 +878,8 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         return `<!DOCTYPE html>
 <html>
 <head>
+<meta charset="utf-8">
+${this._csp()}
 <style>
   body       { font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; color: var(--vscode-foreground); }
   .card      { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 10px; margin-bottom: 8px; }
@@ -942,7 +958,7 @@ ${externalSwitchNotice}
 ${syncWarning}
 ${deletionAckPending ? `<div class="warning">
   ⚠ ${escapeHtml(storyId)} deletes ${deletionAckPending.files.length} component(s) not yet manually removed from ${escapeHtml(deletionAckPending.envLabel)}.
-  <br>Remove them from the org, then: <a href="#" onclick="send('acknowledgeDeletion', '${deletionAckPending.env}')">✅ Acknowledge manual deletion for ${escapeHtml(deletionAckPending.envLabel)}</a>
+  <br>Remove them from the org, then: <a href="#" onclick="send('acknowledgeDeletion', '${jsStr(deletionAckPending.env)}')">✅ Acknowledge manual deletion for ${escapeHtml(deletionAckPending.envLabel)}</a>
 </div>` : ""}
 ${(() => {
     const threshold = getStaleStoryThresholdDays();
@@ -1056,6 +1072,8 @@ ${onFeatureBranch ? `
         return `<!DOCTYPE html>
 <html>
 <head>
+<meta charset="utf-8">
+${this._csp()}
 <style>
   body     { font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; color: var(--vscode-foreground); padding-bottom: 4px; }
   h2       { font-size: 13px; margin: 4px 0 8px; }
@@ -1172,7 +1190,7 @@ ${forced ? `<button class="btn btn-secondary" onclick="send('closeSetupCheck')">
         };
 
         const openBtn = (alias: string) => alias
-            ? `<button class="org-btn" title="Open ${escapeHtml(alias)} in the browser" onclick="openOrg('${escapeHtml(alias)}')">🌐</button>`
+            ? `<button class="org-btn" title="Open ${escapeHtml(alias)} in the browser" onclick="openOrg('${jsStr(alias)}')">🌐</button>`
             : "";
 
         if (!editable) {
@@ -1215,7 +1233,7 @@ ${forced ? `<button class="btn btn-secondary" onclick="send('closeSetupCheck')">
                 ? `<span class="org-status" title="Connected">✅</span>`
                 : `<span class="org-status" title="Not authenticated — needs (re)login">❌</span>`;
         const openBtn = alias
-            ? `<button class="org-btn" title="Open ${escapeHtml(alias)} in the browser" onclick="openOrg('${escapeHtml(alias)}')">🌐</button>`
+            ? `<button class="org-btn" title="Open ${escapeHtml(alias)} in the browser" onclick="openOrg('${jsStr(alias)}')">🌐</button>`
             : "";
 
         if (!editable) {
@@ -1260,7 +1278,7 @@ ${forced ? `<button class="btn btn-secondary" onclick="send('closeSetupCheck')">
     <span class="org-status" title="Missing on origin">❌</span>
     <span class="org-label">${escapeHtml(m.label)}</span>
     <span class="org-readonly">${escapeHtml(m.branch)}</span>
-    <button class="org-btn" title="Create &quot;${escapeHtml(m.branch)}&quot; on origin from the base branch" onclick="pushEnvBranch('${escapeHtml(m.branch)}')">⬆ Push</button>
+    <button class="org-btn" title="Create &quot;${escapeHtml(m.branch)}&quot; on origin from the base branch" onclick="pushEnvBranch('${jsStr(m.branch)}')">⬆ Push</button>
   </div>`).join("");
         return `<div class="org-manager">${rows}
   <button class="org-btn" style="margin-top:4px" onclick="send('editEnvironmentsSetting')">⚙ Edit sfDevops.environments instead</button>
@@ -1271,6 +1289,8 @@ ${forced ? `<button class="btn btn-secondary" onclick="send('closeSetupCheck')">
         return `<!DOCTYPE html>
 <html>
 <head>
+<meta charset="utf-8">
+${this._csp()}
 <style>
   body { font-family: var(--vscode-font-family); font-size: 12px; padding: 16px; color: var(--vscode-foreground); background: var(--vscode-editor-background); }
   h2   { font-size: 14px; margin: 0 0 6px; }
@@ -1296,11 +1316,11 @@ ${forced ? `<button class="btn btn-secondary" onclick="send('closeSetupCheck')">
     }
 
     private _getLoadingHtml(): string {
-        return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><style>body{font-family:var(--vscode-font-family,-apple-system,sans-serif);padding:24px;color:var(--vscode-descriptionForeground,#888);background:var(--vscode-editor-background);}</style></head><body>Loading…</body></html>`;
+        return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">${this._csp()}<style>body{font-family:var(--vscode-font-family,-apple-system,sans-serif);padding:24px;color:var(--vscode-descriptionForeground,#888);background:var(--vscode-editor-background);}</style></head><body>Loading…</body></html>`;
     }
 
     private _getErrorHtml(err: string): string {
-        return `<html><body style="font-family:var(--vscode-font-family);padding:8px;color:var(--vscode-errorForeground)">Error: ${err}</body></html>`;
+        return `<!DOCTYPE html><html><head><meta charset="utf-8">${this._csp()}</head><body style="font-family:var(--vscode-font-family);padding:8px;color:var(--vscode-errorForeground)">Error: ${escapeHtml(err)}</body></html>`;
     }
 
     /** Rendered while a cherry-pick (dev-publish or promotion) is paused on conflicts. */
@@ -1325,6 +1345,8 @@ ${forced ? `<button class="btn btn-secondary" onclick="send('closeSetupCheck')">
         return `<!DOCTYPE html>
 <html>
 <head>
+<meta charset="utf-8">
+${this._csp()}
 <style>
   body     { font-family: var(--vscode-font-family); font-size: 12px; padding: 8px; color: var(--vscode-foreground); }
   .card    { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 10px; margin-bottom: 8px; }

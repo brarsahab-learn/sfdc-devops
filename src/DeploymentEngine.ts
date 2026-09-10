@@ -25,6 +25,8 @@ function componentFailureLocator(f: ComponentFailure): string {
 export interface DeployResult {
     ran:                       boolean;
     success:                   boolean;
+    /** True when the deploy status was SucceededPartial — treat as success but surface a warning that some components may not have deployed. */
+    partial?:                  boolean;
     deployId?:                 string;
     numberComponentsDeployed?: number;
     numberComponentErrors?:    number;
@@ -259,7 +261,8 @@ export async function runDeploy(
 
     const result = parsed?.result ?? {};
     const status = String(result?.status ?? "");
-    const success = status === "Succeeded" || result?.success === true;
+    const isPartial = status === "SucceededPartial";
+    const success = status === "Succeeded" || isPartial || result?.success === true;
     debugLog(`Job ${result?.id ?? "(no id)"} — status: ${status || "(unknown)"}, success: ${success}`);
 
     const failures: ComponentFailure[] = (result?.details?.componentFailures ?? [])
@@ -304,7 +307,8 @@ export async function runDeploy(
 
     if (success) {
         const testsPart = testsRun > 0 ? `, ${testsRun - testsFailed}/${testsRun} test(s) passed` : "";
-        log(`${mode === "deploy" ? "Deployed" : "Validated"} — ${numberComponentsDeployed} component(s)${testsPart}.`);
+        const partialNote = isPartial ? " (partial — some components may not have deployed; check the Output Channel for details)" : "";
+        log(`${mode === "deploy" ? "Deployed" : "Validated"} — ${numberComponentsDeployed} component(s)${testsPart}${partialNote}.`);
     } else if (topLevelError) {
         log(`Failed — ${topLevelError}`);
     } else if (failures.length > 0) {
@@ -322,6 +326,7 @@ export async function runDeploy(
     return {
         ran: true,
         success,
+        partial: isPartial || undefined,
         deployId: result?.id,
         numberComponentsDeployed,
         numberComponentErrors: Number(result?.numberComponentErrors ?? failures.length ?? 0),

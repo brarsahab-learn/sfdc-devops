@@ -775,18 +775,19 @@ export class GitHelper {
             }
         }
 
-        await this.git(["push", "--force-with-lease", "origin", promotionBranch]);
-
-        if (mode === "promote") {
-            try {
-                await this.git(["push", "origin", tag]);
-            } catch {
-                // Tag may already exist on remote — non-fatal
+        try {
+            await this.git(["push", "--force-with-lease", "origin", promotionBranch]);
+            if (mode === "promote") {
+                try {
+                    await this.git(["push", "origin", tag]);
+                } catch {
+                    // Tag may already exist on remote — non-fatal
+                }
             }
+        } finally {
+            await this.deleteSquashRef(storyId);
+            await this.clearPending();
         }
-
-        await this.deleteSquashRef(storyId);
-        await this.clearPending();
         return { branch: promotionBranch, tag };
     }
 
@@ -1063,9 +1064,13 @@ export class GitHelper {
 
     private _updateInactiveStories(fn: (set: Set<string>) => void): Promise<void> {
         this._inactiveWriteLock = this._inactiveWriteLock.then(async () => {
-            const inactive = await this.getInactiveStories();
-            fn(inactive);
-            fs.writeFileSync(await this.inactiveStoriesFilePath(), JSON.stringify([...inactive], null, 2));
+            try {
+                const inactive = await this.getInactiveStories();
+                fn(inactive);
+                fs.writeFileSync(await this.inactiveStoriesFilePath(), JSON.stringify([...inactive], null, 2));
+            } catch (e) {
+                console.error('[sfDevops] Failed to update inactive stories:', e);
+            }
         });
         return this._inactiveWriteLock;
     }
@@ -1133,6 +1138,12 @@ export class GitHelper {
     }
 
     async commitAndPush(message: string): Promise<void> {
+        const preStatus = await this.git(["status", "--porcelain"]);
+        const sensitivePattern = /\.(env|key|pem|p12|pfx)$|credentials|secret/i;
+        const sensitive = preStatus.split('\n').filter(l => l.startsWith('??') && sensitivePattern.test(l));
+        if (sensitive.length > 0) {
+            console.warn('[sfDevops] git add . would stage potentially sensitive files:', sensitive);
+        }
         await this.git(["add", "."]);
         const status = await this.git(["status", "--porcelain"]);
         if (!status) { throw new Error("No changes to commit."); }
