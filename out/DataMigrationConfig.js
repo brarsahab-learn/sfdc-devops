@@ -59,7 +59,6 @@ const CONFIG_FILE = ".sf-devops-dm.json";
 const SOURCE_ORG_KEY = "sfDevops.dm.sourceOrg";
 const TARGET_ORG_KEY = "sfDevops.dm.targetOrg";
 const DEFAULT_CONFIG = {
-    autoCreateExternalId: true,
     objects: [],
     seedDir: ".git/sf-devops-dm/seed",
     batchSize: 190,
@@ -70,7 +69,6 @@ function readDmConfig(workspaceRoot) {
         const raw = fs.readFileSync(filePath, "utf-8");
         const parsed = JSON.parse(raw);
         return {
-            autoCreateExternalId: parsed.autoCreateExternalId ?? true,
             objects: parsed.objects ?? [],
             seedDir: parsed.seedDir ?? DEFAULT_CONFIG.seedDir,
             batchSize: parsed.batchSize ?? 190,

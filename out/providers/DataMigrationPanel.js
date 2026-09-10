@@ -129,7 +129,7 @@ class DataMigrationPanel {
         this._workspaceRoot = _workspaceRoot;
         this._disposables = [];
         this._refreshing = false;
-        this._config = { objects: [], autoCreateExternalId: true, batchSize: 190, seedDir: ".git/sf-devops-dm/seed" };
+        this._config = { objects: [], batchSize: 190, seedDir: ".git/sf-devops-dm/seed" };
         this._activeTab = "config";
         this._pullState = "idle";
         this._loadState = "idle";
@@ -151,7 +151,7 @@ class DataMigrationPanel {
         // backstop against a stale render or a message that was already in flight.
         const EXCLUSIVE_COMMANDS = new Set([
             "pull", "load", "pullAndLoad", "rollback", "autoSort",
-            "checkExtId", "checkAllExtIds", "createExtId", "createAllExtIds",
+            "checkExtId", "checkAllExtIds",
             "retryFailed", "clearAndReload", "clearAllAndReload",
         ]);
         this._panel.webview.onDidReceiveMessage(async (msg) => {
@@ -361,12 +361,6 @@ class DataMigrationPanel {
                         break;
                     case "checkAllExtIds":
                         await this._handleCheckAllExtIds(msg.targetOrg);
-                        break;
-                    case "createExtId":
-                        await this._handleCreateExtId(msg.sobject, msg.targetOrg);
-                        break;
-                    case "createAllExtIds":
-                        await this._handleCreateAllExtIds(msg.targetOrg);
                         break;
                     case "refreshOrgs": {
                         this._panel.webview.postMessage({ command: "logLine", text: "Refreshing org list...", level: "info" });
@@ -756,7 +750,6 @@ class DataMigrationPanel {
             const cfg = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
             const obj = cfg.objects.find((o) => o.sobject === sobject);
             if (obj) {
-                obj.externalIdVerified = !!fieldName;
                 if (fieldName) {
                     obj.externalIdField = fieldName;
                 }
@@ -777,7 +770,6 @@ class DataMigrationPanel {
                 await Promise.allSettled(chunk.map(async (obj) => {
                     try {
                         const fieldName = await (0, DataMigrationEngine_1.checkExternalId)(targetOrg, obj.sobject, this._workspaceRoot, onLog);
-                        obj.externalIdVerified = !!fieldName;
                         if (fieldName) {
                             obj.externalIdField = fieldName;
                         }
@@ -787,40 +779,6 @@ class DataMigrationPanel {
                         onLog(`${obj.sobject}: check error — ${String(err)}`, "error");
                     }
                 }));
-            }
-            (0, DataMigrationConfig_1.writeDmConfig)(this._workspaceRoot, cfg);
-            this._config = cfg;
-        });
-    }
-    async _handleCreateExtId(sobject, targetOrg) {
-        await this._runExtBusy(`Creating ExternalId for ${sobject}…`, async () => {
-            const { onLog } = this._makeLogHandlers(this._loadLog);
-            const fieldName = await (0, DataMigrationEngine_1.createExternalIdField)(targetOrg, sobject, this._workspaceRoot, onLog);
-            const cfg = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
-            const obj = cfg.objects.find((o) => o.sobject === sobject);
-            if (obj) {
-                obj.externalIdField = fieldName;
-                obj.externalIdVerified = true;
-                (0, DataMigrationConfig_1.writeDmConfig)(this._workspaceRoot, cfg);
-                this._config = cfg;
-            }
-            onLog(`Created ExternalId field for ${sobject}: ${fieldName}`, "success");
-        });
-    }
-    async _handleCreateAllExtIds(targetOrg) {
-        await this._runExtBusy("Creating ExternalIds…", async () => {
-            const { onLog } = this._makeLogHandlers(this._loadLog);
-            const cfg = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
-            for (const obj of cfg.objects.filter((o) => o.active !== false && !o.externalIdVerified)) {
-                try {
-                    const fieldName = await (0, DataMigrationEngine_1.createExternalIdField)(targetOrg, obj.sobject, this._workspaceRoot, onLog);
-                    obj.externalIdField = fieldName;
-                    obj.externalIdVerified = true;
-                    onLog(`Created ExternalId for ${obj.sobject}: ${fieldName}`, "success");
-                }
-                catch (err) {
-                    onLog(`Failed for ${obj.sobject}: ${String(err)}`, "error");
-                }
             }
             (0, DataMigrationConfig_1.writeDmConfig)(this._workspaceRoot, cfg);
             this._config = cfg;
@@ -903,8 +861,8 @@ class DataMigrationPanel {
             let rows = "";
             objects.forEach((obj, idx) => {
                 const active = obj.active !== false;
-                const extIdBadge = obj.externalIdVerified
-                    ? `<span class="badge badge-green" title="${esc(obj.externalIdField ?? "")}">✅ ${esc(obj.externalIdField ?? "")}</span>`
+                const extIdBadge = obj.externalIdField
+                    ? `<span class="badge badge-green" title="${esc(obj.externalIdField)}">✅ ${esc(obj.externalIdField)}</span>`
                     : `<span class="badge badge-amber" style="cursor:pointer" onclick="send('switchTab',{tab:'extids'})">⚠️ Not set</span>`;
                 const queryPreview = (obj.query || "").length > 60 ? esc(obj.query.slice(0, 60)) + "…" : esc(obj.query ?? "");
                 rows += `
@@ -957,10 +915,6 @@ class DataMigrationPanel {
             return `
             <div class="settings-card">
                 <h3>Settings</h3>
-                <div class="toggle-row">
-                    <label class="toggle-sw"><input type="checkbox" id="autoCreateExtId" ${config.autoCreateExternalId ? "checked" : ""} ${dis} onchange="toggleAutoCreate(this.checked)"><span class="slider"></span></label>
-                    <span class="toggle-label">Auto-create External ID fields if not found (recommended)</span>
-                </div>
                 <div class="field-row">
                     <label>Batch size</label>
                     <input type="number" id="batchSize" value="${esc(String(config.batchSize ?? 190))}" min="1" max="10000" style="width:90px;flex:none" ${dis} oninput="pendingSettings.batchSize=+this.value" />
@@ -1202,19 +1156,15 @@ class DataMigrationPanel {
             }
             let rows = "";
             for (const obj of activeObjs) {
-                const status = obj.externalIdVerified
+                const status = obj.externalIdField
                     ? `<span class="badge badge-green">✅ Verified</span>`
                     : `<span class="badge badge-amber">⚠️ Not set</span>`;
-                const createBtn = !obj.externalIdVerified
-                    ? `<button class="btn btn-sm btn-primary" ${dis} onclick="send('createExtId',{sobject:${esc(JSON.stringify(obj.sobject))},targetOrg:${esc(JSON.stringify(targetOrg))}})">Create</button>`
-                    : "";
                 rows += `<tr>
                     <td><code>${esc(obj.sobject)}</code></td>
                     <td>${esc(obj.externalIdField ?? "—")}</td>
                     <td>${status}</td>
                     <td class="row-actions">
                         <button class="btn btn-sm" ${dis} onclick="send('checkExtId',{sobject:${esc(JSON.stringify(obj.sobject))},targetOrg:${esc(JSON.stringify(targetOrg))}})">Re-check</button>
-                        ${createBtn}
                     </td>
                 </tr>`;
             }
@@ -1227,7 +1177,7 @@ class DataMigrationPanel {
             </div>
             <div class="toolbar" style="margin-top:16px">
                 <button class="btn btn-primary" ${dis} onclick="send('checkAllExtIds',{targetOrg:${esc(JSON.stringify(targetOrg))}})">Re-check All</button>
-                <button class="btn" ${dis} onclick="send('createAllExtIds',{targetOrg:${esc(JSON.stringify(targetOrg))}})">Auto-Create All Missing</button>
+                <span style="color:var(--vscode-descriptionForeground);font-size:12px;margin-left:12px">If a field is missing, create it manually in Salesforce Setup.</span>
             </div>
             <div class="log-area" id="log-area" style="margin-top:16px">${loadLog.map((l) => `<div class="log-line ${l.level}">${esc(l.text)}</div>`).join("")}</div>`;
         };
@@ -1398,7 +1348,6 @@ const vscode = acquireVsCodeApi();
 const DATA = ${jsonInject(vm)};
 
 let pendingSettings = {
-    autoCreateExternalId: DATA.config.autoCreateExternalId,
     batchSize: DATA.config.batchSize
 };
 
@@ -1425,12 +1374,6 @@ function startPullAndLoad() { send('pullAndLoad', { sourceOrg: getPullSourceOrg(
 
 // ── Settings ─────────────────────────────────────────────────────────────────
 function saveSettings() {
-    const cfg = Object.assign({}, DATA.config, pendingSettings);
-    send('saveConfig', { config: cfg });
-}
-
-function toggleAutoCreate(checked) {
-    pendingSettings.autoCreateExternalId = checked;
     const cfg = Object.assign({}, DATA.config, pendingSettings);
     send('saveConfig', { config: cfg });
 }
@@ -1621,7 +1564,6 @@ window.startPullAndLoad  = startPullAndLoad;
 window.getPullSourceOrg  = getPullSourceOrg;
 window.getLoadTargetOrg  = getLoadTargetOrg;
 window.saveSettings      = saveSettings;
-window.toggleAutoCreate  = toggleAutoCreate;
 window.moveObj           = moveObj;
 window.saveOrder         = saveOrder;
 window.openInlineEditor  = openInlineEditor;
