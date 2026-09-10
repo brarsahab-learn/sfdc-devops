@@ -941,10 +941,17 @@ async function loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress,
         catch { /* ignore */ }
     }
     const allActive = activeObjects(config);
+    // Apply object filter early so pre-flight and load order only cover the objects being run.
+    const objByName = new Map(allActive.map(o => [o.sobject, o]));
+    let objectList = allActive;
+    if (options?.objectFilter && options.objectFilter.length > 0) {
+        const filterSet = new Set(options.objectFilter);
+        objectList = allActive.filter(o => filterSet.has(o.sobject));
+    }
     if (!dryRun) {
-        emit(`Pre-flight: verifying ExternalId fields on ${allActive.length} object(s)…`, "info");
+        emit(`Pre-flight: verifying ExternalId fields on ${objectList.length} object(s)…`, "info");
         let preflightOk = true;
-        const chunks = chunkArray(allActive, 5);
+        const chunks = chunkArray(objectList, 5);
         for (const chunk of chunks) {
             const results = await Promise.allSettled(chunk.map(obj => checkExternalId(targetOrg, obj.sobject, workspaceRoot, () => { })));
             for (let j = 0; j < chunk.length; j++) {
@@ -967,17 +974,7 @@ async function loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress,
             return { loaded: 0, failed: 0, skipped: 0, blocked: 0 };
         }
     }
-    // Use the order from the config (already sorted by `order` field in activeObjects()).
-    // Do NOT re-sort here — the user has set the order in the Config tab and that is final.
-    // kahnSort was removed from this path so auto-sort during a run can no longer override it.
-    const objectsToProcess = allActive;
-    emit(`Load order: ${objectsToProcess.map(o => o.sobject).join(" → ")}`, "info");
-    const objByName = new Map(allActive.map(o => [o.sobject, o]));
-    let objectList = objectsToProcess;
-    if (options?.objectFilter && options.objectFilter.length > 0) {
-        const filterSet = new Set(options.objectFilter);
-        objectList = objectsToProcess.filter(o => filterSet.has(o.sobject));
-    }
+    emit(`Load order: ${objectList.map(o => o.sobject).join(" → ")}`, "info");
     let tracking = (0, DataMigrationConfig_1.readTracking)(workspaceRoot, targetOrg);
     let totalLoaded = 0, totalFailed = 0, totalSkipped = 0, totalBlocked = 0;
     const objStatusMap = new Map();
