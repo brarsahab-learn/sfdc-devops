@@ -870,7 +870,7 @@ export class DataMigrationPanel {
                         <button class="icon-btn" title="Edit" ${dis} onclick="openInlineEditor(${idx})">✏️</button>
                         <button class="icon-btn" title="Move Up" onclick="moveObj(${idx},-1)" ${idx === 0 || busy ? "disabled" : ""}>▲</button>
                         <button class="icon-btn" title="Move Down" onclick="moveObj(${idx},1)" ${idx === objects.length - 1 || busy ? "disabled" : ""}>▼</button>
-                        <button class="icon-btn danger-btn" title="Delete" ${dis} onclick="if(confirm('Delete '+${JSON.stringify(esc(obj.sobject))}+'?'))send('deleteObject',{id:${JSON.stringify(obj.id)}})">🗑</button>
+                        <button class="icon-btn danger-btn" title="Delete" ${dis} onclick="if(confirm('Delete '+${esc(JSON.stringify(esc(obj.sobject)))}+'?'))send('deleteObject',{id:${esc(JSON.stringify(obj.id))}})">🗑</button>
                     </td>
                 </tr>
                 <tr id="editor-${esc(obj.id)}" class="inline-editor-row" style="display:none">
@@ -966,7 +966,7 @@ export class DataMigrationPanel {
                 <td><strong>${r.count > 0 ? r.count : "—"}</strong></td>
                 <td style="color:var(--vscode-descriptionForeground);font-size:11px">${r.lastPulled ? new Date(r.lastPulled).toLocaleString() : "—"}</td>
                 <td class="row-actions">
-                    ${r.count > 0 ? `<button class="btn btn-sm danger-btn" ${dis} onclick="if(confirm('Clear seed for ${esc(r.sobject)}?'))send('clearSeed',{sobject:${JSON.stringify(r.sobject)}})">Clear</button>` : ""}
+                    ${r.count > 0 ? `<button class="btn btn-sm danger-btn" ${dis} onclick="if(confirm('Clear seed for ${esc(r.sobject)}?'))send('clearSeed',{sobject:${esc(JSON.stringify(r.sobject))}})">Clear</button>` : ""}
                 </td>
             </tr>`).join("");
 
@@ -1059,7 +1059,7 @@ export class DataMigrationPanel {
                 <div style="display:flex;gap:10px;flex-wrap:wrap">
                     <button class="btn btn-primary" ${dis} onclick="startLoad()">⬆ Load to Target</button>
                     <button class="btn btn-accent" ${dis} onclick="startPullAndLoad()">⬇⬆ Pull + Load</button>
-                    ${recentLogs.length > 0 ? `<button class="btn" onclick="send('viewLoadLog',{targetOrg:document.getElementById('loadTargetOrg')?.value||${JSON.stringify(targetOrg)}})" style="margin-left:auto">📄 Last Load Log</button>` : ""}
+                    ${recentLogs.length > 0 ? `<button class="btn" onclick="send('viewLoadLog',{targetOrg:document.getElementById('loadTargetOrg')?.value||${esc(JSON.stringify(targetOrg))}})" style="margin-left:auto">📄 Last Load Log</button>` : ""}
                 </div>
                 ${isDone ? `<div class="done-banner">✅ Load complete. Check the Tracking tab for results.</div>` : ""}
             </div>
@@ -1118,9 +1118,9 @@ export class DataMigrationPanel {
                     <td>${pending > 0 ? `<span style="color:var(--vscode-descriptionForeground)">${pending}</span>` : "0"}</td>
                     <td>${blocked}</td>
                     <td class="row-actions">
-                        ${failed > 0 ? `<button class="btn btn-sm" ${dis} onclick="send('retryFailed',{sobject:${JSON.stringify(obj)},targetOrg:${JSON.stringify(trackingOrg)}})">Retry Failed</button>` : ""}
-                        <button class="btn btn-sm btn-primary" title="Clear tracking history and reload this object" ${dis} onclick="send('clearAndReload',{sobject:${JSON.stringify(obj)},targetOrg:${JSON.stringify(trackingOrg)}})">↺ Rerun</button>
-                        <button class="btn btn-sm danger-btn" title="Clear tracking only (no Salesforce delete)" ${dis} onclick="if(confirm('Clear tracking for ${esc(obj)}?'))send('clearObject',{sobject:${JSON.stringify(obj)},targetOrg:${JSON.stringify(trackingOrg)}})">Clear</button>
+                        ${failed > 0 ? `<button class="btn btn-sm" ${dis} onclick="send('retryFailed',{sobject:${esc(JSON.stringify(obj))},targetOrg:${esc(JSON.stringify(trackingOrg))}})">Retry Failed</button>` : ""}
+                        <button class="btn btn-sm btn-primary" title="Clear tracking history and reload this object" ${dis} onclick="send('clearAndReload',{sobject:${esc(JSON.stringify(obj))},targetOrg:${esc(JSON.stringify(trackingOrg))}})">↺ Rerun</button>
+                        <button class="btn btn-sm danger-btn" title="Clear tracking only (no Salesforce delete)" ${dis} onclick="if(confirm('Clear tracking for ${esc(obj)}?'))send('clearObject',{sobject:${esc(JSON.stringify(obj))},targetOrg:${esc(JSON.stringify(trackingOrg))}})">Clear</button>
                     </td>
                 </tr>`;
             }
@@ -1142,11 +1142,11 @@ export class DataMigrationPanel {
                 </table>
             </div>
             <div class="toolbar" style="margin-top:14px">
-                <button class="btn btn-primary" ${dis} onclick="send('retryFailed',{targetOrg:${JSON.stringify(trackingOrg)}})">Retry All Failed</button>
-                <button class="btn btn-accent" ${dis} onclick="send('clearAllAndReload',{targetOrg:${JSON.stringify(trackingOrg)}})">↺ Clear All &amp; Reload</button>
-                <button class="btn danger-btn" ${dis} onclick="send('rollback',{targetOrg:${JSON.stringify(trackingOrg)},dryRun:false})">🗑 Full Rollback</button>
-                <button class="btn" ${dis} onclick="send('exportCsv',{targetOrg:${JSON.stringify(trackingOrg)}})">Export CSV</button>
-                <button class="btn" onclick="send('viewLoadLog',{targetOrg:${JSON.stringify(trackingOrg)}})">📄 Load Log</button>
+                <button class="btn btn-primary" ${dis} onclick="send('retryFailed',{targetOrg:${esc(JSON.stringify(trackingOrg))}})">Retry All Failed</button>
+                <button class="btn btn-accent" ${dis} onclick="send('clearAllAndReload',{targetOrg:${esc(JSON.stringify(trackingOrg))}})">↺ Clear All &amp; Reload</button>
+                <button class="btn danger-btn" ${dis} onclick="send('rollback',{targetOrg:${esc(JSON.stringify(trackingOrg))},dryRun:false})">🗑 Full Rollback</button>
+                <button class="btn" ${dis} onclick="send('exportCsv',{targetOrg:${esc(JSON.stringify(trackingOrg))}})">Export CSV</button>
+                <button class="btn" onclick="send('viewLoadLog',{targetOrg:${esc(JSON.stringify(trackingOrg))}})">📄 Load Log</button>
             </div>` : ""}`;
         };
 
@@ -1167,8 +1167,7 @@ export class DataMigrationPanel {
                     <td>${esc(obj.externalIdField ?? "—")}</td>
                     <td>${status}</td>
                     <td class="row-actions">
-                        <button class="btn btn-sm" ${dis} onclick="send('checkExtId',{sobject:${JSON.stringify(obj.sobject)},targetOrg:${JSON.stringify(targetOrg)}})">Re-check</button>
-                        ${!obj.externalIdVerified ? `<button class="btn btn-sm btn-primary" ${dis} onclick="send('createExtId',{sobject:${JSON.stringify(obj.sobject)},targetOrg:${JSON.stringify(targetOrg)}})">Auto-Create</button>` : ""}
+                        <button class="btn btn-sm" ${dis} onclick="send('checkExtId',{sobject:${esc(JSON.stringify(obj.sobject))},targetOrg:${esc(JSON.stringify(targetOrg))}})">Re-check</button>
                     </td>
                 </tr>`;
             }
@@ -1181,8 +1180,8 @@ export class DataMigrationPanel {
                 </table>
             </div>
             <div class="toolbar" style="margin-top:16px">
-                <button class="btn btn-primary" ${dis} onclick="send('checkAllExtIds',{targetOrg:${JSON.stringify(targetOrg)}})">Re-check All</button>
-                <button class="btn" ${dis} onclick="send('createAllExtIds',{targetOrg:${JSON.stringify(targetOrg)}})">Auto-Create All Missing</button>
+                <button class="btn btn-primary" ${dis} onclick="send('checkAllExtIds',{targetOrg:${esc(JSON.stringify(targetOrg))}})">Re-check All</button>
+                <button class="btn" ${dis} onclick="send('createAllExtIds',{targetOrg:${esc(JSON.stringify(targetOrg))}})">Auto-Create All Missing</button>
             </div>
             <div class="log-area" id="log-area" style="margin-top:16px">${loadLog.map((l) => `<div class="log-line">${esc(l)}</div>`).join("")}</div>`;
         };
