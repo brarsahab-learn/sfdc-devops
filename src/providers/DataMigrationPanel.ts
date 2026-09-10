@@ -13,7 +13,7 @@ import {
 } from "../DataMigrationConfig";
 import {
     makeController, pullData, loadData, rollbackData, autoSortByDependencies,
-    checkExternalId, listAvailableOrgs,
+    checkExternalId, listAvailableOrgs, reconcileTracking, validateMigration,
     DmRunController, DmProgressEvent
 } from "../DataMigrationEngine";
 import { log } from "../Log";
@@ -404,6 +404,80 @@ export class DataMigrationPanel {
                     await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
                     break;
                 }
+
+                case "reconcileTracking": {
+                    const rOrg = msg.targetOrg as string;
+                    if (!rOrg) { vscode.window.showWarningMessage("Select a target org first."); break; }
+                    const cfg = readDmConfig(this._workspaceRoot);
+                    await this._runExtBusy("Reconciling tracking…", async () => {
+                        const postLog = (text: string, level: string) => {
+                            const line = `[${new Date().toLocaleTimeString()}]  ${text}`;
+                            this._loadLog.push({ text: line, level });
+                            this._panel.webview.postMessage({ command: "logLine", text: line, level });
+                            log(`[DM reconcile] ${text}`);
+                        };
+                        postLog(`Reconciling tracking for ${rOrg} — querying target org…`, "info");
+                        this._activeTab = "load";
+                        const result = await reconcileTracking(rOrg, this._workspaceRoot, cfg, null, postLog);
+                        vscode.window.showInformationMessage(
+                            `Reconcile done: ${result.fixed} record(s) corrected, ${result.stillFailed} still failed.`
+                        );
+                        this._trackingCache = undefined;
+                    });
+                    break;
+                }
+
+                case "validateMigration": {
+                    const vOrg = msg.targetOrg as string;
+                    if (!vOrg) { vscode.window.showWarningMessage("Select a target org first."); break; }
+                    const cfg = readDmConfig(this._workspaceRoot);
+                    await this._runExtBusy("Validating migration…", async () => {
+                        const postLog = (text: string, level: string) => {
+                            const line = `[${new Date().toLocaleTimeString()}]  ${text}`;
+                            this._loadLog.push({ text: line, level });
+                            this._panel.webview.postMessage({ command: "logLine", text: line, level });
+                            log(`[DM validate] ${text}`);
+                        };
+                        this._activeTab = "load";
+                        const report = await validateMigration(vOrg, this._workspaceRoot, cfg, postLog);
+                        const matched = report.totalMatched;
+                        const total = report.objects.length;
+                        vscode.window.showInformationMessage(`Validation: ${matched}/${total} objects matched in target org.`);
+                        // Write validation log
+                        const vLogDir = path.join(dmBaseDir(this._workspaceRoot), "logs", "validation", safeOrgName(vOrg));
+                        writeJobLog(vLogDir, this._loadLog.slice(-200).map(l => `[${l.level.toUpperCase()}] ${l.text}`));
+                        this._trackingCache = undefined;
+                    });
+                    break;
+                }
+
+                case "viewErrors": {
+                    const veOrg = msg.targetOrg as string;
+                    const veSobject = msg.sobject as string;
+                    if (!veOrg || !veSobject) { break; }
+                    const trk = readTracking(this._workspaceRoot, veOrg);
+                    const failed = Object.entries(trk[veSobject] ?? {})
+                        .filter(([, e]) => e.status === "failed");
+                    if (failed.length === 0) {
+                        vscode.window.showInformationMessage(`No failed records for ${veSobject}.`);
+                        break;
+                    }
+                    // Show errors in a new untitled document for easy scrolling/search
+                    const lines = [
+                        `Failed records for ${veSobject} on ${veOrg} (${failed.length} total)`,
+                        "=".repeat(60),
+                        "",
+                        ...failed.map(([srcId, e]) =>
+                            `Source ID : ${srcId}\nError     : ${(e as any).error ?? "unknown"}\nAt        : ${(e as any).at ?? ""}\n`
+                        ),
+                    ];
+                    const doc = await vscode.workspace.openTextDocument({
+                        language: "plaintext",
+                        content: lines.join("\n"),
+                    });
+                    await vscode.window.showTextDocument(doc, vscode.ViewColumn.Beside);
+                    break;
+                }
             }
             } catch (err) {
                 // Safety net: any handler above that doesn't already catch its own errors
@@ -602,7 +676,10 @@ export class DataMigrationPanel {
         this._refresh();
         try {
             await loadData(targetOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, objectFilter: sobject ? [sobject] : undefined });
-            if (!dryRun) { writeJobLog(loadLogsDir(this._workspaceRoot, targetOrg), this._loadLog.map(l => `[${l.level}] ${l.text}`)); }
+            if (!dryRun) {
+                try { await validateMigration(targetOrg, this._workspaceRoot, this._config, onLog); } catch { /* validation failure should not block load completion */ }
+                writeJobLog(loadLogsDir(this._workspaceRoot, targetOrg), this._loadLog.map(l => `[${l.level}] ${l.text}`));
+            }
             this._panel.webview.postMessage({ command: "runDone", op: "load", dryRun });
         } catch (err) {
             this._reportError(`Load failed: ${String(err)}`);
@@ -989,8 +1066,7 @@ export class DataMigrationPanel {
                 <div class="toolbar" style="margin-bottom:12px">
                     ${isRunning
                         ? `<button class="btn danger-btn" onclick="send('cancelPull')">✕ Cancel Pull</button>`
-                        : `<button class="btn btn-primary" ${dis} onclick="startPull()">⬇ Pull All Objects</button>
-                           <button class="btn btn-accent" ${dis} onclick="startPullAndLoad()">⬇⬆ Pull + Load</button>`
+                        : `<button class="btn btn-primary" ${dis} onclick="startPull()">⬇ Pull All Objects</button>`
                     }
                     ${recentLogs.length > 0 ? `<button class="btn" onclick="send('viewPullLog',{})" style="margin-left:auto">📄 Last Pull Log</button>` : ""}
                 </div>
@@ -1059,7 +1135,6 @@ export class DataMigrationPanel {
                 </div>
                 <div style="display:flex;gap:10px;flex-wrap:wrap">
                     <button class="btn btn-primary" ${dis} onclick="startLoad()">⬆ Load to Target</button>
-                    <button class="btn btn-accent" ${dis} onclick="startPullAndLoad()">⬇⬆ Pull + Load</button>
                     ${recentLogs.length > 0 ? `<button class="btn" onclick="send('viewLoadLog',{targetOrg:document.getElementById('loadTargetOrg')?.value||${esc(JSON.stringify(targetOrg))}})" style="margin-left:auto">📄 Last Load Log</button>` : ""}
                 </div>
                 ${isDone ? `<div class="done-banner">✅ Load complete. Check the Tracking tab for results.</div>` : ""}
@@ -1120,6 +1195,7 @@ export class DataMigrationPanel {
                     <td>${pending > 0 ? `<span style="color:var(--vscode-descriptionForeground)">${pending}</span>` : "0"}</td>
                     <td>${blocked}</td>
                     <td class="row-actions">
+                        ${failed > 0 ? `<button class="btn btn-sm" ${dis} onclick="send('viewErrors',{sobject:${esc(JSON.stringify(obj))},targetOrg:${esc(JSON.stringify(trackingOrg))}})" title="Show error details for failed records">⚠ Errors</button>` : ""}
                         ${failed > 0 ? `<button class="btn btn-sm" ${dis} onclick="send('retryFailed',{sobject:${esc(JSON.stringify(obj))},targetOrg:${esc(JSON.stringify(trackingOrg))}})">Retry Failed</button>` : ""}
                         <button class="btn btn-sm btn-primary" title="Clear tracking history and reload this object" ${dis} onclick="send('clearAndReload',{sobject:${esc(JSON.stringify(obj))},targetOrg:${esc(JSON.stringify(trackingOrg))}})">↺ Rerun</button>
                         <button class="btn btn-sm danger-btn" title="Clear tracking only (no Salesforce delete)" ${dis} onclick="if(confirm('Clear tracking for ${esc(obj)}?'))send('clearObject',{sobject:${esc(JSON.stringify(obj))},targetOrg:${esc(JSON.stringify(trackingOrg))}})">Clear</button>
@@ -1147,6 +1223,8 @@ export class DataMigrationPanel {
             <div class="toolbar" style="margin-top:14px">
                 <button class="btn btn-primary" ${dis} onclick="send('retryFailed',{targetOrg:${esc(JSON.stringify(trackingOrg))}})">Retry All Failed</button>
                 <button class="btn btn-accent" ${dis} onclick="send('clearAllAndReload',{targetOrg:${esc(JSON.stringify(trackingOrg))}})">↺ Clear All &amp; Reload</button>
+                <button class="btn" ${dis} title="Re-check failed records against target org and fix tracking for any that actually landed" onclick="if(confirm('Reconcile tracking for ${esc(trackingOrg)}? This will SOQL-query the target org to verify which failed records actually exist there.'))send('reconcileTracking',{targetOrg:${esc(JSON.stringify(trackingOrg))}})">🔍 Reconcile</button>
+                <button class="btn" ${dis} title="Query target org and verify record counts against tracking" onclick="send('validateMigration',{targetOrg:${esc(JSON.stringify(trackingOrg))}})">✓ Validate Migration</button>
                 <button class="btn danger-btn" ${dis} onclick="send('rollback',{targetOrg:${esc(JSON.stringify(trackingOrg))},dryRun:false})">🗑 Full Rollback</button>
                 <button class="btn" ${dis} onclick="send('exportCsv',{targetOrg:${esc(JSON.stringify(trackingOrg))}})">Export CSV</button>
                 <button class="btn" onclick="send('viewLoadLog',{targetOrg:${esc(JSON.stringify(trackingOrg))}})">📄 Load Log</button>
