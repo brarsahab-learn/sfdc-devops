@@ -1077,6 +1077,7 @@ export class DataMigrationPanel {
                 ...(targetOrg ? [targetOrg] : []),
                 ...trackedOrgs,
                 ...[...pipelineAliases],
+                ...availableOrgs.map(o => o.alias),
             ]);
             const orgSelectorOpts = [...allTrackOrgs].map(o =>
                 `<option value="${esc(o)}"${o === trackingOrg ? " selected" : ""}>${esc(o)}</option>`

@@ -1064,6 +1064,7 @@ class DataMigrationPanel {
                 ...(targetOrg ? [targetOrg] : []),
                 ...trackedOrgs,
                 ...[...pipelineAliases],
+                ...availableOrgs.map(o => o.alias),
             ]);
             const orgSelectorOpts = [...allTrackOrgs].map(o => `<option value="${esc(o)}"${o === trackingOrg ? " selected" : ""}>${esc(o)}</option>`).join("");
             // Show any object that has seed data OR tracking entries
