@@ -44,6 +44,8 @@ exports.parseCsv = parseCsv;
 exports.parseImportResult = parseImportResult;
 exports.loadData = loadData;
 exports.autoSortByDependencies = autoSortByDependencies;
+exports.reconcileTracking = reconcileTracking;
+exports.validateMigration = validateMigration;
 exports.rollbackData = rollbackData;
 exports.listAvailableOrgs = listAvailableOrgs;
 const fs = __importStar(require("fs"));
@@ -487,20 +489,7 @@ async function enableAutomationControl(targetOrg, workspaceRoot, emit) {
     catch (e) {
         emit(`⚠ Could not set up ${AUTOMATION_CONTROL_SOBJECT} for ${targetOrg}: ${e?.message ?? String(e)} — continuing without it`, "warn");
     }
-    try {
-        const { stdout } = await (0, SfCli_1.execSf)(["data", "query", "--query", `SELECT Skip_Lookup_Filters__c FROM User WHERE Id = '${userId}'`,
-            "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
-        const userRecord = (JSON.parse(stdout)?.result?.records ?? [])[0];
-        const originalValue = userRecord?.Skip_Lookup_Filters__c === true;
-        await (0, SfCli_1.execSf)(["data", "update", "record", "--sobject", "User", "--record-id", userId,
-            "--values", "Skip_Lookup_Filters__c=true", "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
-        emit(`✓ Set Skip_Lookup_Filters__c=true on the running user (will be restored to ${originalValue} after)`, "success");
-        state.userLookupFilters = { originalValue };
-    }
-    catch (e) {
-        emit(`⚠ Could not set Skip_Lookup_Filters__c on the running user: ${e?.message ?? String(e)} — continuing without it`, "warn");
-    }
-    return (state.customSetting || state.userLookupFilters) ? state : null;
+    return state.customSetting ? state : null;
 }
 async function restoreAutomationControl(targetOrg, workspaceRoot, state, emit) {
     if (state.customSetting) {
@@ -519,16 +508,6 @@ async function restoreAutomationControl(targetOrg, workspaceRoot, state, emit) {
         }
         catch (e) {
             emit(`✗ Could not restore ${AUTOMATION_CONTROL_SOBJECT} after the load — check it manually in ${targetOrg}: ${e?.message ?? String(e)}`, "error");
-        }
-    }
-    if (state.userLookupFilters) {
-        try {
-            await (0, SfCli_1.execSf)(["data", "update", "record", "--sobject", "User", "--record-id", state.userId,
-                "--values", `Skip_Lookup_Filters__c=${state.userLookupFilters.originalValue}`, "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
-            emit(`✓ Restored Skip_Lookup_Filters__c to ${state.userLookupFilters.originalValue} on the running user`, "success");
-        }
-        catch (e) {
-            emit(`✗ Could not restore Skip_Lookup_Filters__c on the running user — check it manually in ${targetOrg}: ${e?.message ?? String(e)}`, "error");
         }
     }
 }
@@ -624,6 +603,9 @@ function buildUpsertCsv(records, obj, referenceFields, objByName) {
             if (key === "Id") {
                 continue;
             }
+            if (key === obj.externalIdField) {
+                continue;
+            } // already first column; don't duplicate
             if (lookupFields.has(key)) {
                 const relCol = lookupToRelCol.get(key);
                 if (!relColSet.has(relCol)) {
@@ -641,7 +623,9 @@ function buildUpsertCsv(records, obj, referenceFields, objByName) {
     const rows = records.map(record => {
         return headers.map(h => {
             if (h === obj.externalIdField) {
-                return csvEscape(String(record.Id ?? ""));
+                // Use the record's own ExternalId value if already set; otherwise use source Id
+                const extVal = record[obj.externalIdField] ?? record.Id ?? "";
+                return csvEscape(String(extVal));
             }
             if (relColSet.has(h)) {
                 const lookupField = relColToLookupField.get(h);
@@ -866,25 +850,72 @@ function kahnSort(nodes, deps) {
     }
     return result;
 }
-// ---------------------------------------------------------------------------
-// loadData (main function)
-// ---------------------------------------------------------------------------
+async function enableLookupFilterBypass(targetOrg, workspaceRoot, emit) {
+    const userId = await getRunningUserId(targetOrg, workspaceRoot);
+    if (!userId) {
+        emit(`⚠ Could not resolve the running user in ${targetOrg} — lookup filter bypass skipped`, "warn");
+        return null;
+    }
+    try {
+        const { stdout: descOut } = await (0, SfCli_1.execSf)(["sobject", "describe", "--sobject", "User", "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 10 * 1024 * 1024 });
+        const userFields = JSON.parse(descOut)?.result?.fields ?? [];
+        const skipFilterField = userFields.find((f) => f.name === "Skip_Lookup_Filters__c");
+        if (!skipFilterField) {
+            emit(`⚠ User.Skip_Lookup_Filters__c not found in ${targetOrg} — lookup filters will not be bypassed.`, "warn");
+            emit(`  → Create a Checkbox field named "Skip_Lookup_Filters__c" on the User object, then re-run.`, "warn");
+            return null;
+        }
+        if (!skipFilterField.updateable) {
+            emit(`⚠ User.Skip_Lookup_Filters__c exists but is not editable by the running user — lookup filters will not be bypassed.`, "warn");
+            return null;
+        }
+        const { stdout } = await (0, SfCli_1.execSf)(["data", "query", "--query", `SELECT Skip_Lookup_Filters__c FROM User WHERE Id = '${userId}'`,
+            "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
+        const userRecord = (JSON.parse(stdout)?.result?.records ?? [])[0];
+        const originalValue = userRecord?.Skip_Lookup_Filters__c === true;
+        await (0, SfCli_1.execSf)(["data", "update", "record", "--sobject", "User", "--record-id", userId,
+            "--values", "Skip_Lookup_Filters__c=true", "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
+        emit(`✓ Set Skip_Lookup_Filters__c=true on the running user (will be restored to ${originalValue} after)`, "success");
+        return { userId, originalValue };
+    }
+    catch (e) {
+        emit(`⚠ Could not set Skip_Lookup_Filters__c on the running user: ${e?.message ?? String(e)} — continuing without it`, "warn");
+        return null;
+    }
+}
+async function restoreLookupFilterBypass(targetOrg, workspaceRoot, state, emit) {
+    try {
+        await (0, SfCli_1.execSf)(["data", "update", "record", "--sobject", "User", "--record-id", state.userId,
+            "--values", `Skip_Lookup_Filters__c=${state.originalValue}`, "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
+        emit(`✓ Restored Skip_Lookup_Filters__c to ${state.originalValue} on the running user`, "success");
+    }
+    catch (e) {
+        emit(`✗ Could not restore Skip_Lookup_Filters__c on the running user — check it manually in ${targetOrg}: ${e?.message ?? String(e)}`, "error");
+    }
+}
 /** Public entry point — wraps loadDataImpl with automation control (config.
- *  disableAutomationDuringLoad) so it's set up once before the load and torn down exactly once
- *  after, regardless of how loadDataImpl exits (success, thrown error, or an early return from
- *  cancellation). Keeping this as a thin wrapper avoids restructuring loadDataImpl's own control
- *  flow, which already returns early from several places. */
+ *  disableAutomationDuringLoad) and always applies Skip_Lookup_Filters__c bypass so
+ *  lookup filter validation exceptions cannot fire against the running user. Both are
+ *  set up once before the load and torn down exactly once after, regardless of how
+ *  loadDataImpl exits (success, thrown error, or an early return from cancellation). */
 async function loadData(targetOrg, workspaceRoot, config, onLog, onProgress, controller, options) {
-    if (!config.disableAutomationDuringLoad || options?.dryRun) {
+    if (options?.dryRun) {
         return loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress, controller, options);
     }
-    const automationState = await enableAutomationControl(targetOrg, workspaceRoot, onLog);
+    // Always bypass lookup filters for the running user — independent of disableAutomationDuringLoad.
+    const lookupFilterState = await enableLookupFilterBypass(targetOrg, workspaceRoot, onLog);
+    const automationState = config.disableAutomationDuringLoad
+        ? await enableAutomationControl(targetOrg, workspaceRoot, onLog)
+        : null;
     try {
         return await loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress, controller, options);
     }
     finally {
         if (automationState) {
             await restoreAutomationControl(targetOrg, workspaceRoot, automationState, onLog);
+        }
+        if (lookupFilterState) {
+            await restoreLookupFilterBypass(targetOrg, workspaceRoot, lookupFilterState, onLog);
         }
     }
 }
@@ -900,13 +931,11 @@ async function loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress,
     };
     const tmpDir = path.join(workspaceRoot, ".git", "sf-devops-dm", "tmp-load");
     fs.mkdirSync(tmpDir, { recursive: true });
-    let planDeps = {};
     let planRefFields = {};
     const planPath = path.join(seedDir, "plan.json");
     if (fs.existsSync(planPath)) {
         try {
             const plan = JSON.parse(fs.readFileSync(planPath, "utf-8"));
-            planDeps = plan.dependencies ?? {};
             planRefFields = plan.referenceFields ?? {};
         }
         catch { /* ignore */ }
@@ -938,34 +967,16 @@ async function loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress,
             return { loaded: 0, failed: 0, skipped: 0, blocked: 0 };
         }
     }
-    const depGraph = {};
-    for (const obj of allActive) {
-        const planDep = planDeps[obj.sobject] ?? [];
-        const configDep = obj.dependsOn ?? [];
-        depGraph[obj.sobject] = [...new Set([...planDep, ...configDep])].filter(d => allActive.some(o => o.sobject === d));
-    }
-    const sortedNames = kahnSort(allActive.map(o => o.sobject), depGraph);
-    const objectsToProcess = sortedNames
-        .map(name => allActive.find(o => o.sobject === name))
-        .filter(Boolean);
+    // Use the order from the config (already sorted by `order` field in activeObjects()).
+    // Do NOT re-sort here — the user has set the order in the Config tab and that is final.
+    // kahnSort was removed from this path so auto-sort during a run can no longer override it.
+    const objectsToProcess = allActive;
     emit(`Load order: ${objectsToProcess.map(o => o.sobject).join(" → ")}`, "info");
     const objByName = new Map(allActive.map(o => [o.sobject, o]));
     let objectList = objectsToProcess;
     if (options?.objectFilter && options.objectFilter.length > 0) {
-        const needed = new Set();
-        const addWithDeps = (sobject) => {
-            if (needed.has(sobject)) {
-                return;
-            }
-            needed.add(sobject);
-            for (const dep of depGraph[sobject] ?? []) {
-                addWithDeps(dep);
-            }
-        };
-        for (const s of options.objectFilter) {
-            addWithDeps(s);
-        }
-        objectList = objectsToProcess.filter(o => needed.has(o.sobject));
+        const filterSet = new Set(options.objectFilter);
+        objectList = objectsToProcess.filter(o => filterSet.has(o.sobject));
     }
     let tracking = (0, DataMigrationConfig_1.readTracking)(workspaceRoot, targetOrg);
     let totalLoaded = 0, totalFailed = 0, totalSkipped = 0, totalBlocked = 0;
@@ -1110,6 +1121,43 @@ async function loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress,
     return { loaded: totalLoaded, failed: totalFailed, skipped: totalSkipped, blocked: totalBlocked };
 }
 // ---------------------------------------------------------------------------
+// soqlVerifyByExternalId — fallback when Bulk API result files are unavailable
+// ---------------------------------------------------------------------------
+/**
+ * After a bulk upsert, if we cannot get per-record results from the CLI's
+ * result CSV files, SOQL-query the target org to see which records actually
+ * landed (identified by their ExternalId field value = source-record Id).
+ * Returns null only if the SOQL query itself fails; otherwise returns the
+ * list of {extIdVal, sfId} pairs that exist in the target org.
+ */
+async function soqlVerifyByExternalId(obj, records, targetOrg, workspaceRoot, emit) {
+    const extField = obj.externalIdField;
+    // Match the same value buildUpsertCsv puts in the CSV: prefer record[extField], fallback record.Id
+    const extIdValues = records.map(r => String(r[extField] ?? r.Id ?? "")).filter(Boolean);
+    if (extIdValues.length === 0) {
+        return [];
+    }
+    const found = [];
+    // Chunk to stay well under SOQL string-length limits
+    const chunks = chunkArray(extIdValues, 500);
+    for (const chunk of chunks) {
+        try {
+            const inList = chunk.map(v => `'${v.replace(/'/g, "\\'")}'`).join(",");
+            const query = `SELECT Id, ${extField} FROM ${obj.sobject} WHERE ${extField} IN (${inList})`;
+            const { stdout } = await (0, SfCli_1.execSf)(["data", "query", "--query", query, "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 60000, maxBuffer: 10 * 1024 * 1024 });
+            const parsed = JSON.parse(stdout);
+            for (const r of (parsed?.result?.records ?? [])) {
+                found.push({ extIdVal: String(r[extField] ?? ""), sfId: r.Id ?? "" });
+            }
+        }
+        catch (e) {
+            emit(`  ⚠ SOQL verification failed for ${obj.sobject}: ${e?.message ?? String(e)}`, "warn");
+            return null;
+        }
+    }
+    return found;
+}
+// ---------------------------------------------------------------------------
 // loadBatch — always-upsert via Bulk API 2.0 with relationship columns
 // ---------------------------------------------------------------------------
 async function loadBatch(obj, records, targetOrg, workspaceRoot, tmpDir, tracking, referenceFields, objByName, emit, onCount, maxBatchSize) {
@@ -1175,6 +1223,29 @@ async function loadBatch(obj, records, targetOrg, workspaceRoot, tmpDir, trackin
                 }
             }
             if (resultItems.length > 0) {
+                attemptFailed = false;
+                failed = resultItems.filter(r => !r.success).map(r => ({ refId: "", error: r.error }));
+            }
+        }
+        else if (resultItems.length === 0) {
+            // fetchBulkJobAllResults failed — fall back to SOQL verification.
+            // The bulk job DID complete (we have a jobId); we just can't read its result files.
+            // Query the target org directly to find which records landed successfully.
+            emit(`  ↩ Bulk result files unavailable for ${obj.sobject} — verifying via SOQL (${records.length} records)…`, "info");
+            const verified = await soqlVerifyByExternalId(obj, records, targetOrg, workspaceRoot, emit);
+            if (verified !== null) {
+                const foundMap = new Map(verified.map(v => [v.extIdVal, v.sfId]));
+                resultItems.length = 0;
+                for (const record of records) {
+                    const extIdVal = String(record[obj.externalIdField] ?? record.Id ?? "");
+                    const sfId = foundMap.get(extIdVal);
+                    if (sfId) {
+                        resultItems.push({ sfId, success: true, error: "", wasNewRecord: false });
+                    }
+                    else {
+                        resultItems.push({ sfId: "", success: false, error: "Not found in target org after upsert", wasNewRecord: false });
+                    }
+                }
                 attemptFailed = false;
                 failed = resultItems.filter(r => !r.success).map(r => ({ refId: "", error: r.error }));
             }
@@ -1355,6 +1426,149 @@ async function autoSortByDependencies(targetOrg, workspaceRoot, config, onLog) {
     }
     onLog("✓ Dependency sort complete", "success");
     return config;
+}
+// ---------------------------------------------------------------------------
+// reconcileTracking — SOQL-verify failed records and fix tracking
+// ---------------------------------------------------------------------------
+/**
+ * For every object in config that has an externalIdField, SOQL-query the target
+ * org to find "failed" tracking entries whose records actually made it to the org.
+ * Fixes their status to "created" so the Tracking tab reflects reality.
+ *
+ * Returns { fixed, stillFailed } counts across all objects.
+ */
+async function reconcileTracking(targetOrg, workspaceRoot, config, sobjectFilter, emit) {
+    const tracking = (0, DataMigrationConfig_1.readTracking)(workspaceRoot, targetOrg);
+    const objects = activeObjects(config).filter(o => o.externalIdField &&
+        (sobjectFilter === null || o.sobject === sobjectFilter));
+    let totalFixed = 0;
+    let totalStillFailed = 0;
+    for (const obj of objects) {
+        const objTracking = tracking[obj.sobject] ?? {};
+        const failedEntries = Object.entries(objTracking).filter(([, e]) => e.status === "failed");
+        if (failedEntries.length === 0) {
+            continue;
+        }
+        emit(`Reconciling ${obj.sobject}: checking ${failedEntries.length} failed record(s) in target org…`, "info");
+        // The ExternalId value in target = source record Id (set by buildUpsertCsv)
+        const sourceIds = failedEntries.map(([srcId]) => srcId);
+        const extField = obj.externalIdField;
+        const found = [];
+        const chunks = chunkArray(sourceIds, 500);
+        let soqlFailed = false;
+        for (const chunk of chunks) {
+            try {
+                const inList = chunk.map(v => `'${v.replace(/'/g, "\\'")}'`).join(",");
+                const query = `SELECT Id, ${extField} FROM ${obj.sobject} WHERE ${extField} IN (${inList})`;
+                const { stdout } = await (0, SfCli_1.execSf)(["data", "query", "--query", query, "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 60000, maxBuffer: 10 * 1024 * 1024 });
+                const parsed = JSON.parse(stdout);
+                for (const r of (parsed?.result?.records ?? [])) {
+                    found.push({ extIdVal: String(r[extField] ?? ""), sfId: r.Id ?? "" });
+                }
+            }
+            catch (e) {
+                emit(`  ✗ SOQL query failed for ${obj.sobject}: ${e?.message ?? String(e)}`, "error");
+                soqlFailed = true;
+                break;
+            }
+        }
+        if (soqlFailed) {
+            continue;
+        }
+        const foundMap = new Map(found.map(f => [f.extIdVal, f.sfId]));
+        let objFixed = 0;
+        let objStillFailed = 0;
+        for (const [srcId] of failedEntries) {
+            const sfId = foundMap.get(srcId);
+            if (sfId) {
+                tracking[obj.sobject][srcId] = { status: "created", id: sfId, at: now() };
+                objFixed++;
+            }
+            else {
+                objStillFailed++;
+            }
+        }
+        emit(`  ${obj.sobject}: ${objFixed} fixed, ${objStillFailed} genuinely failed`, objFixed > 0 ? "success" : "warn");
+        totalFixed += objFixed;
+        totalStillFailed += objStillFailed;
+    }
+    (0, DataMigrationConfig_1.writeTracking)(workspaceRoot, targetOrg, tracking);
+    emit(`Reconcile complete: ${totalFixed} record(s) corrected, ${totalStillFailed} still failed`, totalFixed > 0 ? "success" : "info");
+    return { fixed: totalFixed, stillFailed: totalStillFailed };
+}
+async function validateMigration(targetOrg, workspaceRoot, config, emit) {
+    const tracking = (0, DataMigrationConfig_1.readTracking)(workspaceRoot, targetOrg);
+    const objects = activeObjects(config).filter(o => o.externalIdField);
+    const report = {
+        targetOrg,
+        generatedAt: new Date().toISOString(),
+        objects: [],
+        totalMatched: 0,
+        totalDiscrepancies: 0,
+    };
+    emit(`Validating migration to ${targetOrg}…`, "info");
+    // Batch SOQL queries in groups of 5
+    const chunks = chunkArray(objects, 5);
+    for (const chunk of chunks) {
+        await Promise.allSettled(chunk.map(async (obj) => {
+            const objTracking = tracking[obj.sobject] ?? {};
+            let created = 0, failed = 0;
+            for (const e of Object.values(objTracking)) {
+                if (e.status === "created") {
+                    created++;
+                }
+                else if (e.status === "failed") {
+                    failed++;
+                }
+            }
+            let targetCount = null;
+            try {
+                const query = `SELECT COUNT() FROM ${obj.sobject} WHERE ${obj.externalIdField} != null`;
+                const { stdout } = await (0, SfCli_1.execSf)(["data", "query", "--query", query, "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
+                targetCount = JSON.parse(stdout)?.result?.totalSize ?? null;
+            }
+            catch { /* count stays null */ }
+            const match = targetCount !== null && targetCount === created;
+            const discrepancy = targetCount !== null ? targetCount - created : 0;
+            report.objects.push({
+                sobject: obj.sobject,
+                trackingCreated: created,
+                trackingFailed: failed,
+                trackingTotal: created + failed,
+                targetCount,
+                match,
+                discrepancy,
+            });
+            if (match) {
+                report.totalMatched++;
+            }
+            else {
+                report.totalDiscrepancies++;
+            }
+        }));
+    }
+    // Sort: discrepancies first
+    report.objects.sort((a, b) => (a.match ? 1 : 0) - (b.match ? 1 : 0));
+    // Emit formatted report
+    emit("", "info");
+    emit("═══════════════ Migration Validation Report ═══════════════", "info");
+    emit(`Target: ${targetOrg}   |   ${report.totalMatched} matched, ${report.totalDiscrepancies} discrepancies`, report.totalDiscrepancies > 0 ? "warn" : "success");
+    emit("", "info");
+    const colW = 30;
+    emit(`${"Object".padEnd(colW)}  Tracking↑  Target↑   Status`, "info");
+    emit("─".repeat(colW + 32), "info");
+    for (const o of report.objects) {
+        const tgt = o.targetCount !== null ? String(o.targetCount) : "?";
+        const status = o.targetCount === null ? "⚠ query failed"
+            : o.match ? "✓ match"
+                : o.discrepancy > 0 ? `+${o.discrepancy} in target (not tracked)`
+                    : `${o.discrepancy} missing from target`;
+        emit(`${o.sobject.padEnd(colW)}  ${String(o.trackingCreated).padStart(9)}  ${tgt.padStart(8)}  ${status}`, o.targetCount === null ? "warn" : o.match ? "success" : "error");
+    }
+    emit("─".repeat(colW + 32), "info");
+    emit("═".repeat(colW + 32), "info");
+    emit("", "info");
+    return report;
 }
 // ---------------------------------------------------------------------------
 // rollbackData
