@@ -504,10 +504,18 @@ const AUTOMATION_CONTROL_FIELDS = [
 ];
 
 interface AutomationControlState {
-    recordId: string;
-    created: boolean; // true: we inserted this override — delete it on restore.
-                       // false: it already existed — restore its original field values.
-    originalValues?: Record<string, boolean>;
+    userId: string;
+    // DataMigrationControls__c (hierarchy custom setting) — undefined if it couldn't be set up.
+    customSetting?: {
+        recordId: string;
+        created: boolean; // true: we inserted this override — delete it on restore.
+                           // false: it already existed — restore its original field values.
+        originalValues?: Record<string, boolean>;
+    };
+    // User.Skip_Lookup_Filters__c on the running user's own record — the User record always
+    // exists (unlike the hierarchy custom setting), so this is just save-then-restore, no
+    // create/delete. undefined if it couldn't be read/set (field missing, no access, etc.).
+    userLookupFilters?: { originalValue: boolean };
 }
 
 export async function getRunningUserId(targetOrg: string, workspaceRoot: string): Promise<string | null> {
@@ -546,6 +554,8 @@ export async function enableAutomationControl(
         return null;
     }
 
+    const state: AutomationControlState = { userId };
+
     try {
         const { stdout } = await execSf(
             ["data", "query", "--query",
@@ -565,22 +575,42 @@ export async function enableAutomationControl(
             const originalValues: Record<string, boolean> = {};
             for (const f of AUTOMATION_CONTROL_FIELDS) { originalValues[f] = existing[f] === true; }
             emit(`✓ Automation disabled for load — existing ${AUTOMATION_CONTROL_SOBJECT} override for the running user updated (original values will be restored after)`, "success");
-            return { recordId: existing.Id as string, created: false, originalValues };
+            state.customSetting = { recordId: existing.Id as string, created: false, originalValues };
+        } else {
+            const { stdout: createOut } = await execSf(
+                ["data", "create", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
+                 "--values", `SetupOwnerId=${userId} ${trueValues}`, "--target-org", targetOrg, "--json"],
+                { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
+            );
+            const newId = JSON.parse(createOut)?.result?.id;
+            if (typeof newId !== "string" || !newId) { throw new Error("create record returned no id"); }
+            emit(`✓ Automation disabled for load — created a ${AUTOMATION_CONTROL_SOBJECT} override for the running user (will be removed after)`, "success");
+            state.customSetting = { recordId: newId, created: true };
         }
+    } catch (e: any) {
+        emit(`⚠ Could not set up ${AUTOMATION_CONTROL_SOBJECT} for ${targetOrg}: ${e?.message ?? String(e)} — continuing without it`, "warn");
+    }
 
-        const { stdout: createOut } = await execSf(
-            ["data", "create", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
-             "--values", `SetupOwnerId=${userId} ${trueValues}`, "--target-org", targetOrg, "--json"],
+    try {
+        const { stdout } = await execSf(
+            ["data", "query", "--query", `SELECT Skip_Lookup_Filters__c FROM User WHERE Id = '${userId}'`,
+             "--target-org", targetOrg, "--json"],
             { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
         );
-        const newId = JSON.parse(createOut)?.result?.id;
-        if (typeof newId !== "string" || !newId) { throw new Error("create record returned no id"); }
-        emit(`✓ Automation disabled for load — created a ${AUTOMATION_CONTROL_SOBJECT} override for the running user (will be removed after)`, "success");
-        return { recordId: newId, created: true };
+        const userRecord = (JSON.parse(stdout)?.result?.records ?? [])[0];
+        const originalValue = userRecord?.Skip_Lookup_Filters__c === true;
+        await execSf(
+            ["data", "update", "record", "--sobject", "User", "--record-id", userId,
+             "--values", "Skip_Lookup_Filters__c=true", "--target-org", targetOrg, "--json"],
+            { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
+        );
+        emit(`✓ Set Skip_Lookup_Filters__c=true on the running user (will be restored to ${originalValue} after)`, "success");
+        state.userLookupFilters = { originalValue };
     } catch (e: any) {
-        emit(`⚠ Could not set up ${AUTOMATION_CONTROL_SOBJECT} for ${targetOrg}: ${e?.message ?? String(e)} — continuing without automation control`, "warn");
-        return null;
+        emit(`⚠ Could not set Skip_Lookup_Filters__c on the running user: ${e?.message ?? String(e)} — continuing without it`, "warn");
     }
+
+    return (state.customSetting || state.userLookupFilters) ? state : null;
 }
 
 export async function restoreAutomationControl(
@@ -589,25 +619,40 @@ export async function restoreAutomationControl(
     state: AutomationControlState,
     emit: LogFn,
 ): Promise<void> {
-    try {
-        if (state.created) {
-            await execSf(
-                ["data", "delete", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
-                 "--record-id", state.recordId, "--target-org", targetOrg, "--json"],
-                { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
-            );
-            emit(`✓ Removed the ${AUTOMATION_CONTROL_SOBJECT} override created for this load`, "success");
-        } else if (state.originalValues) {
-            const restoreValues = AUTOMATION_CONTROL_FIELDS.map(f => `${f}=${state.originalValues![f]}`).join(" ");
-            await execSf(
-                ["data", "update", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
-                 "--record-id", state.recordId, "--values", restoreValues, "--target-org", targetOrg, "--json"],
-                { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
-            );
-            emit(`✓ Restored the running user's original ${AUTOMATION_CONTROL_SOBJECT} values`, "success");
+    if (state.customSetting) {
+        try {
+            if (state.customSetting.created) {
+                await execSf(
+                    ["data", "delete", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
+                     "--record-id", state.customSetting.recordId, "--target-org", targetOrg, "--json"],
+                    { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
+                );
+                emit(`✓ Removed the ${AUTOMATION_CONTROL_SOBJECT} override created for this load`, "success");
+            } else if (state.customSetting.originalValues) {
+                const restoreValues = AUTOMATION_CONTROL_FIELDS.map(f => `${f}=${state.customSetting!.originalValues![f]}`).join(" ");
+                await execSf(
+                    ["data", "update", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
+                     "--record-id", state.customSetting.recordId, "--values", restoreValues, "--target-org", targetOrg, "--json"],
+                    { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
+                );
+                emit(`✓ Restored the running user's original ${AUTOMATION_CONTROL_SOBJECT} values`, "success");
+            }
+        } catch (e: any) {
+            emit(`✗ Could not restore ${AUTOMATION_CONTROL_SOBJECT} after the load — check it manually in ${targetOrg}: ${e?.message ?? String(e)}`, "error");
         }
-    } catch (e: any) {
-        emit(`✗ Could not restore ${AUTOMATION_CONTROL_SOBJECT} after the load — check it manually in ${targetOrg}: ${e?.message ?? String(e)}`, "error");
+    }
+
+    if (state.userLookupFilters) {
+        try {
+            await execSf(
+                ["data", "update", "record", "--sobject", "User", "--record-id", state.userId,
+                 "--values", `Skip_Lookup_Filters__c=${state.userLookupFilters.originalValue}`, "--target-org", targetOrg, "--json"],
+                { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
+            );
+            emit(`✓ Restored Skip_Lookup_Filters__c to ${state.userLookupFilters.originalValue} on the running user`, "success");
+        } catch (e: any) {
+            emit(`✗ Could not restore Skip_Lookup_Filters__c on the running user — check it manually in ${targetOrg}: ${e?.message ?? String(e)}`, "error");
+        }
     }
 }
 

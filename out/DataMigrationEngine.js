@@ -456,6 +456,7 @@ async function enableAutomationControl(targetOrg, workspaceRoot, emit) {
         emit(`⚠ Could not resolve the running user in ${targetOrg} — skipping automation control`, "warn");
         return null;
     }
+    const state = { userId };
     try {
         const { stdout } = await (0, SfCli_1.execSf)(["data", "query", "--query",
             `SELECT Id, ${AUTOMATION_CONTROL_FIELDS.join(", ")} FROM ${AUTOMATION_CONTROL_SOBJECT} WHERE SetupOwnerId = '${userId}'`,
@@ -470,38 +471,65 @@ async function enableAutomationControl(targetOrg, workspaceRoot, emit) {
                 originalValues[f] = existing[f] === true;
             }
             emit(`✓ Automation disabled for load — existing ${AUTOMATION_CONTROL_SOBJECT} override for the running user updated (original values will be restored after)`, "success");
-            return { recordId: existing.Id, created: false, originalValues };
+            state.customSetting = { recordId: existing.Id, created: false, originalValues };
         }
-        const { stdout: createOut } = await (0, SfCli_1.execSf)(["data", "create", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
-            "--values", `SetupOwnerId=${userId} ${trueValues}`, "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
-        const newId = JSON.parse(createOut)?.result?.id;
-        if (typeof newId !== "string" || !newId) {
-            throw new Error("create record returned no id");
+        else {
+            const { stdout: createOut } = await (0, SfCli_1.execSf)(["data", "create", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
+                "--values", `SetupOwnerId=${userId} ${trueValues}`, "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
+            const newId = JSON.parse(createOut)?.result?.id;
+            if (typeof newId !== "string" || !newId) {
+                throw new Error("create record returned no id");
+            }
+            emit(`✓ Automation disabled for load — created a ${AUTOMATION_CONTROL_SOBJECT} override for the running user (will be removed after)`, "success");
+            state.customSetting = { recordId: newId, created: true };
         }
-        emit(`✓ Automation disabled for load — created a ${AUTOMATION_CONTROL_SOBJECT} override for the running user (will be removed after)`, "success");
-        return { recordId: newId, created: true };
     }
     catch (e) {
-        emit(`⚠ Could not set up ${AUTOMATION_CONTROL_SOBJECT} for ${targetOrg}: ${e?.message ?? String(e)} — continuing without automation control`, "warn");
-        return null;
+        emit(`⚠ Could not set up ${AUTOMATION_CONTROL_SOBJECT} for ${targetOrg}: ${e?.message ?? String(e)} — continuing without it`, "warn");
     }
+    try {
+        const { stdout } = await (0, SfCli_1.execSf)(["data", "query", "--query", `SELECT Skip_Lookup_Filters__c FROM User WHERE Id = '${userId}'`,
+            "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
+        const userRecord = (JSON.parse(stdout)?.result?.records ?? [])[0];
+        const originalValue = userRecord?.Skip_Lookup_Filters__c === true;
+        await (0, SfCli_1.execSf)(["data", "update", "record", "--sobject", "User", "--record-id", userId,
+            "--values", "Skip_Lookup_Filters__c=true", "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
+        emit(`✓ Set Skip_Lookup_Filters__c=true on the running user (will be restored to ${originalValue} after)`, "success");
+        state.userLookupFilters = { originalValue };
+    }
+    catch (e) {
+        emit(`⚠ Could not set Skip_Lookup_Filters__c on the running user: ${e?.message ?? String(e)} — continuing without it`, "warn");
+    }
+    return (state.customSetting || state.userLookupFilters) ? state : null;
 }
 async function restoreAutomationControl(targetOrg, workspaceRoot, state, emit) {
-    try {
-        if (state.created) {
-            await (0, SfCli_1.execSf)(["data", "delete", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
-                "--record-id", state.recordId, "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
-            emit(`✓ Removed the ${AUTOMATION_CONTROL_SOBJECT} override created for this load`, "success");
+    if (state.customSetting) {
+        try {
+            if (state.customSetting.created) {
+                await (0, SfCli_1.execSf)(["data", "delete", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
+                    "--record-id", state.customSetting.recordId, "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
+                emit(`✓ Removed the ${AUTOMATION_CONTROL_SOBJECT} override created for this load`, "success");
+            }
+            else if (state.customSetting.originalValues) {
+                const restoreValues = AUTOMATION_CONTROL_FIELDS.map(f => `${f}=${state.customSetting.originalValues[f]}`).join(" ");
+                await (0, SfCli_1.execSf)(["data", "update", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
+                    "--record-id", state.customSetting.recordId, "--values", restoreValues, "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
+                emit(`✓ Restored the running user's original ${AUTOMATION_CONTROL_SOBJECT} values`, "success");
+            }
         }
-        else if (state.originalValues) {
-            const restoreValues = AUTOMATION_CONTROL_FIELDS.map(f => `${f}=${state.originalValues[f]}`).join(" ");
-            await (0, SfCli_1.execSf)(["data", "update", "record", "--sobject", AUTOMATION_CONTROL_SOBJECT,
-                "--record-id", state.recordId, "--values", restoreValues, "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
-            emit(`✓ Restored the running user's original ${AUTOMATION_CONTROL_SOBJECT} values`, "success");
+        catch (e) {
+            emit(`✗ Could not restore ${AUTOMATION_CONTROL_SOBJECT} after the load — check it manually in ${targetOrg}: ${e?.message ?? String(e)}`, "error");
         }
     }
-    catch (e) {
-        emit(`✗ Could not restore ${AUTOMATION_CONTROL_SOBJECT} after the load — check it manually in ${targetOrg}: ${e?.message ?? String(e)}`, "error");
+    if (state.userLookupFilters) {
+        try {
+            await (0, SfCli_1.execSf)(["data", "update", "record", "--sobject", "User", "--record-id", state.userId,
+                "--values", `Skip_Lookup_Filters__c=${state.userLookupFilters.originalValue}`, "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 30000, maxBuffer: 5 * 1024 * 1024 });
+            emit(`✓ Restored Skip_Lookup_Filters__c to ${state.userLookupFilters.originalValue} on the running user`, "success");
+        }
+        catch (e) {
+            emit(`✗ Could not restore Skip_Lookup_Filters__c on the running user — check it manually in ${targetOrg}: ${e?.message ?? String(e)}`, "error");
+        }
     }
 }
 // ---------------------------------------------------------------------------

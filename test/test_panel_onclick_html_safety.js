@@ -91,7 +91,8 @@ function checkAllOnclicksSafe(html, label) {
 checkAllOnclicksSafe(makePanel("tracking")._renderHtml(makePanel("tracking")._buildViewModel()), "Tracking tab");
 checkAllOnclicksSafe(makePanel("extids")._renderHtml(makePanel("extids")._buildViewModel()), "ExternalId tab");
 checkAllOnclicksSafe(makePanel("config")._renderHtml(makePanel("config")._buildViewModel()), "Config tab");
-checkAllOnclicksSafe(makePanel("migrate")._renderHtml(makePanel("migrate")._buildViewModel()), "Migrate tab");
+checkAllOnclicksSafe(makePanel("pull")._renderHtml(makePanel("pull")._buildViewModel()), "Pull tab");
+checkAllOnclicksSafe(makePanel("load")._renderHtml(makePanel("load")._buildViewModel()), "Load tab");
 
 // The redesign (5.3.2) removed field-creation entirely — the extension never creates Salesforce
 // custom fields, so BOTH the per-object "Auto-Create" and bulk "Auto-Create All Missing" buttons

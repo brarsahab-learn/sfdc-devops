@@ -69,7 +69,7 @@ export class DataMigrationPanel {
     private _refreshing = false;
 
     private _config: DmConfig = { objects: [], batchSize: 190, seedDir: ".git/sf-devops-dm/seed" };
-    private _activeTab: "config" | "migrate" | "tracking" | "extids" = "config";
+    private _activeTab: "config" | "pull" | "load" | "tracking" | "extids" = "config";
     private _pullController: DmRunController | undefined;
     private _loadController: DmRunController | undefined;
     private _pullState: "idle" | "running" | "done" = "idle";
@@ -139,7 +139,7 @@ export class DataMigrationPanel {
         // operation — buttons are disabled client-side while busy, but this is the server-side
         // backstop against a stale render or a message that was already in flight.
         const EXCLUSIVE_COMMANDS = new Set([
-            "pullAndLoad", "rollback", "autoSort",
+            "pull", "load", "pullAndLoad", "rollback", "autoSort",
             "checkExtId", "checkAllExtIds",
             "retryFailed", "clearAndReload", "clearAllAndReload",
         ]);
@@ -239,6 +239,14 @@ export class DataMigrationPanel {
                     setTargetOrg(this._ctx, msg.alias);
                     this._trackingCache = undefined;
                     this._refresh();
+                    break;
+
+                case "pull":
+                    await this._startPull(msg.sourceOrg, !!msg.dryRun);
+                    break;
+
+                case "load":
+                    await this._startLoad(msg.targetOrg, !!msg.dryRun);
                     break;
 
                 case "pullAndLoad":
@@ -559,12 +567,35 @@ export class DataMigrationPanel {
         return { onLog, onProgress };
     }
 
+    private async _startPull(sourceOrg: string, dryRun: boolean): Promise<void> {
+        this._pullState = "running";
+        this._lastError = null;
+        this._pullLog = [];
+        this._dryRunMode = dryRun;
+        this._activeTab = "pull";
+        const ctrl = makeController();
+        this._pullController = ctrl;
+        const { onLog, onProgress } = this._makeLogHandlers(this._pullLog);
+        this._refresh();
+        try {
+            await pullData(sourceOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, dryRunSampleSize: 5 });
+            if (!dryRun) { writeJobLog(pullLogsDir(this._workspaceRoot), this._pullLog.map(l => `[${l.level}] ${l.text}`)); }
+            this._panel.webview.postMessage({ command: "runDone", op: "pull", dryRun });
+        } catch (err) {
+            this._reportError(`Pull failed: ${String(err)}`);
+        } finally {
+            this._pullState = "done";
+            this._pullController = undefined;
+            this._refresh();
+        }
+    }
+
     private async _startLoad(targetOrg: string, dryRun: boolean, sobject?: string): Promise<void> {
         this._loadState = "running";
         this._lastError = null;
         this._loadLog = [];
         this._dryRunMode = dryRun;
-        this._activeTab = "migrate";
+        this._activeTab = "load";
         const ctrl = makeController();
         this._loadController = ctrl;
         const { onLog, onProgress } = this._makeLogHandlers(this._loadLog);
@@ -588,7 +619,7 @@ export class DataMigrationPanel {
         this._pullState = "running";
         this._lastError = null;
         this._pullLog = [];
-        this._activeTab = "migrate";
+        this._activeTab = "pull";
         this._dryRunMode = dryRun;
         const pullCtrl = makeController();
         this._pullController = pullCtrl;
@@ -608,7 +639,7 @@ export class DataMigrationPanel {
                 loadActuallyRan = true;
                 this._loadState = "running";
                 this._loadLog = [];
-                this._activeTab = "migrate";
+                this._activeTab = "load";
                 const { onLog: loadLog, onProgress: loadProg } = this._makeLogHandlers(this._loadLog);
                 this._refresh();
                 await loadData(targetOrg, this._workspaceRoot, this._config, loadLog, loadProg, loadCtrl, { dryRun });
@@ -641,7 +672,7 @@ export class DataMigrationPanel {
         this._loadState = "running";
         this._lastError = null;
         this._loadLog = [];
-        this._activeTab = "migrate";
+        this._activeTab = "load";
         const ctrl = makeController();
         this._loadController = ctrl;
         const { onLog, onProgress } = this._makeLogHandlers(this._loadLog);
@@ -813,10 +844,10 @@ export class DataMigrationPanel {
             return out;
         }
 
-        const migrateBusy = pullState === "running" || loadState === "running" || loadState === "paused";
         const tabs: { id: string; label: string }[] = [
             { id: "config",   label: "⚙ Config" },
-            { id: "migrate",  label: `⬇⬆ Migrate${migrateBusy ? (loadState === "paused" ? " ⏸" : " ●") : ""}` },
+            { id: "pull",     label: "⬇ Pull" },
+            { id: "load",     label: `⬆ Load${loadState === "running" ? " ●" : loadState === "paused" ? " ⏸" : ""}` },
             { id: "tracking", label: "📊 Tracking" },
             { id: "extids",   label: "🔑 External IDs" },
         ];
@@ -924,13 +955,12 @@ export class DataMigrationPanel {
             </div>`;
         };
 
-        // ── Tab 2: Migrate (pull + load as one combined action) ─────────────
-        const renderMigrateTab = () => {
-            const pullRunning = pullState === "running";
-            const loadActive  = loadState === "running" || loadState === "paused";
-            const totalSeed   = seedInfo.reduce((s, r) => s + r.count, 0);
-            const hasSeed     = totalSeed > 0;
-            const isDone      = (pullState === "done" || loadState === "done") && !pullRunning && !loadActive;
+        // ── Tab 2: Pull ──────────────────────────────────────────────────────
+        const renderPullTab = () => {
+            const isRunning = pullState === "running";
+            const isDone    = pullState === "done";
+            const totalSeed = seedInfo.reduce((s, r) => s + r.count, 0);
+            const hasSeed   = totalSeed > 0;
 
             const seedRows = seedInfo.map(r => `<tr>
                 <td><code>${esc(r.sobject)}</code></td>
@@ -941,12 +971,54 @@ export class DataMigrationPanel {
                 </td>
             </tr>`).join("");
 
-            const recentPullLogs = listRecentLogs(pullLogsDir(this._workspaceRoot), 3);
-            const recentLoadLogs = listRecentLogs(loadLogsDir(this._workspaceRoot, targetOrg), 3);
+            const recentLogs = listRecentLogs(pullLogsDir(this._workspaceRoot), 3);
 
-            // Load phase (the second half of a Pull + Load run) takes over the progress view —
-            // it's the phase that actually writes records and can be paused/skipped/cancelled.
-            if (loadActive) {
+            return `
+            <div class="run-idle-card" style="max-width:680px">
+                <div class="field-row" style="margin-bottom:12px">
+                    <label style="width:100px">Source Org</label>
+                    <select id="pullSourceOrg" class="select" ${dis} onchange="if(this.value==='**connect**')send('openConnectOrg');else send('setSourceOrg',{alias:this.value})">
+                        ${orgOptions(sourceOrg)}
+                    </select>
+                    <button class="icon-btn" ${dis} onclick="send('refreshOrgs')" title="Refresh orgs">🔄</button>
+                </div>
+                <div class="toggle-row" style="margin-bottom:16px">
+                    <label class="toggle-sw"><input type="checkbox" id="dryRunToggle" ${dryRun ? "checked" : ""} ${dis}><span class="slider"></span></label>
+                    <span class="toggle-label">Dry Run — fetch 5 records per object, no files written</span>
+                </div>
+                <div class="toolbar" style="margin-bottom:12px">
+                    ${isRunning
+                        ? `<button class="btn danger-btn" onclick="send('cancelPull')">✕ Cancel Pull</button>`
+                        : `<button class="btn btn-primary" ${dis} onclick="startPull()">⬇ Pull All Objects</button>
+                           <button class="btn btn-accent" ${dis} onclick="startPullAndLoad()">⬇⬆ Pull + Load</button>`
+                    }
+                    ${recentLogs.length > 0 ? `<button class="btn" onclick="send('viewPullLog',{})" style="margin-left:auto">📄 Last Pull Log</button>` : ""}
+                </div>
+                ${isRunning ? `<div class="run-banner banner-teal" id="run-banner" style="margin-bottom:12px">
+                    <span>Pulling…</span><span style="flex:1"></span><span id="run-elapsed">00:00</span>
+                </div>` : ""}
+                ${isDone && !isRunning ? `<div class="done-banner">✅ Pull complete — ${totalSeed} total records in seed.</div>` : ""}
+            </div>
+
+            <h3 style="margin:20px 0 8px;font-size:13px">Seed Status${hasSeed ? ` — ${totalSeed} records total` : ""}</h3>
+            ${seedInfo.length === 0
+                ? `<p style="color:var(--vscode-descriptionForeground)">No active objects configured. Add objects in the Config tab.</p>`
+                : `<div class="table-wrap"><table class="data-table">
+                    <thead><tr><th>Object</th><th>Records in Seed</th><th>Last Pulled</th><th>Actions</th></tr></thead>
+                    <tbody>${seedRows}</tbody>
+                </table></div>`
+            }
+
+            <div class="log-area" id="log-area" style="margin-top:16px">${pullLog.map((l) => `<div class="log-line ${l.level}">${esc(l.text)}</div>`).join("")}</div>`;
+        };
+
+        // ── Tab 3: Load ──────────────────────────────────────────────────────
+        const renderLoadTab = () => {
+            const isActive = loadState === "running" || loadState === "paused";
+            const isDone   = loadState === "done";
+            const recentLogs = listRecentLogs(loadLogsDir(this._workspaceRoot, targetOrg), 3);
+
+            if (isActive) {
                 const bannerClass = dryRun ? "banner-amber" : "banner-teal";
                 const bannerLabel = dryRun ? "DRY RUN" : "LOADING";
                 return `
@@ -973,54 +1045,26 @@ export class DataMigrationPanel {
                 <div class="log-area" id="log-area">${loadLog.map((l) => `<div class="log-line ${l.level}">${esc(l.text)}</div>`).join("")}</div>`;
             }
 
-            // Pull phase (first half) — no pause/skip, just cancel.
-            if (pullRunning) {
-                return `
-                <div class="run-banner banner-teal" id="run-banner">
-                    <span>Pulling…</span><span style="flex:1"></span><span id="run-elapsed">00:00</span>
-                </div>
-                <div class="run-controls">
-                    <button class="btn danger-btn" onclick="send('cancelPull')">✕ Cancel</button>
-                </div>
-                <div class="log-area" id="log-area">${pullLog.map((l) => `<div class="log-line ${l.level}">${esc(l.text)}</div>`).join("")}</div>`;
-            }
-
             return `
-            <div class="run-idle-card" style="max-width:680px">
+            <div class="run-idle-card">
                 <div class="field-row" style="margin-bottom:12px">
-                    <label style="width:70px">Source</label>
-                    <select id="migrateSourceOrg" class="select" ${dis} onchange="if(this.value==='**connect**')send('openConnectOrg');else send('setSourceOrg',{alias:this.value})">
-                        ${orgOptions(sourceOrg)}
-                    </select>
-                    <span class="arrow">→</span>
-                    <label style="width:50px">Target</label>
-                    <select id="migrateTargetOrg" class="select" ${dis} onchange="if(this.value==='**connect**')send('openConnectOrg');else send('setTargetOrg',{alias:this.value})">
+                    <label style="width:100px">Target Org</label>
+                    <select id="loadTargetOrg" class="select" ${dis} onchange="if(this.value==='**connect**')send('openConnectOrg');else send('setTargetOrg',{alias:this.value})">
                         ${orgOptions(targetOrg)}
                     </select>
-                    <button class="icon-btn" ${dis} onclick="send('refreshOrgs')" title="Refresh orgs">🔄</button>
                 </div>
                 <div class="toggle-row" style="margin-bottom:16px">
                     <label class="toggle-sw"><input type="checkbox" id="dryRunToggle" ${dryRun ? "checked" : ""} ${dis}><span class="slider"></span></label>
-                    <span class="toggle-label">Dry Run — fetch a sample and validate only, nothing written to the target</span>
+                    <span class="toggle-label">Dry Run — validate only, no records inserted</span>
                 </div>
-                <div class="toolbar" style="margin-bottom:12px">
-                    <button class="btn btn-primary" ${dis} onclick="startPullAndLoad()">⬇⬆ Pull + Load</button>
-                    ${recentPullLogs.length > 0 ? `<button class="btn" onclick="send('viewPullLog',{})">📄 Last Pull Log</button>` : ""}
-                    ${recentLoadLogs.length > 0 ? `<button class="btn" onclick="send('viewLoadLog',{targetOrg:document.getElementById('migrateTargetOrg')?.value||${esc(JSON.stringify(targetOrg))}})">📄 Last Load Log</button>` : ""}
+                <div style="display:flex;gap:10px;flex-wrap:wrap">
+                    <button class="btn btn-primary" ${dis} onclick="startLoad()">⬆ Load to Target</button>
+                    <button class="btn btn-accent" ${dis} onclick="startPullAndLoad()">⬇⬆ Pull + Load</button>
+                    ${recentLogs.length > 0 ? `<button class="btn" onclick="send('viewLoadLog',{targetOrg:document.getElementById('loadTargetOrg')?.value||${esc(JSON.stringify(targetOrg))}})" style="margin-left:auto">📄 Last Load Log</button>` : ""}
                 </div>
-                ${isDone ? `<div class="done-banner">✅ Migration complete${hasSeed ? ` — ${totalSeed} records pulled` : ""}. Check the Tracking tab for load results.</div>` : ""}
+                ${isDone ? `<div class="done-banner">✅ Load complete. Check the Tracking tab for results.</div>` : ""}
             </div>
-
-            <h3 style="margin:20px 0 8px;font-size:13px">Seed Status${hasSeed ? ` — ${totalSeed} records total` : ""}</h3>
-            ${seedInfo.length === 0
-                ? `<p style="color:var(--vscode-descriptionForeground)">No active objects configured. Add objects in the Config tab.</p>`
-                : `<div class="table-wrap"><table class="data-table">
-                    <thead><tr><th>Object</th><th>Records in Seed</th><th>Last Pulled</th><th>Actions</th></tr></thead>
-                    <tbody>${seedRows}</tbody>
-                </table></div>`
-            }
-
-            <div class="log-area" id="log-area" style="margin-top:16px">${[...pullLog, ...loadLog].map((l) => `<div class="log-line ${l.level}">${esc(l.text)}</div>`).join("")}</div>`;
+            <div class="log-area" id="log-area" style="margin-top:16px">${loadLog.map((l) => `<div class="log-line ${l.level}">${esc(l.text)}</div>`).join("")}</div>`;
         };
 
         // ── Tab 4: Tracking ──────────────────────────────────────────────────
@@ -1146,7 +1190,8 @@ export class DataMigrationPanel {
         };
 
         const tabContent = activeTab === "config"   ? renderConfigTab()
-                         : activeTab === "migrate"  ? renderMigrateTab()
+                         : activeTab === "pull"     ? renderPullTab()
+                         : activeTab === "load"     ? renderLoadTab()
                          : activeTab === "tracking" ? renderTrackingTab()
                          :                            renderExtIdsTab();
 
@@ -1170,7 +1215,6 @@ body { padding: 0; overflow: hidden; display: flex; flex-direction: column; heig
 .panel-title-bar { display: flex; align-items: center; gap: 12px; padding: 10px 20px 0; }
 .panel-title { font-size: 15px; font-weight: 700; letter-spacing: 0.02em; }
 .role-badge { font-size: 10px; background: #00C9B1; color: #000; border-radius: 4px; padding: 2px 7px; font-weight: 600; text-transform: uppercase; }
-.arrow { color: #00C9B1; font-size: 16px; font-weight: 700; }
 .tab-bar { display: flex; gap: 2px; padding: 0 20px; border-bottom: 1px solid var(--vscode-panel-border); }
 .tab-btn { background: none; border: none; border-bottom: 3px solid transparent; cursor: pointer; padding: 8px 16px; font-size: 13px; color: var(--vscode-foreground); font-family: var(--vscode-font-family); transition: color 0.15s; }
 .tab-btn:hover { color: #00C9B1; }
@@ -1320,9 +1364,11 @@ function getDryRun() {
 }
 
 // ── Run controls ────────────────────────────────────────────────────────────
-function getMigrateSourceOrg() { return getVal('migrateSourceOrg') || ''; }
-function getMigrateTargetOrg() { return getVal('migrateTargetOrg') || ''; }
-function startPullAndLoad() { send('pullAndLoad', { sourceOrg: getMigrateSourceOrg(), targetOrg: getMigrateTargetOrg(), dryRun: getDryRun() }); }
+function getPullSourceOrg() { return getVal('pullSourceOrg') || ''; }
+function getLoadTargetOrg() { return getVal('loadTargetOrg') || ''; }
+function startPull()        { send('pull',        { sourceOrg: getPullSourceOrg(), dryRun: getDryRun() }); }
+function startLoad()        { send('load',        { targetOrg: getLoadTargetOrg(), dryRun: getDryRun() }); }
+function startPullAndLoad() { send('pullAndLoad', { sourceOrg: getPullSourceOrg(), targetOrg: getLoadTargetOrg(), dryRun: getDryRun() }); }
 
 // ── Settings ─────────────────────────────────────────────────────────────────
 function saveSettings() {
@@ -1510,9 +1556,11 @@ window.addEventListener('message', function(event) {
 
 // Expose to onclick handlers
 window.send              = send;
-window.startPullAndLoad    = startPullAndLoad;
-window.getMigrateSourceOrg = getMigrateSourceOrg;
-window.getMigrateTargetOrg = getMigrateTargetOrg;
+window.startPull         = startPull;
+window.startLoad         = startLoad;
+window.startPullAndLoad  = startPullAndLoad;
+window.getPullSourceOrg  = getPullSourceOrg;
+window.getLoadTargetOrg  = getLoadTargetOrg;
 window.saveSettings      = saveSettings;
 window.moveObj           = moveObj;
 window.saveOrder         = saveOrder;

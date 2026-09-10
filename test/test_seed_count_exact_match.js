@@ -51,7 +51,7 @@ function makePanel() {
     panel._ctx = { globalState: { get: () => undefined } };
     panel._panel = { webview: { postMessage: () => {}, asWebviewUri: (u) => u, cspSource: "self" } };
     panel._config = dmConfig.readDmConfig();
-    panel._activeTab = "migrate";
+    panel._activeTab = "pull";
     panel._pullState = "idle";
     panel._loadState = "idle";
     panel._extBusy = false;
