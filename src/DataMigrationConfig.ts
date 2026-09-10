@@ -5,22 +5,20 @@ import * as path from "path";
 import * as vscode from "vscode";
 
 export interface DmObjectConfig {
-    id:                  string;
-    sobject:             string;
-    label?:              string;
-    query:               string;
-    active:              boolean;
-    order:               number;
-    dependsOn?:          string[];
-    externalIdField?:    string;
-    externalIdVerified?: boolean;
+    id:               string;
+    sobject:          string;
+    label?:           string;
+    query:            string;
+    active:           boolean;
+    order:            number;
+    dependsOn?:       string[];
+    externalIdField?: string;
 }
 
 export interface DmConfig {
-    autoCreateExternalId: boolean;
-    objects:              DmObjectConfig[];
-    seedDir:              string;
-    batchSize:            number;
+    objects:   DmObjectConfig[];
+    seedDir:   string;
+    batchSize: number;
 }
 
 const CONFIG_FILE = ".sf-devops-dm.json";
@@ -28,10 +26,9 @@ const SOURCE_ORG_KEY = "sfDevops.dm.sourceOrg";
 const TARGET_ORG_KEY = "sfDevops.dm.targetOrg";
 
 const DEFAULT_CONFIG: DmConfig = {
-    autoCreateExternalId: true,
-    objects:              [],
-    seedDir:              ".git/sf-devops-dm/seed",
-    batchSize:            190,
+    objects:   [],
+    seedDir:   ".git/sf-devops-dm/seed",
+    batchSize: 190,
 };
 
 export function readDmConfig(workspaceRoot: string): DmConfig {
@@ -40,10 +37,9 @@ export function readDmConfig(workspaceRoot: string): DmConfig {
         const raw = fs.readFileSync(filePath, "utf-8");
         const parsed = JSON.parse(raw) as Partial<DmConfig>;
         return {
-            autoCreateExternalId: parsed.autoCreateExternalId ?? true,
-            objects:              parsed.objects              ?? [],
-            seedDir:              parsed.seedDir              ?? DEFAULT_CONFIG.seedDir,
-            batchSize:            parsed.batchSize            ?? 190,
+            objects:   parsed.objects   ?? [],
+            seedDir:   parsed.seedDir   ?? DEFAULT_CONFIG.seedDir,
+            batchSize: parsed.batchSize ?? 190,
         };
     } catch {
         return { ...DEFAULT_CONFIG, objects: [] };

@@ -1,21 +1,15 @@
 import * as fs from "fs";
 import * as path from "path";
-import * as os from "os";
 import { execSf } from "./SfCli";
-import { debugLog } from "./Log";
 import {
     DmConfig,
     DmObjectConfig,
     TrackingFile,
-    TrackingEntry,
-    TrackingStatus,
     readTracking,
     writeTracking,
     appendHistoryEntry,
     writeLastRunLog,
-    writeDmConfig,
     ensureDmDirs,
-    dmBaseDir,
     safeOrgName,
 } from "./DataMigrationConfig";
 
@@ -190,18 +184,6 @@ function stripFieldFromQuery(query: string, field: string): string | null {
     return `${m[1]}${fields.join(", ")}${m[3]}`;
 }
 
-/** Count records in data JSON files exported by sf data export tree for a given sobject. */
-function countExportedRecords(dir: string): number {
-    let count = 0;
-    try {
-        for (const f of fs.readdirSync(dir)) {
-            if (!f.endsWith(".json") || f.endsWith("-plan.json")) { continue; }
-            const data = JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8"));
-            count += Array.isArray(data.records) ? data.records.length : 0;
-        }
-    } catch { /* ignore */ }
-    return count;
-}
 
 /**
  * Parse a Salesforce CLI error message and return a user-friendly field-level explanation.
@@ -237,6 +219,59 @@ function parseFieldError(sobject: string, raw: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// pullData helpers
+// ---------------------------------------------------------------------------
+
+export type RefField = { field: string; referenceTo: string[]; relationshipName: string };
+
+async function getReferenceFields(
+    sobject: string,
+    org: string,
+    workspaceRoot: string,
+): Promise<RefField[]> {
+    try {
+        const { stdout } = await execSf(
+            ["sobject", "describe", "--sobject", sobject, "--target-org", org, "--json"],
+            { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 10 * 1024 * 1024 },
+        );
+        const parsed = JSON.parse(stdout);
+        const fields: any[] = parsed?.result?.fields ?? [];
+        return fields
+            .filter(f => f.type === "reference" && Array.isArray(f.referenceTo) && f.referenceTo.length > 0)
+            .map(f => ({
+                field:            f.name           as string,
+                referenceTo:      f.referenceTo    as string[],
+                relationshipName: (f.relationshipName ?? (f.name as string).replace(/Id$/, "")) as string,
+            }));
+    } catch {
+        return [];
+    }
+}
+
+async function resolveRecordTypes(
+    ids: string[],
+    org: string,
+    workspaceRoot: string,
+): Promise<Map<string, string>> {
+    if (ids.length === 0) { return new Map(); }
+    const idList = ids.map(id => `'${id}'`).join(",");
+    try {
+        const { stdout } = await execSf(
+            ["data", "query",
+             "--query", `SELECT Id, DeveloperName FROM RecordType WHERE Id IN (${idList})`,
+             "--target-org", org,
+             "--json"],
+            { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 10 * 1024 * 1024 },
+        );
+        const parsed = JSON.parse(stdout);
+        const records: any[] = parsed?.result?.records ?? [];
+        return new Map(records.map(r => [r.Id as string, r.DeveloperName as string]));
+    } catch {
+        return new Map();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // pullData
 // ---------------------------------------------------------------------------
 
@@ -252,22 +287,14 @@ export async function pullData(
     const ctrl = asInternal(controller);
     const objects = activeObjects(config);
     const seedDir = resolvedSeedDir(workspaceRoot, config, options);
-    const tmpRoot = path.join(workspaceRoot, ".git", "sf-devops-dm", "tmp-pull");
+    const startMs = Date.now();
 
     ensureDmDirs(workspaceRoot, config.seedDir);
     fs.mkdirSync(seedDir, { recursive: true });
-    fs.mkdirSync(tmpRoot, { recursive: true });
 
-    const startMs = Date.now();
     const pulledObjects: string[] = [];
-
-    // Each object below is pulled with its OWN isolated `sf data export tree` call, so that
-    // command's built-in cross-file @refId linking never sees other objects and just leaves
-    // lookup fields as raw source-org Ids — those Ids don't exist in the target org and every
-    // load then fails on FIELD_INTEGRITY_EXCEPTION / INVALID_CROSS_REFERENCE_KEY. We resolve
-    // these ourselves once each parent's data is available (see resolveObjectLookupRefs below).
-    const idMapsBySobject = new Map<string, Map<string, string>>();
-    const refFieldsBySobject = new Map<string, { field: string; referenceTo: string[] }[]>();
+    const dependencyGraph: Record<string, string[]> = {};
+    const referenceFieldsMap: Record<string, RefField[]> = {};
 
     for (let i = 0; i < objects.length; i++) {
         if (ctrl.state === "cancelled") { break; }
@@ -276,63 +303,33 @@ export async function pullData(
         onLog(`Pulling ${obj.sobject} (${i + 1}/${objects.length})...`, "info");
 
         let query = obj.query?.trim() || `SELECT Id FROM ${obj.sobject}`;
-
-        // "Id" must be selected for every object — it's how we map this object's own records
-        // back to their referenceId, which lets OTHER objects' lookups to this one resolve to
-        // "@refId" instead of a raw source-org Id (see resolveObjectLookupRefs below).
-        const selectMatch = query.match(/^SELECT\s+([\s\S]+?)\s+FROM\b/i);
-        const topLevelFields = (selectMatch?.[1] ?? "").split(",").map(f => f.trim().split(/\s+/)[0]);
-        if (!topLevelFields.some(f => f.toLowerCase() === "id")) {
+        const selectPart = query.match(/^SELECT\s+([\s\S]+?)\s+FROM\b/i)?.[1] ?? "";
+        const topFields = selectPart.split(",").map(f => f.trim().split(/\s+/)[0].toLowerCase());
+        if (!topFields.includes("id")) {
             query = query.replace(/^SELECT\s+/i, "SELECT Id, ");
         }
-
         if (options?.dryRun && !/LIMIT\s+\d+/i.test(query)) {
             query += ` LIMIT ${options.dryRunSampleSize ?? 5}`;
         }
 
-        const tmpDir = path.join(tmpRoot, `${safeOrgName(obj.sobject)}-${Date.now()}`);
-        fs.mkdirSync(tmpDir, { recursive: true });
+        let records: Record<string, any>[] = [];
+        let pullSuccess = false;
 
-        // Auto-heal loop: retry after stripping unrecognised fields from SELECT
         for (let attempt = 0; attempt <= 20; attempt++) {
             let rawMsg = "";
             try {
                 const { stdout } = await execSf(
-                    ["data", "export", "tree", "--query", query, "--output-dir", tmpDir, "--plan",
-                     "--target-org", sourceOrg, "--json"],
+                    ["data", "query", "--query", query, "--target-org", sourceOrg, "--json"],
                     { cwd: workspaceRoot, timeout: 300_000, maxBuffer: 100 * 1024 * 1024 },
                 );
                 const parsed = JSON.parse(stdout);
                 if (parsed.status !== 0) {
                     rawMsg = String(parsed.message ?? "unknown error");
                 } else {
-                    // Count records from exported files before moving
-                    const recordCount = countExportedRecords(tmpDir);
-
-                    // Move all output files from tmpDir to seedDir (overwriting existing)
-                    for (const file of fs.readdirSync(tmpDir)) {
-                        fs.copyFileSync(path.join(tmpDir, file), path.join(seedDir, file));
-                        fs.unlinkSync(path.join(tmpDir, file));
-                    }
-                    try { fs.rmdirSync(tmpDir); } catch { /* ignore */ }
-
-                    pulledObjects.push(obj.sobject);
-                    idMapsBySobject.set(obj.sobject, buildIdToRefMap(seedDir, obj.sobject));
-
-                    // Resolve this object's OWN lookups against every parent pulled so far
-                    // (dependency order means most parents are already available). Any that
-                    // reference a not-yet-pulled parent are caught by the final sweep below.
-                    if (!options?.dryRun) {
-                        const refFields = await getReferenceFields(obj.sobject, sourceOrg, workspaceRoot);
-                        refFieldsBySobject.set(obj.sobject, refFields);
-                        const { resolved } = resolveObjectLookupRefs(seedDir, obj.sobject, refFields, idMapsBySobject);
-                        if (resolved > 0) {
-                            onLog(`  → Resolved ${resolved} lookup reference(s) on ${obj.sobject} to @refId`, "info");
-                        }
-                    }
-
-                    onLog(`✓ Pulled ${obj.sobject}: ${recordCount} record${recordCount !== 1 ? "s" : ""}`, "success");
-                    break; // success
+                    const raw: any[] = parsed?.result?.records ?? [];
+                    records = raw.map(({ attributes: _a, ...rest }) => rest);
+                    pullSuccess = true;
+                    break;
                 }
             } catch (e: any) {
                 const rawOut: string = e?.stdout ?? "";
@@ -349,10 +346,8 @@ export async function pullData(
                 if (badField && attempt < 20) {
                     const healed = stripFieldFromQuery(query, badField);
                     if (healed && healed !== query) {
-                        onLog(`⚠️  Auto-removed unknown field '${badField}' from ${obj.sobject} SOQL — field not found in org. Retrying…`, "warn");
+                        onLog(`⚠️  Auto-removed unknown field '${badField}' from ${obj.sobject} SOQL — retrying…`, "warn");
                         query = healed;
-                        // Clear tmpDir for retry
-                        try { for (const f of fs.readdirSync(tmpDir)) { fs.unlinkSync(path.join(tmpDir, f)); } } catch { /* ignore */ }
                         continue;
                     }
                 }
@@ -363,175 +358,93 @@ export async function pullData(
             }
         }
 
-        const elapsedMs = Date.now() - startMs;
-        const recordsDone = i + 1;
-        const remaining = objects.length - recordsDone;
-        const estimatedRemainingMs = recordsDone > 0 ? Math.round((elapsedMs / recordsDone) * remaining) : 0;
+        if (!pullSuccess) {
+            const elapsed = Date.now() - startMs;
+            onProgress({
+                phase: "pull", currentObject: obj.sobject,
+                objectIndex: i + 1, objectCount: objects.length,
+                batchIndex: 1, batchCount: 1,
+                recordsDone: i + 1, recordsTotal: objects.length,
+                recordsCreated: pulledObjects.length,
+                recordsFailed: (i + 1) - pulledObjects.length,
+                recordsSkipped: 0,
+                objectStatuses: objects.map((o, idx) => ({
+                    sobject: o.sobject,
+                    status: idx < i ? "done" as const : idx === i ? "skipped" as const : "pending" as const,
+                    created: 0, total: 1,
+                })),
+                elapsedMs: elapsed, estimatedRemainingMs: 0,
+            });
+            continue;
+        }
 
+        if (!options?.dryRun) {
+            const rtIds = [...new Set(
+                records.filter(r => r.RecordTypeId && typeof r.RecordTypeId === "string")
+                       .map(r => r.RecordTypeId as string)
+            )];
+            if (rtIds.length > 0) {
+                const rtMap = await resolveRecordTypes(rtIds, sourceOrg, workspaceRoot);
+                for (const record of records) {
+                    if (record.RecordTypeId && rtMap.has(record.RecordTypeId)) {
+                        record.RecordTypeId = `__RecordType__${rtMap.get(record.RecordTypeId)}`;
+                    }
+                }
+            }
+        }
+
+        const seedFile = path.join(seedDir, `${obj.sobject}.json`);
+        fs.writeFileSync(seedFile, JSON.stringify({ records }, null, 2), "utf-8");
+        onLog(`✓ Pulled ${obj.sobject}: ${records.length} record${records.length !== 1 ? "s" : ""}`, "success");
+        pulledObjects.push(obj.sobject);
+
+        if (!options?.dryRun) {
+            const refFields = await getReferenceFields(obj.sobject, sourceOrg, workspaceRoot);
+            referenceFieldsMap[obj.sobject] = refFields;
+            const deps = [...new Set(
+                refFields
+                    .flatMap(f => f.referenceTo)
+                    .filter(t => objects.some(o => o.sobject === t))
+            )];
+            dependencyGraph[obj.sobject] = deps;
+        } else {
+            dependencyGraph[obj.sobject] = obj.dependsOn ?? [];
+        }
+
+        const elapsedMs = Date.now() - startMs;
+        const remaining = objects.length - (i + 1);
+        const estimatedRemainingMs = i > 0 ? Math.round((elapsedMs / (i + 1)) * remaining) : 0;
         onProgress({
-            phase: "pull",
-            currentObject: obj.sobject,
-            objectIndex: i + 1,
-            objectCount: objects.length,
-            batchIndex: 1,
-            batchCount: 1,
-            recordsDone,
-            recordsTotal: objects.length,
+            phase: "pull", currentObject: obj.sobject,
+            objectIndex: i + 1, objectCount: objects.length,
+            batchIndex: 1, batchCount: 1,
+            recordsDone: i + 1, recordsTotal: objects.length,
             recordsCreated: pulledObjects.length,
-            recordsFailed: recordsDone - pulledObjects.length,
+            recordsFailed: (i + 1) - pulledObjects.length,
             recordsSkipped: 0,
             objectStatuses: objects.map((o, idx) => ({
                 sobject: o.sobject,
-                status: idx < i ? "done" : idx === i ? "running" : "pending",
-                created: idx < i ? 1 : 0,
-                total: 1,
+                status: idx < i ? "done" as const : idx === i ? "running" as const : "pending" as const,
+                created: idx <= i ? 1 : 0, total: 1,
             })),
-            elapsedMs,
-            estimatedRemainingMs,
+            elapsedMs, estimatedRemainingMs,
         });
     }
 
-    // Final sweep: re-resolve every object's lookups now that ALL objects have been pulled —
-    // catches a child pulled before its parent (out of dependency order), which the per-object
-    // pass above couldn't resolve yet since that parent's id map didn't exist at the time.
-    if (!options?.dryRun) {
-        let totalResolved = 0;
-        let totalUnresolved = 0;
-        for (const sobject of pulledObjects) {
-            const refFields = refFieldsBySobject.get(sobject) ?? [];
-            const { resolved, unresolved } = resolveObjectLookupRefs(seedDir, sobject, refFields, idMapsBySobject);
-            totalResolved += resolved;
-            totalUnresolved += unresolved;
-        }
-        if (totalResolved > 0) {
-            onLog(`✓ Resolved ${totalResolved} additional cross-object lookup reference(s) after all objects were pulled`, "success");
-        }
-        if (totalUnresolved > 0) {
-            onLog(`⚠  ${totalUnresolved} lookup reference(s) point to a parent record that wasn't pulled (filtered out by its SOQL, or the object isn't in this migration) — those will load with their raw source-org Id and likely fail`, "warn");
-        }
-    }
-
-    // Write a summary plan.json (not the sf export plan — our own manifest)
     if (!options?.dryRun) {
         const planPath = path.join(seedDir, "plan.json");
         fs.writeFileSync(planPath, JSON.stringify({
             generatedAt: now(),
             sourceOrg,
             objects: pulledObjects,
+            dependencies: dependencyGraph,
+            referenceFields: referenceFieldsMap,
         }, null, 2), "utf-8");
     }
 
     return { pulled: pulledObjects.length, objects: pulledObjects };
 }
 
-/** Describe an object and return its lookup/master-detail fields with their target object(s) —
- *  used to resolve cross-object lookups into "@refId" placeholders after a per-object pull
- *  (each object is pulled with its own isolated `sf data export tree` call, so that command's
- *  own built-in cross-file reference linking never has visibility across objects — see
- *  resolvePulledLookupRefs). */
-async function getReferenceFields(
-    sobject: string,
-    org: string,
-    workspaceRoot: string,
-): Promise<{ field: string; referenceTo: string[] }[]> {
-    try {
-        const { stdout } = await execSf(
-            ["sobject", "describe", "--sobject", sobject, "--target-org", org, "--json"],
-            { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 10 * 1024 * 1024 },
-        );
-        const parsed = JSON.parse(stdout);
-        const fields: any[] = parsed?.result?.fields ?? [];
-        return fields
-            .filter(f => f.type === "reference" && Array.isArray(f.referenceTo) && f.referenceTo.length > 0)
-            .map(f => ({ field: f.name as string, referenceTo: f.referenceTo as string[] }));
-    } catch {
-        return [];
-    }
-}
-
-/** Build a map of {Salesforce record Id -> our referenceId} for every record already pulled for
- *  one sobject, from its seed file. Used to resolve OTHER objects' lookup fields that point to
- *  this object's records. */
-export function buildIdToRefMap(seedDir: string, sobject: string): Map<string, string> {
-    const map = new Map<string, string>();
-    for (const record of readSeedRecords(seedDir, sobject)) {
-        const id = record.Id as string | undefined;
-        const refId = record.attributes?.referenceId as string | undefined;
-        if (id && refId) { map.set(id, refId); }
-    }
-    return map;
-}
-
-/** Rewrites one object's seed file in place, replacing any lookup field value that's a raw
- *  Salesforce Id of an already-pulled parent record with "@<parentRefId>" — the same placeholder
- *  syntax `sf data export tree` itself uses, which loadData's substituteRefs() already resolves
- *  against the target org's newly-created/matched Ids at load time. A field is left untouched
- *  (and reported) when it points to an object we have no id map for yet — either that parent
- *  hasn't been pulled yet, or it's genuinely outside this migration (e.g. a lookup to User). */
-export function resolveObjectLookupRefs(
-    seedDir: string,
-    sobject: string,
-    referenceFields: { field: string; referenceTo: string[] }[],
-    idMapsBySobject: Map<string, Map<string, string>>,
-): { resolved: number; unresolved: number } {
-    if (referenceFields.length === 0) { return { resolved: 0, unresolved: 0 }; }
-    const candidates = [
-        path.join(seedDir, `${sobject}s.json`),
-        path.join(seedDir, `${sobject}.json`),
-    ];
-    let filePath = candidates.find(fp => fs.existsSync(fp));
-    // Fallback: scan all .json files for one whose records have attributes.type matching sobject.
-    // Handles sf data export tree files with timestamps, relationship suffixes, etc.
-    if (!filePath) {
-        try {
-            for (const entry of fs.readdirSync(seedDir)) {
-                if (!entry.endsWith(".json") || entry === "plan.json") { continue; }
-                const fp = path.join(seedDir, entry);
-                try {
-                    const raw = JSON.parse(fs.readFileSync(fp, "utf-8"));
-                    const recs: any[] = raw?.records ?? (Array.isArray(raw) ? raw : []);
-                    if (recs.length > 0 && recs[0]?.attributes?.type?.toLowerCase() === sobject.toLowerCase()) {
-                        filePath = fp;
-                        break;
-                    }
-                } catch { /* skip unparseable files */ }
-            }
-        } catch { /* seedDir unreadable */ }
-    }
-    if (!filePath) { return { resolved: 0, unresolved: 0 }; }
-
-    const raw = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-    const records: Record<string, any>[] = raw?.records ?? raw;
-    let resolved = 0, unresolved = 0;
-
-    for (const record of records) {
-        for (const { field, referenceTo } of referenceFields) {
-            const value = record[field];
-            if (typeof value !== "string" || value === "" || value.startsWith("@")) { continue; }
-            let ref: string | undefined;
-            for (const parentType of referenceTo) {
-                ref = idMapsBySobject.get(parentType)?.get(value);
-                if (ref) { break; }
-            }
-            if (ref) {
-                record[field] = `@${ref}`;
-                resolved++;
-            } else if (referenceTo.some(t => idMapsBySobject.has(t))) {
-                // A parent we DID pull, but this specific Id wasn't among its records —
-                // genuinely unresolved (parent record excluded by its own SOQL filter, etc.).
-                unresolved++;
-            }
-            // else: parentType isn't one of our migrated objects at all (e.g. a lookup to
-            // User/Owner) — leave the raw Id as-is, that's correct for an in-org reference.
-        }
-    }
-
-    if (resolved > 0 || unresolved > 0) {
-        raw.records = records;
-        fs.writeFileSync(filePath, JSON.stringify(raw, null, 2), "utf-8");
-    }
-    return { resolved, unresolved };
-}
 
 // ---------------------------------------------------------------------------
 // checkExternalId
@@ -573,170 +486,8 @@ export async function checkExternalId(
 }
 
 // ---------------------------------------------------------------------------
-// createExternalIdField
-// ---------------------------------------------------------------------------
-
-export async function createExternalIdField(
-    targetOrg: string,
-    sobject: string,
-    workspaceRoot: string,
-    onLog: LogFn,
-): Promise<string> {
-    const tmpDir = path.join(workspaceRoot, ".git", "sf-devops-dm", "tmp-metadata", safeOrgName(sobject));
-    const fieldsDir = path.join(tmpDir, "force-app", "main", "default", "objects", sobject, "fields");
-    fs.mkdirSync(fieldsDir, { recursive: true });
-
-    const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
-  <fullName>External_Id__c</fullName>
-  <label>External Id</label>
-  <type>Text</type>
-  <length>255</length>
-  <externalId>true</externalId>
-  <unique>true</unique>
-</CustomField>
-`;
-    fs.writeFileSync(path.join(fieldsDir, "External_Id__c.field-meta.xml"), xml, "utf-8");
-
-    onLog(`Deploying External_Id__c field to ${sobject}...`, "info");
-
-    const sourceDir = path.join(tmpDir, "force-app");
-    const deployResult = await execSf(
-        ["project", "deploy", "start", "--source-dir", sourceDir,
-         "--target-org", targetOrg, "--json", "--async"],
-        { cwd: workspaceRoot, timeout: 60_000, maxBuffer: 5 * 1024 * 1024 },
-    );
-
-    const deployJson = JSON.parse(deployResult.stdout);
-    const jobId: string = deployJson?.result?.id ?? deployJson?.result?.jobId;
-    if (!jobId) { throw new Error(`Deploy did not return a job ID for ${sobject}`); }
-
-    onLog(`Deploy job started: ${jobId}`, "info");
-
-    // Poll until done — 100 × 3000ms ≈ 5 minutes maximum
-    const maxPolls = 100;
-    for (let poll = 0; poll < maxPolls; poll++) {
-        await sleep(3000);
-        const { stdout: reportOut } = await execSf(
-            ["project", "deploy", "report", "--job-id", jobId, "--target-org", targetOrg, "--json"],
-            { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
-        );
-        const report = JSON.parse(reportOut);
-        const status: string = report?.result?.status ?? "";
-        onLog(`Deploy status: ${status}`, "info");
-        if (status === "Succeeded") { break; }
-        if (status === "Failed" || status === "Canceled" || status === "Cancelled") {
-            const errors = (report?.result?.details?.componentFailures ?? [])
-                .map((f: any) => f.problem).join("; ");
-            throw new Error(`Deploy failed for ${sobject} External_Id__c: ${errors || status}`);
-        }
-        if (poll === maxPolls - 1) {
-            throw new Error(`ExternalId field deploy timed out after 5 minutes`);
-        }
-    }
-
-    // Clean up temp metadata dir
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-
-    onLog(`✓ External_Id__c created on ${sobject}`, "success");
-    return "External_Id__c";
-}
-
-// ---------------------------------------------------------------------------
-// Namespace detection helper
-// ---------------------------------------------------------------------------
-
-async function detectNamespace(
-    targetOrg: string,
-    workspaceRoot: string,
-    firstCustomObj: string,
-): Promise<string> {
-    try {
-        const { stdout } = await execSf(
-            ["data", "query", "--query", `SELECT Id FROM ${firstCustomObj} LIMIT 1`,
-             "--target-org", targetOrg, "--json"],
-            { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 2 * 1024 * 1024 },
-        );
-        const parsed = JSON.parse(stdout);
-        // If query succeeded with no error the namespace prefix isn't blocking us
-        void parsed;
-        return "";
-    } catch {
-        return "";
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Load data helpers
 // ---------------------------------------------------------------------------
-
-/** Replace @RefId tokens in lookup field values with real SF IDs from globalRefIndex */
-function substituteRefs(
-    record: Record<string, any>,
-    globalRefIndex: Map<string, string>,
-): { record: Record<string, any>; missingRefs: string[] } {
-    const result: Record<string, any> = {};
-    const missingRefs: string[] = [];
-
-    for (const [key, value] of Object.entries(record)) {
-        if (key === "attributes") { result[key] = value; continue; }
-        if (typeof value === "string" && value.startsWith("@")) {
-            const refKey = value.slice(1);
-            const resolved = globalRefIndex.get(refKey);
-            if (resolved) {
-                result[key] = resolved;
-            } else {
-                missingRefs.push(refKey);
-                result[key] = value;
-            }
-        } else {
-            result[key] = value;
-        }
-    }
-
-    return { record: result, missingRefs };
-}
-
-/** Apply namespace prefix to custom API names in field keys */
-function applyNamespace(record: Record<string, any>, ns: string): Record<string, any> {
-    if (!ns) { return record; }
-    const result: Record<string, any> = {};
-    for (const [key, value] of Object.entries(record)) {
-        if ((key.endsWith("__c") || key.endsWith("__r")) && (key.match(/__/g) || []).length === 1) {
-            result[`${ns}__${key}`] = value;
-        } else {
-            result[key] = value;
-        }
-    }
-    return result;
-}
-
-/** Build a CSV string from records, including the externalIdField column */
-function buildCsv(
-    records: Record<string, any>[],
-    externalIdField: string,
-): string {
-    if (records.length === 0) { return ""; }
-    const allKeys = new Set<string>();
-    for (const r of records) {
-        for (const k of Object.keys(r)) {
-            if (k !== "attributes") { allKeys.add(k); }
-        }
-    }
-    // Ensure external id field appears
-    if (externalIdField) { allKeys.add(externalIdField); }
-    const headers = Array.from(allKeys);
-    const escape = (v: any): string => {
-        if (v === null || v === undefined) { return ""; }
-        const s = String(v);
-        if (s.includes(",") || s.includes('"') || s.includes("\n")) {
-            return `"${s.replace(/"/g, '""')}"`;
-        }
-        return s;
-    };
-    const rows = records.map(r => headers.map(h => escape(r[h])).join(","));
-    return [headers.join(","), ...rows].join("\n");
-}
 
 /** Minimal RFC4180 CSV parser — handles quoted fields with embedded commas, quotes, and
  *  newlines, which Bulk API 2.0's `sf__Error` column regularly contains (e.g. messages that
@@ -779,41 +530,71 @@ export function parseCsv(text: string): Record<string, string>[] {
     });
 }
 
-/** After a Bulk API 2.0 upsert job completes with failures, the CLI only reports a generic
- *  "N records failed" message — the real per-record reasons require a separate `sf data bulk
- *  results` call that writes a `<jobId>-failed-records.csv` with an `sf__Error` column. This
- *  fetches that file and maps each failed row back to its referenceId via the externalId
- *  field value we stamped on every outbound record (see loadBatch's upsert path). Returns null
- *  if the results can't be fetched or parsed — callers fall back to the generic message. */
-async function fetchBulkJobFailures(
-    jobId: string,
-    targetOrg: string,
-    tmpDir: string,
-    extField: string,
-): Promise<{ refId: string; error: string }[] | null> {
-    try {
-        const { stdout } = await execSf(
-            ["data", "bulk", "results", "--job-id", jobId, "--target-org", targetOrg, "--json"],
-            { cwd: tmpDir, timeout: 60_000, maxBuffer: 20 * 1024 * 1024 },
-        );
-        const parsed = JSON.parse(stdout);
-        const failedFilePath: string | undefined = parsed?.result?.failedFilePath;
-        if (!failedFilePath) { return null; }
-        const csvPath = path.isAbsolute(failedFilePath) ? failedFilePath : path.join(tmpDir, failedFilePath);
-        if (!fs.existsSync(csvPath)) { return null; }
-        const rows = parseCsv(fs.readFileSync(csvPath, "utf-8"));
-        const out = rows.map(r => ({
-            refId: r[extField] ?? "",
-            error: r["sf__Error"] || "Unknown error (see failed-records CSV)",
-        }));
-        // Best-effort cleanup — these CSVs land in tmpDir and aren't needed once parsed.
-        for (const suffix of ["-success-records.csv", "-failed-records.csv", "-unprocessed-records.csv"]) {
-            try { fs.unlinkSync(path.join(tmpDir, `${jobId}${suffix}`)); } catch { /* ignore */ }
+function buildUpsertCsv(
+    records: Record<string, any>[],
+    obj: DmObjectConfig,
+    referenceFields: RefField[],
+    objByName: Map<string, DmObjectConfig>,
+): string {
+    if (records.length === 0 || !obj.externalIdField) { return ""; }
+
+    const lookupToRelCol = new Map<string, string>();
+    for (const rf of referenceFields) {
+        if (rf.field === "RecordTypeId") {
+            lookupToRelCol.set("RecordTypeId", "RecordType.DeveloperName");
+            continue;
         }
-        return out;
-    } catch {
-        return null;
+        const parentSobject = rf.referenceTo.find(t => objByName.has(t));
+        if (!parentSobject) { continue; }
+        const parentCfg = objByName.get(parentSobject);
+        if (!parentCfg?.externalIdField) { continue; }
+        lookupToRelCol.set(rf.field, `${rf.relationshipName}.${parentCfg.externalIdField}`);
     }
+
+    const lookupFields = new Set(lookupToRelCol.keys());
+    const directFields = new Set<string>();
+    const relColsOrdered: string[] = [];
+    const relColSet = new Set<string>();
+
+    for (const record of records) {
+        for (const key of Object.keys(record)) {
+            if (key === "Id") { continue; }
+            if (lookupFields.has(key)) {
+                const relCol = lookupToRelCol.get(key)!;
+                if (!relColSet.has(relCol)) { relColSet.add(relCol); relColsOrdered.push(relCol); }
+            } else {
+                directFields.add(key);
+            }
+        }
+    }
+
+    const headers = [obj.externalIdField, ...Array.from(directFields), ...relColsOrdered];
+    const relColToLookupField = new Map<string, string>(
+        [...lookupToRelCol.entries()].map(([k, v]) => [v, k])
+    );
+
+    const rows = records.map(record => {
+        return headers.map(h => {
+            if (h === obj.externalIdField) {
+                return csvEscape(String(record.Id ?? ""));
+            }
+            if (relColSet.has(h)) {
+                const lookupField = relColToLookupField.get(h);
+                if (!lookupField) { return ""; }
+                const raw = record[lookupField];
+                if (!raw) { return ""; }
+                if (lookupField === "RecordTypeId" && typeof raw === "string" && raw.startsWith("__RecordType__")) {
+                    return csvEscape(raw.slice("__RecordType__".length));
+                }
+                return csvEscape(String(raw));
+            }
+            const val = record[h];
+            if (val === null || val === undefined) { return ""; }
+            return csvEscape(String(val));
+        }).join(",");
+    });
+
+    return [headers.join(","), ...rows].join("\n");
 }
 
 /** Fetch both success and failure records from a completed Bulk API 2.0 job.
@@ -877,40 +658,15 @@ async function fetchBulkJobAllResults(
     }
 }
 
-/** Read seed records for a given sobject from seedDir. Returns [] if no file found. */
 function readSeedRecords(seedDir: string, sobject: string): Record<string, any>[] {
-    // sf data export tree produces <SObjects>.json (plural) or uses plan.json listing
-    const candidates = [
-        path.join(seedDir, `${sobject}s.json`),
-        path.join(seedDir, `${sobject}.json`),
-    ];
-    for (const fp of candidates) {
-        if (fs.existsSync(fp)) {
-            const raw = JSON.parse(fs.readFileSync(fp, "utf-8"));
-            return (raw?.records ?? raw) as Record<string, any>[];
-        }
+    const fp = path.join(seedDir, `${sobject}.json`);
+    if (!fs.existsSync(fp)) { return []; }
+    try {
+        const raw = JSON.parse(fs.readFileSync(fp, "utf-8"));
+        return (raw?.records ?? (Array.isArray(raw) ? raw : [])) as Record<string, any>[];
+    } catch {
+        return [];
     }
-    // Check plan.json for file list — may be our own manifest (object) or sf CLI plan (array)
-    const planPath = path.join(seedDir, "plan.json");
-    if (fs.existsSync(planPath)) {
-        const plan = JSON.parse(fs.readFileSync(planPath, "utf-8"));
-        // sf data export tree --plan produces [{sobject, saveRefs, resolveRefs, files:[]}]
-        const planArray: any[] = Array.isArray(plan) ? plan : [];
-        const entry = planArray.find((e: any) =>
-            e.sobject?.toLowerCase() === sobject.toLowerCase());
-        if (entry?.files?.length) {
-            const records: Record<string, any>[] = [];
-            for (const f of entry.files as string[]) {
-                const fp2 = path.join(seedDir, f);
-                if (fs.existsSync(fp2)) {
-                    const raw = JSON.parse(fs.readFileSync(fp2, "utf-8"));
-                    records.push(...(raw?.records ?? raw));
-                }
-            }
-            return records;
-        }
-    }
-    return [];
 }
 
 /** Parse upsert/import result and extract created/failed counts + refId mapping.
@@ -997,6 +753,30 @@ export function parseImportResult(stdout: string): {
     return { created, createdByRef, failed, resultItems, limitException };
 }
 
+function kahnSort(nodes: string[], deps: Record<string, string[]>): string[] {
+    const indeg = new Map<string, number>(nodes.map(n => [n, 0]));
+    for (const node of nodes) {
+        for (const _dep of deps[node] ?? []) {
+            indeg.set(node, (indeg.get(node) ?? 0) + 1);
+        }
+    }
+    const queue = nodes.filter(n => (indeg.get(n) ?? 0) === 0);
+    const result: string[] = [];
+    while (queue.length > 0) {
+        const node = queue.shift()!;
+        result.push(node);
+        for (const other of nodes) {
+            if ((deps[other] ?? []).includes(node)) {
+                const d = (indeg.get(other) ?? 1) - 1;
+                indeg.set(other, d);
+                if (d === 0) { queue.push(other); }
+            }
+        }
+    }
+    for (const n of nodes) { if (!result.includes(n)) { result.push(n); } }
+    return result;
+}
+
 // ---------------------------------------------------------------------------
 // loadData (main function)
 // ---------------------------------------------------------------------------
@@ -1010,135 +790,119 @@ export async function loadData(
     controller: DmRunController,
     options?: DmRunOptions,
 ): Promise<{ loaded: number; failed: number; skipped: number; blocked: number }> {
-    const ctrl = asInternal(controller);
+    const ctrl    = asInternal(controller);
     const startMs = Date.now();
     const seedDir = resolvedSeedDir(workspaceRoot, config, options);
-    const dryRun = options?.dryRun ?? false;
+    const dryRun  = options?.dryRun ?? false;
     const logLines: string[] = [];
     const emit = (text: string, level: "info" | "success" | "warn" | "error" = "info") => {
         onLog(text, level);
         logLines.push(`[${level}] ${now()} ${text}`);
     };
 
-    // ------------------------------------------------------------------
-    // Pre-flight: ExternalId check — run all describes in parallel (batches
-    // of 5) so we don't wait 2s × N objects before the load even starts.
-    // ------------------------------------------------------------------
+    const tmpDir = path.join(workspaceRoot, ".git", "sf-devops-dm", "tmp-load");
+    fs.mkdirSync(tmpDir, { recursive: true });
+
+    let planDeps: Record<string, string[]> = {};
+    let planRefFields: Record<string, RefField[]> = {};
+    const planPath = path.join(seedDir, "plan.json");
+    if (fs.existsSync(planPath)) {
+        try {
+            const plan = JSON.parse(fs.readFileSync(planPath, "utf-8"));
+            planDeps      = plan.dependencies    ?? {};
+            planRefFields = plan.referenceFields ?? {};
+        } catch { /* ignore */ }
+    }
+
+    const allActive = activeObjects(config);
+
     if (!dryRun) {
-        const allObjs = activeObjects(config);
-        emit(`Pre-flight: checking ExternalId fields on ${allObjs.length} object(s)…`, "info");
-        const chunks = chunkArray(allObjs, 5);
+        emit(`Pre-flight: verifying ExternalId fields on ${allActive.length} object(s)…`, "info");
+        let preflightOk = true;
+        const chunks = chunkArray(allActive, 5);
         for (const chunk of chunks) {
             const results = await Promise.allSettled(
                 chunk.map(obj => checkExternalId(targetOrg, obj.sobject, workspaceRoot, () => {}))
             );
-            for (let i = 0; i < chunk.length; i++) {
-                const obj = chunk[i];
-                const r = results[i];
+            for (let j = 0; j < chunk.length; j++) {
+                const obj = chunk[j];
+                const r   = results[j];
                 const found = r.status === "fulfilled" ? r.value : null;
-                obj.externalIdField  = found ?? undefined;
-                obj.externalIdVerified = !!found;
+                if (!found) {
+                    emit(`✗ ${obj.sobject}: ExternalId field '${obj.externalIdField ?? "(none configured)"}' not found in target org`, "error");
+                    preflightOk = false;
+                } else {
+                    obj.externalIdField = found;
+                    emit(`✓ ${obj.sobject}: ExternalId field '${found}' verified`, "success");
+                }
             }
         }
-        writeDmConfig(workspaceRoot, config);
-        const withExtId    = allObjs.filter(o => o.externalIdField);
-        const withoutExtId = allObjs.filter(o => !o.externalIdField);
-        if (withExtId.length)    { emit(`✓ Upsert mode: ${withExtId.map(o => o.sobject).join(", ")}`, "success"); }
-        if (withoutExtId.length) { emit(`⚠  Insert mode (no ExternalId field): ${withoutExtId.map(o => o.sobject).join(", ")}`, "warn"); }
-    }
-
-    // ------------------------------------------------------------------
-    // Prepare
-    // ------------------------------------------------------------------
-    let tracking = readTracking(workspaceRoot, targetOrg);
-
-    // Detect namespace from first custom object (non-blocking)
-    const allActive = activeObjects(config);
-    const firstCustom = allActive.find(o => o.sobject.includes("__c"));
-    const ns = firstCustom ? await detectNamespace(targetOrg, workspaceRoot, firstCustom.sobject) : "";
-
-    // Build global ref index from already-tracked created records
-    const globalRefIndex = new Map<string, string>();
-    for (const [, objTracking] of Object.entries(tracking)) {
-        for (const [refId, entry] of Object.entries(objTracking)) {
-            if (entry.status === "created" && entry.id) {
-                globalRefIndex.set(refId, entry.id);
-            }
+        if (!preflightOk) {
+            emit("Pre-flight failed — configure ExternalId fields before loading", "error");
+            ctrl._setState("done");
+            return { loaded: 0, failed: 0, skipped: 0, blocked: 0 };
         }
     }
 
-    // Resolve object list, cascading prerequisite dependencies when filter active
-    let objectsToProcess = allActive;
+    const depGraph: Record<string, string[]> = {};
+    for (const obj of allActive) {
+        const planDep   = planDeps[obj.sobject] ?? [];
+        const configDep = obj.dependsOn ?? [];
+        depGraph[obj.sobject] = [...new Set([...planDep, ...configDep])].filter(
+            d => allActive.some(o => o.sobject === d)
+        );
+    }
+    const sortedNames = kahnSort(allActive.map(o => o.sobject), depGraph);
+    const objectsToProcess = sortedNames
+        .map(name => allActive.find(o => o.sobject === name)!)
+        .filter(Boolean);
+
+    emit(`Load order: ${objectsToProcess.map(o => o.sobject).join(" → ")}`, "info");
+
+    const objByName = new Map<string, DmObjectConfig>(allActive.map(o => [o.sobject, o]));
+
+    let objectList = objectsToProcess;
     if (options?.objectFilter && options.objectFilter.length > 0) {
-        const filterSet = new Set(options.objectFilter);
         const needed = new Set<string>();
         const addWithDeps = (sobject: string) => {
             if (needed.has(sobject)) { return; }
             needed.add(sobject);
-            const obj = allActive.find(o => o.sobject === sobject);
-            if (obj?.dependsOn) {
-                for (const dep of obj.dependsOn) { addWithDeps(dep); }
-            }
+            for (const dep of depGraph[sobject] ?? []) { addWithDeps(dep); }
         };
-        for (const f of options.objectFilter) { addWithDeps(f); }
-        // Skip deps that are already fully complete
-        objectsToProcess = allActive.filter(o => {
-            if (!needed.has(o.sobject)) { return false; }
-            if (!filterSet.has(o.sobject)) {
-                // It's a dependency — only include if not fully created
-                const objT = tracking[o.sobject] ?? {};
-                const hasUncreated = Object.values(objT).some(e => e.status !== "created");
-                return hasUncreated || Object.keys(objT).length === 0;
-            }
-            return true;
-        });
+        for (const s of options.objectFilter) { addWithDeps(s); }
+        objectList = objectsToProcess.filter(o => needed.has(o.sobject));
     }
 
-    // ------------------------------------------------------------------
-    // Object statuses for progress events
-    // ------------------------------------------------------------------
-    const objStatusMap = new Map<string, { status: "done" | "running" | "pending" | "skipped"; created: number; updated: number; alreadyDone: number; total: number; failed: number; skipped: number }>();
-    for (const o of objectsToProcess) {
-        objStatusMap.set(o.sobject, { status: "pending", created: 0, updated: 0, alreadyDone: 0, total: 0, failed: 0, skipped: 0 });
+    let tracking = readTracking(workspaceRoot, targetOrg);
+    let totalLoaded = 0, totalFailed = 0, totalSkipped = 0, totalBlocked = 0;
+
+    const objStatusMap = new Map<string, { status: string; created: number; updated: number; alreadyDone: number; total: number; failed: number; skipped: number }>();
+    for (const obj of objectList) {
+        objStatusMap.set(obj.sobject, { status: "pending", created: 0, updated: 0, alreadyDone: 0, total: 0, failed: 0, skipped: 0 });
     }
 
-    let totalLoaded = 0;
-    let totalFailed = 0;
-    let totalSkipped = 0;
-    let totalBlocked = 0;
-
-    const tmpDir = path.join(workspaceRoot, ".git", "sf-devops-dm", "tmp-load");
-    fs.mkdirSync(tmpDir, { recursive: true });
-
-    // Computed once and cached — avoids synchronous disk reads on every batch progress emit.
     let cachedGrandTotal: number | null = null;
-
     const buildProgressEvent = (
         obj: DmObjectConfig,
         objIdx: number,
         batchIdx: number,
         batchCount: number,
         batchDone: number,
-        batchTotal: number,
+        _batchTotal: number,
     ): DmProgressEvent => {
         const elapsedMs = Date.now() - startMs;
         const recordsDone = totalLoaded + totalFailed + totalSkipped + totalBlocked + batchDone;
         if (cachedGrandTotal === null) {
-            cachedGrandTotal = objectsToProcess.reduce((sum, o) => {
-                const recs = readSeedRecords(seedDir, o.sobject);
-                return sum + recs.length;
-            }, 0);
+            cachedGrandTotal = objectList.reduce((sum, o) => sum + readSeedRecords(seedDir, o.sobject).length, 0);
         }
         const grandTotal = cachedGrandTotal;
         const remaining = Math.max(0, grandTotal - recordsDone);
-        const estimatedRemainingMs = recordsDone > 0
-            ? Math.round((elapsedMs / recordsDone) * remaining)
-            : 0;
+        const estimatedRemainingMs = recordsDone > 0 ? Math.round((elapsedMs / recordsDone) * remaining) : 0;
         return {
             phase: "load",
             currentObject: obj.sobject,
             objectIndex: objIdx + 1,
-            objectCount: objectsToProcess.length,
+            objectCount: objectList.length,
             batchIndex: batchIdx + 1,
             batchCount,
             recordsDone,
@@ -1146,111 +910,85 @@ export async function loadData(
             recordsCreated: totalLoaded,
             recordsFailed: totalFailed,
             recordsSkipped: totalSkipped,
-            objectStatuses: objectsToProcess.map(o => {
+            objectStatuses: objectList.map(o => {
                 const s = objStatusMap.get(o.sobject) ?? { status: "pending", created: 0, total: 0 };
-                return { sobject: o.sobject, ...s };
+                return { sobject: o.sobject, status: s.status as "done" | "running" | "pending" | "skipped", created: (s as any).created ?? 0, total: (s as any).total ?? 0 };
             }),
             elapsedMs,
             estimatedRemainingMs,
         };
     };
 
-    // ------------------------------------------------------------------
-    // Main object loop
-    // ------------------------------------------------------------------
-    for (let objIdx = 0; objIdx < objectsToProcess.length; objIdx++) {
-        if (ctrl.state === "cancelled") { break; }
+    for (let objIdx = 0; objIdx < objectList.length; objIdx++) {
+        if (stateOf(ctrl) === "cancelled") { writeTracking(workspaceRoot, targetOrg, tracking); break; }
+        if (stateOf(ctrl) === "paused")    { await waitForResume(controller, onLog); }
 
-        const obj = objectsToProcess[objIdx];
-        objStatusMap.set(obj.sobject, {
-            ...objStatusMap.get(obj.sobject)!,
-            status: "running",
-        });
+        const obj = objectList[objIdx];
+        objStatusMap.set(obj.sobject, { ...objStatusMap.get(obj.sobject)!, status: "running" });
+        emit(`Loading ${obj.sobject} (${objIdx + 1}/${objectList.length})...`, "info");
 
-        emit(`Loading ${obj.sobject} (${objIdx + 1}/${objectsToProcess.length})...`, "info");
+        let refFields: RefField[] = planRefFields[obj.sobject] ?? [];
+        if (refFields.length === 0 && !dryRun) {
+            refFields = await getReferenceFields(obj.sobject, targetOrg, workspaceRoot);
+        }
 
         const allRecords = readSeedRecords(seedDir, obj.sobject);
         if (allRecords.length === 0) {
             emit(`No seed records found for ${obj.sobject} — skipping`, "warn");
-            objStatusMap.set(obj.sobject, { status: "skipped", created: 0, updated: 0, alreadyDone: 0, total: 0, failed: 0, skipped: 0 });
+            objStatusMap.set(obj.sobject, { ...objStatusMap.get(obj.sobject)!, status: "skipped" });
             continue;
         }
 
+        if (!tracking[obj.sobject]) { tracking[obj.sobject] = {}; }
         objStatusMap.get(obj.sobject)!.total = allRecords.length;
 
-        // Initialise tracking for this object if not present
-        if (!tracking[obj.sobject]) { tracking[obj.sobject] = {}; }
-
-        // sf data import tree is limited to 200 records per call; upsert bulk can handle more
-        const effectiveBatchSize = obj.externalIdField ? config.batchSize : Math.min(config.batchSize, 200);
-        const batches = chunkArray(allRecords, effectiveBatchSize);
-        let objectSkipped = false;
-        const insertedThisObject: { refId: string; sfId: string }[] = [];
+        const batches = chunkArray(allRecords, config.batchSize);
 
         for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
-            // ---- Controller checkpoint ----
             if (stateOf(ctrl) === "cancelled") { writeTracking(workspaceRoot, targetOrg, tracking); return { loaded: totalLoaded, failed: totalFailed, skipped: totalSkipped, blocked: totalBlocked }; }
-            if (stateOf(ctrl) === "paused") { await waitForResume(controller, onLog); }
-            if (stateOf(ctrl) === "cancelled") { writeTracking(workspaceRoot, targetOrg, tracking); return { loaded: totalLoaded, failed: totalFailed, skipped: totalSkipped, blocked: totalBlocked }; }
+            if (stateOf(ctrl) === "paused")    { await waitForResume(controller, onLog); }
             if (ctrl._consumeSkip()) {
-                // Mark remaining pending records as skipped
                 for (const rec of batches.slice(batchIdx).flat()) {
-                    const refId = (rec.attributes?.referenceId as string | undefined) ?? `${obj.sobject}Ref${allRecords.indexOf(rec)}`;
-                    if (tracking[obj.sobject][refId]?.status !== "created") {
-                        tracking[obj.sobject][refId] = { status: "skipped", at: now() };
+                    const srcId = String(rec.Id ?? `${obj.sobject}_${batchIdx}`);
+                    if (tracking[obj.sobject][srcId]?.status !== "created") {
+                        tracking[obj.sobject][srcId] = { status: "skipped", at: now() };
                         totalSkipped++;
+                        objStatusMap.get(obj.sobject)!.skipped++;
                     }
                 }
-                objectSkipped = true;
                 break;
             }
 
             const batch = batches[batchIdx];
-            const processable: { refId: string; record: Record<string, any> }[] = [];
-
-            for (let recIdx = 0; recIdx < batch.length; recIdx++) {
-                const raw = batch[recIdx];
-                const globalRecIdx = batchIdx * effectiveBatchSize + recIdx;
-                const refId = (raw.attributes?.referenceId as string | undefined) ?? `${obj.sobject}Ref${globalRecIdx}`;
-
-                // Skip already-created records
-                if (tracking[obj.sobject][refId]?.status === "created") {
+            const toLoad: Record<string, any>[] = [];
+            for (const rec of batch) {
+                const srcId = String(rec.Id ?? "");
+                if (tracking[obj.sobject][srcId]?.status === "created") {
                     objStatusMap.get(obj.sobject)!.alreadyDone++;
-                    continue;
+                } else {
+                    toLoad.push(rec);
                 }
-
-                const { record: subbed, missingRefs } = substituteRefs(raw, globalRefIndex);
-                if (missingRefs.length > 0) {
-                    emit(`Blocking ${refId}: unresolved refs [${missingRefs.join(", ")}]`, "warn");
-                    tracking[obj.sobject][refId] = { status: "blocked", error: `Unresolved refs: ${missingRefs.join(", ")}`, at: now() };
-                    totalBlocked++;
-                    continue;
-                }
-
-                const nsRecord = applyNamespace(subbed, ns);
-                processable.push({ refId, record: nsRecord });
             }
 
-            if (processable.length === 0) {
+            if (toLoad.length === 0) {
                 onProgress(buildProgressEvent(obj, objIdx, batchIdx, batches.length, 0, batch.length));
                 continue;
             }
 
             if (dryRun) {
-                emit(`[dry-run] Would load ${processable.length} record(s) for ${obj.sobject} batch ${batchIdx + 1}`, "info");
-                for (const { refId } of processable) {
-                    tracking[obj.sobject][refId] = { status: "skipped", at: now() };
+                emit(`[dry-run] Would upsert ${toLoad.length} record(s) for ${obj.sobject} batch ${batchIdx + 1}`, "info");
+                for (const rec of toLoad) {
+                    const srcId = String(rec.Id ?? "");
+                    tracking[obj.sobject][srcId] = { status: "skipped", at: now() };
                     totalSkipped++;
                 }
-                onProgress(buildProgressEvent(obj, objIdx, batchIdx, batches.length, processable.length, batch.length));
+                onProgress(buildProgressEvent(obj, objIdx, batchIdx, batches.length, toLoad.length, batch.length));
                 continue;
             }
 
-            // ---- Perform the actual load (with governor-limit retry) ----
             await loadBatch(
-                obj, processable, targetOrg, workspaceRoot, tmpDir,
-                tracking, globalRefIndex,
-                emit,
+                obj, toLoad, targetOrg, workspaceRoot, tmpDir,
+                tracking, refFields, objByName, emit,
                 (created, updated, failed) => {
                     totalLoaded += created + updated;
                     totalFailed += failed;
@@ -1258,225 +996,107 @@ export async function loadData(
                     s.created += created;
                     s.updated += updated;
                     s.failed  += failed;
-                    if (failed === 0) {
-                        const parts: string[] = [];
-                        if (created > 0) { parts.push(`${created} pushed ✓`); }
-                        if (updated > 0) { parts.push(`${updated} updated ✓`); }
-                        if (parts.length > 0) { emit(`  ${obj.sobject} batch ${batchIdx + 1}: ${parts.join(", ")}`, "success"); }
-                    }
                 },
-                effectiveBatchSize,
-                !obj.externalIdField ? insertedThisObject : undefined,
+                config.batchSize,
             );
 
             writeTracking(workspaceRoot, targetOrg, tracking);
-            onProgress(buildProgressEvent(obj, objIdx, batchIdx, batches.length, processable.length, batch.length));
+            onProgress(buildProgressEvent(obj, objIdx, batchIdx, batches.length, toLoad.length, batch.length));
         }
 
         writeTracking(workspaceRoot, targetOrg, tracking);
-
-        // After insert-mode: backfill ExternalId field so re-runs use upsert
-        if (!obj.externalIdField && insertedThisObject.length > 0 && !dryRun) {
-            await backfillExternalIds(obj, insertedThisObject, targetOrg, workspaceRoot, tmpDir, emit, config);
-            if (obj.externalIdField) { writeDmConfig(workspaceRoot, config); }
-        }
-
-        const finalStatus = objectSkipped ? "skipped" : "done";
-        objStatusMap.set(obj.sobject, { ...objStatusMap.get(obj.sobject)!, status: finalStatus });
+        objStatusMap.set(obj.sobject, { ...objStatusMap.get(obj.sobject)!, status: "done" });
         emit(`✓ ${obj.sobject}: ${summarizeObjectResult(objStatusMap.get(obj.sobject)!)}`, "success");
     }
 
-    // ------------------------------------------------------------------
-    // Dry-run report
-    // ------------------------------------------------------------------
-    if (dryRun) {
-        const reportPath = path.join(workspaceRoot, ".git", "sf-devops-dm", "dryrun", "report.json");
-        fs.mkdirSync(path.dirname(reportPath), { recursive: true });
-        fs.writeFileSync(reportPath, JSON.stringify({
-            generatedAt: now(),
-            targetOrg,
-            totalLoaded,
-            totalFailed,
-            totalSkipped,
-            totalBlocked,
-        }, null, 2), "utf-8");
-    }
-
-    // ── End-of-load summary ──────────────────────────────────────────────────
     const summaryParts = [`${totalLoaded} pushed`];
     if (totalFailed > 0)  { summaryParts.push(`${totalFailed} failed`); }
     if (totalSkipped > 0) { summaryParts.push(`${totalSkipped} skipped`); }
     if (totalBlocked > 0) { summaryParts.push(`${totalBlocked} blocked`); }
     emit(`─── Load complete: ${summaryParts.join(" · ")} ───`, totalFailed > 0 ? "warn" : "success");
 
+    if (dryRun) {
+        const reportPath = path.join(workspaceRoot, ".git", "sf-devops-dm", "dryrun", "report.json");
+        fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+        fs.writeFileSync(reportPath, JSON.stringify({ generatedAt: now(), targetOrg, totalLoaded, totalFailed, totalSkipped, totalBlocked }, null, 2), "utf-8");
+    }
+
     writeLastRunLog(workspaceRoot, logLines);
-    appendHistoryEntry(workspaceRoot, {
-        at: now(),
-        op: "load",
-        targetOrg,
-        dryRun,
-        loaded: totalLoaded,
-        failed: totalFailed,
-        skipped: totalSkipped,
-        blocked: totalBlocked,
-    });
+    appendHistoryEntry(workspaceRoot, { at: now(), op: "load", targetOrg, dryRun, loaded: totalLoaded, failed: totalFailed, skipped: totalSkipped, blocked: totalBlocked });
 
     ctrl._setState("done");
     return { loaded: totalLoaded, failed: totalFailed, skipped: totalSkipped, blocked: totalBlocked };
 }
 
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// backfillExternalIds — after insert mode, stamp ExternalId field values so
-// the next load run can switch to idempotent upsert instead of re-inserting.
-// ---------------------------------------------------------------------------
-
-async function backfillExternalIds(
-    obj: DmObjectConfig,
-    insertedRecords: { refId: string; sfId: string }[],
-    targetOrg: string,
-    workspaceRoot: string,
-    tmpDir: string,
-    emit: LogFn,
-    config: DmConfig,
-): Promise<void> {
-    if (insertedRecords.length === 0) { return; }
-
-    // Re-check for ExternalId field — may have been created after the pre-flight
-    const extField = await checkExternalId(targetOrg, obj.sobject, workspaceRoot, () => {});
-    if (!extField) {
-        emit(`ℹ  ${obj.sobject}: no ExternalId field found — records inserted without ExternalId. Add External_Id__c in Salesforce to enable idempotent re-runs.`, "info");
-        return;
-    }
-
-    emit(`Stamping ExternalId (${extField}) on ${insertedRecords.length} ${obj.sobject} record(s)…`, "info");
-
-    // Build CSV: Id + ExternalId field. Upsert-by-Id is a bulk update.
-    const header = `Id,${extField}`;
-    const rows   = insertedRecords.map(r => `${csvEscape(r.sfId)},${csvEscape(r.refId)}`);
-    const csvPath = path.join(tmpDir, `${safeOrgName(obj.sobject)}-backfill-${Date.now()}.csv`);
-    fs.writeFileSync(csvPath, [header, ...rows].join("\n"), "utf-8");
-
-    try {
-        await execSf(
-            ["data", "upsert", "bulk",
-             "--sobject", obj.sobject,
-             "--external-id", "Id",
-             "--file", csvPath,
-             "--target-org", targetOrg,
-             "--wait", "10",
-             "--json"],
-            { cwd: workspaceRoot, timeout: 120_000, maxBuffer: 10 * 1024 * 1024 },
-        );
-        emit(`✓ ExternalId stamped on ${insertedRecords.length} ${obj.sobject} record(s) — next load will use upsert mode`, "success");
-        // Update config so the next run picks up the field immediately
-        obj.externalIdField  = extField;
-        obj.externalIdVerified = true;
-    } catch (e: any) {
-        emit(`⚠  Could not stamp ExternalId on ${obj.sobject}: ${e?.message ?? String(e)}`, "warn");
-    } finally {
-        try { fs.unlinkSync(csvPath); } catch { /* ignore */ }
-    }
-}
-
-// loadBatch — recursive halving on LimitException
+// loadBatch — always-upsert via Bulk API 2.0 with relationship columns
 // ---------------------------------------------------------------------------
 
 async function loadBatch(
     obj: DmObjectConfig,
-    processable: { refId: string; record: Record<string, any> }[],
+    records: Record<string, any>[],
     targetOrg: string,
     workspaceRoot: string,
     tmpDir: string,
     tracking: TrackingFile,
-    globalRefIndex: Map<string, string>,
+    referenceFields: RefField[],
+    objByName: Map<string, DmObjectConfig>,
     emit: LogFn,
     onCount: (created: number, updated: number, failed: number) => void,
     maxBatchSize: number,
-    insertedRecords?: { refId: string; sfId: string }[],
 ): Promise<void> {
+    if (!obj.externalIdField) {
+        emit(`✗ ${obj.sobject}: no externalIdField configured — skipping batch`, "error");
+        onCount(0, 0, records.length);
+        return;
+    }
+
+    if (records.length > maxBatchSize) {
+        const half = Math.ceil(records.length / 2);
+        await loadBatch(obj, records.slice(0, half), targetOrg, workspaceRoot, tmpDir, tracking, referenceFields, objByName, emit, onCount, maxBatchSize);
+        await loadBatch(obj, records.slice(half),    targetOrg, workspaceRoot, tmpDir, tracking, referenceFields, objByName, emit, onCount, maxBatchSize);
+        return;
+    }
+
+    const csv = buildUpsertCsv(records, obj, referenceFields, objByName);
+    if (!csv) { return; }
+
+    const csvPath = path.join(tmpDir, `${safeOrgName(obj.sobject)}-${Date.now()}.csv`);
     let stdout = "";
     let attemptFailed = false;
 
-    let loadFilePath: string | undefined;
     try {
-        if (obj.externalIdField) {
-            // Upsert via bulk CSV.
-            // Inject the referenceId as the ExternalId field value when the record doesn't
-            // already have one. This makes upserts idempotent: re-runs match existing records
-            // by the same stable key rather than creating duplicates with blank ExternalId.
-            const extField = obj.externalIdField;
-            const records = processable.map(p => ({
-                ...p.record,
-                [extField]: p.record[extField] ?? p.refId,
-            }));
-            const csv = buildCsv(records, extField);
-            const csvPath = path.join(tmpDir, `${safeOrgName(obj.sobject)}-${Date.now()}.csv`);
-            loadFilePath = csvPath;
-            fs.writeFileSync(csvPath, csv, "utf-8");
-
-            const result = await execSf(
-                ["data", "upsert", "bulk",
-                 "--sobject", obj.sobject,
-                 "--external-id", obj.externalIdField,
-                 "--file", csvPath,
-                 "--target-org", targetOrg,
-                 "--wait", "10",
-                 "--json"],
-                { cwd: workspaceRoot, timeout: 180_000, maxBuffer: 50 * 1024 * 1024 },
-            );
-            stdout = result.stdout;
-        } else {
-            // Import tree JSON
-            const treePayload = {
-                records: processable.map(p => ({
-                    ...p.record,
-                    attributes: { type: obj.sobject, referenceId: p.refId },
-                })),
-            };
-            const jsonPath = path.join(tmpDir, `${safeOrgName(obj.sobject)}-${Date.now()}.json`);
-            loadFilePath = jsonPath;
-            fs.writeFileSync(jsonPath, JSON.stringify(treePayload, null, 2), "utf-8");
-
-            const result = await execSf(
-                ["data", "import", "tree",
-                 "--files", jsonPath,
-                 "--target-org", targetOrg,
-                 "--json"],
-                { cwd: workspaceRoot, timeout: 180_000, maxBuffer: 50 * 1024 * 1024 },
-            );
-            stdout = result.stdout;
-        }
+        fs.writeFileSync(csvPath, csv, "utf-8");
+        const result = await execSf(
+            ["data", "upsert", "bulk",
+             "--sobject",     obj.sobject,
+             "--external-id", obj.externalIdField,
+             "--file",        csvPath,
+             "--target-org",  targetOrg,
+             "--wait",        "10",
+             "--json"],
+            { cwd: workspaceRoot, timeout: 180_000, maxBuffer: 50 * 1024 * 1024 },
+        );
+        stdout = result.stdout;
     } catch (e: any) {
-        stdout = e?.stdout ?? "";
+        stdout = (e as any)?.stdout ?? "";
         attemptFailed = true;
     } finally {
-        if (loadFilePath && fs.existsSync(loadFilePath)) {
-            try { fs.unlinkSync(loadFilePath); } catch { /* ignore */ }
-        }
+        if (fs.existsSync(csvPath)) { try { fs.unlinkSync(csvPath); } catch { /* ignore */ } }
     }
 
     const parsedResult = parseImportResult(stdout);
-    const { created, createdByRef, resultItems, limitException, jobId } = parsedResult;
+    const { resultItems, limitException, jobId } = parsedResult;
     let failed = parsedResult.failed;
 
-    // Bulk API 2.0 exits non-zero even when SOME records succeed — fetch both success and
-    // failure CSVs so we can correctly mark successes without re-inserting them on retry,
-    // and surface per-record errors instead of the opaque "N records failed" summary.
     if (jobId && obj.externalIdField) {
-        const extField = obj.externalIdField;
-        const allResults = await fetchBulkJobAllResults(jobId, targetOrg, tmpDir, extField);
+        const allResults = await fetchBulkJobAllResults(jobId, targetOrg, tmpDir, obj.externalIdField);
         if (allResults) {
-            // Build lookup maps keyed by the ExternalId field value that was in the CSV.
-            // The CSV column always contains record[extField] ?? refId (see CSV construction above),
-            // so matching on that value correctly handles both native and synthetic ExternalIds.
             const successByExtId = new Map(allResults.successes.map(s => [s.extIdVal, s]));
             const failureByExtId = new Map(allResults.failures.map(f => [f.extIdVal, f]));
-
-            // Rebuild resultItems positionally so the main mapping loop works correctly.
             resultItems.length = 0;
-            for (const p of processable) {
-                const extIdVal = String(p.record[extField] ?? p.refId);
+            for (const record of records) {
+                const extIdVal = String(record.Id ?? "");
                 const success = successByExtId.get(extIdVal);
                 const failure = failureByExtId.get(extIdVal);
                 if (success) {
@@ -1485,89 +1105,60 @@ async function loadBatch(
                     resultItems.push({ sfId: "", success: false, error: failure?.error ?? "Unknown error", wasNewRecord: false });
                 }
             }
-
-            // If we successfully reconstructed full results, clear the attemptFailed flag so
-            // the main mapping loop uses resultItems instead of the fallback "all failed" path.
-            if (resultItems.length === processable.length) {
-                attemptFailed = false;
-            }
-
-            // Update failed list with correct per-record errors keyed by extIdVal.
-            failed = allResults.failures.map(f => ({ refId: f.extIdVal, error: f.error }));
+            if (resultItems.length > 0) { attemptFailed = false; failed = resultItems.filter(r => !r.success).map(r => ({ refId: "", error: r.error })); }
         }
     }
 
-    // Governor-limit retry: split batch in half (down to single record)
-    if (limitException && processable.length > 1) {
-        emit(`Governor limit hit for ${obj.sobject} batch of ${processable.length} — splitting`, "warn");
-        const half = Math.ceil(processable.length / 2);
-        await loadBatch(obj, processable.slice(0, half), targetOrg, workspaceRoot, tmpDir, tracking, globalRefIndex, emit, onCount, maxBatchSize, insertedRecords);
-        await loadBatch(obj, processable.slice(half), targetOrg, workspaceRoot, tmpDir, tracking, globalRefIndex, emit, onCount, maxBatchSize, insertedRecords);
+    if (limitException && records.length > 1) {
+        const half = Math.ceil(records.length / 2);
+        emit(`Governor limit hit for ${obj.sobject} batch of ${records.length} — splitting`, "warn");
+        await loadBatch(obj, records.slice(0, half), targetOrg, workspaceRoot, tmpDir, tracking, referenceFields, objByName, emit, onCount, maxBatchSize);
+        await loadBatch(obj, records.slice(half),    targetOrg, workspaceRoot, tmpDir, tracking, referenceFields, objByName, emit, onCount, maxBatchSize);
         return;
     }
 
-    // Map results back to tracking entries.
-    // Strategy:
-    //   Import tree  → createdByRef keyed by referenceId (always populated)
-    //   Upsert bulk  → resultItems[i] positionally aligned to processable[i]
-    //                  (bulk results have no referenceId, so createdByRef is empty)
-    if (resultItems.length > 0 || createdByRef.size > 0 || attemptFailed) {
-        let batchCreated = 0;
-        let batchUpdated = 0;
-        let batchFailed = 0;
-        for (let i = 0; i < processable.length; i++) {
-            const { refId } = processable[i];
-            // Import tree path: lookup by referenceId — always a genuine new record
-            const sfIdByRef = createdByRef.get(refId);
-            if (sfIdByRef) {
-                tracking[obj.sobject][refId] = { status: "created", id: sfIdByRef, at: now() };
-                globalRefIndex.set(refId, sfIdByRef);
-                insertedRecords?.push({ refId, sfId: sfIdByRef });
-                batchCreated++;
-                continue;
-            }
-            // Upsert bulk path: positional result (full list includes successes AND failures).
-            // "created" tracking status covers both — it means "exists correctly in the target
-            // org", regardless of whether this run inserted it or matched+updated an existing one.
+    let batchCreated = 0, batchUpdated = 0, batchFailed = 0;
+    if (resultItems.length > 0 || !attemptFailed) {
+        for (let i = 0; i < records.length; i++) {
+            const sourceId = String(records[i].Id ?? `unknown-${i}`);
             const posResult = resultItems[i];
             if (posResult?.success) {
-                tracking[obj.sobject][refId] = { status: "created", id: posResult.sfId, at: now() };
-                globalRefIndex.set(refId, posResult.sfId);
+                tracking[obj.sobject][sourceId] = { status: "created", id: posResult.sfId, at: now() };
                 if (posResult.wasNewRecord) { batchCreated++; } else { batchUpdated++; }
             } else {
-                const failedByRef = failed.find(f => f.refId === refId);
-                const err = failedByRef?.error ?? posResult?.error ?? (attemptFailed ? "Batch failed" : "No result");
-                tracking[obj.sobject][refId] = { status: "failed", error: err, at: now() };
+                const err = posResult?.error ?? (attemptFailed ? "Batch failed" : "No result");
+                tracking[obj.sobject][sourceId] = { status: "failed", error: err, at: now() };
                 batchFailed++;
             }
         }
         onCount(batchCreated, batchUpdated, batchFailed);
         if (batchFailed > 0) {
-            const parts = [];
+            const parts: string[] = [];
             if (batchCreated > 0) { parts.push(`${batchCreated} created`); }
             if (batchUpdated > 0) { parts.push(`${batchUpdated} updated`); }
             if (parts.length === 0) { parts.push("0 created"); }
             emit(`${obj.sobject}: ${parts.join(", ")}, ${batchFailed} failed in batch`, "warn");
-            const seenHints = new Set<string>();
-            for (const f of failed) {
-                const hint = parseFieldError(obj.sobject, f.error);
-                if (hint && !seenHints.has(hint)) {
-                    seenHints.add(hint);
-                    emit(`  → ${hint}`, "warn");
-                } else if (!hint && f.error && f.error !== "unknown") {
-                    const shortErr = f.error.length > 200 ? f.error.slice(0, 200) + "…" : f.error;
-                    if (!seenHints.has(shortErr)) {
-                        seenHints.add(shortErr);
-                        emit(`  ✗ ${obj.sobject}[${f.refId}]: ${shortErr}`, "error");
-                    }
+            const seenErrors = new Set<string>();
+            for (const r of resultItems.filter(r => !r.success)) {
+                const hint = parseFieldError(obj.sobject, r.error);
+                const msg  = hint ?? (r.error.length > 200 ? r.error.slice(0, 200) + "…" : r.error);
+                if (msg && !seenErrors.has(msg)) {
+                    seenErrors.add(msg);
+                    emit(`  ${hint ? "→" : "✗"} ${msg}`, hint ? "warn" : "error");
                 }
             }
+        } else {
+            const parts: string[] = [];
+            if (batchCreated > 0) { parts.push(`${batchCreated} pushed ✓`); }
+            if (batchUpdated > 0) { parts.push(`${batchUpdated} updated ✓`); }
+            if (parts.length > 0) { emit(`  ${obj.sobject}: ${parts.join(", ")}`, "success"); }
         }
-    } else if (attemptFailed) {
-        for (const { refId } of processable) {
-            tracking[obj.sobject][refId] = { status: "failed", error: "No parseable result", at: now() };
+    } else {
+        for (const record of records) {
+            const sourceId = String(record.Id ?? "unknown");
+            tracking[obj.sobject][sourceId] = { status: "failed", error: "No parseable result", at: now() };
         }
-        onCount(0, 0, processable.length);
+        onCount(0, 0, records.length);
         emit(`${obj.sobject}: batch failed — no parseable result`, "error");
     }
 }
@@ -1625,44 +1216,9 @@ export async function autoSortByDependencies(
     }
 
     // ------------------------------------------------------------------
-    // Pass B: data-proven dependency discovery from seed files
+    // Final deps: use schema-based discovery
     // ------------------------------------------------------------------
-    const seedDir = path.resolve(workspaceRoot, config.seedDir);
-    const dataDeps = new Map<string, Set<string>>();
-    for (const o of objects) { dataDeps.set(o.sobject, new Set()); }
-
-    if (fs.existsSync(seedDir)) {
-        for (const obj of objects) {
-            const records = readSeedRecords(seedDir, obj.sobject);
-            const deps = dataDeps.get(obj.sobject)!;
-            for (const record of records) {
-                for (const value of Object.values(record)) {
-                    if (typeof value !== "string") { continue; }
-                    // @RefId tokens like AccountRef1 → sobject = Account
-                    if (value.startsWith("@")) {
-                        const refToken = value.slice(1);
-                        // Extract prefix before the first digit sequence
-                        const match = refToken.match(/^([A-Za-z][A-Za-z0-9_]*?)(?:Ref)?\d+$/);
-                        if (match) {
-                            const candidate = match[1];
-                            if (sobjectNames.has(candidate) && candidate !== obj.sobject) {
-                                deps.add(candidate);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Pass B supersedes Pass A: merge, preferring data evidence
-    const finalDeps = new Map<string, Set<string>>();
-    for (const o of objects) {
-        const data = dataDeps.get(o.sobject) ?? new Set<string>();
-        const schema = schemaDeps.get(o.sobject) ?? new Set<string>();
-        // If data has any entries, use data only; otherwise fall back to schema
-        finalDeps.set(o.sobject, data.size > 0 ? data : schema);
-    }
+    const finalDeps = schemaDeps;
 
     // ------------------------------------------------------------------
     // Topological sort — Kahn's algorithm
