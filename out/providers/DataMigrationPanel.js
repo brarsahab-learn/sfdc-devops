@@ -274,6 +274,11 @@ class DataMigrationPanel {
                         break;
                     case "selectTrackingOrg":
                         this._trackingViewOrg = msg.org || "";
+                        this._trackingCache = undefined;
+                        this._refresh();
+                        break;
+                    case "refreshTracking":
+                        this._trackingCache = undefined;
                         this._refresh();
                         break;
                     case "clearAndReload": {
@@ -549,7 +554,7 @@ class DataMigrationPanel {
     _makeLogHandlers(logTarget) {
         const onLog = (text, level) => {
             const line = `[${new Date().toLocaleTimeString()}]  ${text}`;
-            logTarget.push(line);
+            logTarget.push({ text: line, level });
             if (logTarget.length > 2000) {
                 logTarget.shift();
             }
@@ -574,7 +579,7 @@ class DataMigrationPanel {
         try {
             await (0, DataMigrationEngine_1.pullData)(sourceOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, dryRunSampleSize: 5 });
             if (!dryRun) {
-                (0, DataMigrationConfig_1.writeJobLog)((0, DataMigrationConfig_1.pullLogsDir)(this._workspaceRoot), this._pullLog);
+                (0, DataMigrationConfig_1.writeJobLog)((0, DataMigrationConfig_1.pullLogsDir)(this._workspaceRoot), this._pullLog.map(l => `[${l.level}] ${l.text}`));
             }
             this._panel.webview.postMessage({ command: "runDone", op: "pull", dryRun });
         }
@@ -600,7 +605,7 @@ class DataMigrationPanel {
         try {
             await (0, DataMigrationEngine_1.loadData)(targetOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, objectFilter: sobject ? [sobject] : undefined });
             if (!dryRun) {
-                (0, DataMigrationConfig_1.writeJobLog)((0, DataMigrationConfig_1.loadLogsDir)(this._workspaceRoot, targetOrg), this._loadLog);
+                (0, DataMigrationConfig_1.writeJobLog)((0, DataMigrationConfig_1.loadLogsDir)(this._workspaceRoot, targetOrg), this._loadLog.map(l => `[${l.level}] ${l.text}`));
             }
             this._panel.webview.postMessage({ command: "runDone", op: "load", dryRun });
         }
@@ -630,7 +635,7 @@ class DataMigrationPanel {
         try {
             await (0, DataMigrationEngine_1.pullData)(sourceOrg, this._workspaceRoot, this._config, pullLog, pullProg, pullCtrl, { dryRun, dryRunSampleSize: 5 });
             if (!dryRun) {
-                (0, DataMigrationConfig_1.writeJobLog)((0, DataMigrationConfig_1.pullLogsDir)(this._workspaceRoot), this._pullLog);
+                (0, DataMigrationConfig_1.writeJobLog)((0, DataMigrationConfig_1.pullLogsDir)(this._workspaceRoot), this._pullLog.map(l => `[${l.level}] ${l.text}`));
             }
             this._pullState = "done";
             if (pullCtrl.state !== "cancelled") {
@@ -645,7 +650,7 @@ class DataMigrationPanel {
                 this._refresh();
                 await (0, DataMigrationEngine_1.loadData)(targetOrg, this._workspaceRoot, this._config, loadLog, loadProg, loadCtrl, { dryRun });
                 if (!dryRun) {
-                    (0, DataMigrationConfig_1.writeJobLog)((0, DataMigrationConfig_1.loadLogsDir)(this._workspaceRoot, targetOrg), this._loadLog);
+                    (0, DataMigrationConfig_1.writeJobLog)((0, DataMigrationConfig_1.loadLogsDir)(this._workspaceRoot, targetOrg), this._loadLog.map(l => `[${l.level}] ${l.text}`));
                 }
             }
             this._panel.webview.postMessage({ command: "runDone", op: "pullAndLoad", dryRun });
@@ -823,7 +828,8 @@ class DataMigrationPanel {
     }
     async _handleExportDryRunReport() {
         try {
-            const lines = this._loadLog.length > 0 ? this._loadLog : this._pullLog;
+            const src = this._loadLog.length > 0 ? this._loadLog : this._pullLog;
+            const lines = src.map(l => `[${l.level}] ${l.text}`);
             const exportDir = path.join(this._workspaceRoot, ".git", "sf-devops-dm", "exports");
             fs.mkdirSync(exportDir, { recursive: true });
             const outPath = path.join(exportDir, `dm-dryrun-report-${Date.now()}.log`);
@@ -1045,7 +1051,7 @@ class DataMigrationPanel {
                     <tbody>${seedRows}</tbody>
                 </table></div>`}
 
-            <div class="log-area" id="log-area" style="margin-top:16px">${pullLog.map((l) => `<div class="log-line">${esc(l)}</div>`).join("")}</div>`;
+            <div class="log-area" id="log-area" style="margin-top:16px">${pullLog.map((l) => `<div class="log-line ${l.level}">${esc(l.text)}</div>`).join("")}</div>`;
         };
         // ── Tab 3: Load ──────────────────────────────────────────────────────
         const renderLoadTab = () => {
@@ -1076,7 +1082,7 @@ class DataMigrationPanel {
                     <button class="btn" onclick="send('skipObject')">⏭ Skip Object</button>
                     <button class="btn danger-btn" onclick="send('cancel')">✕ Cancel</button>
                 </div>
-                <div class="log-area" id="log-area">${loadLog.map((l) => `<div class="log-line">${esc(l)}</div>`).join("")}</div>`;
+                <div class="log-area" id="log-area">${loadLog.map((l) => `<div class="log-line ${l.level}">${esc(l.text)}</div>`).join("")}</div>`;
             }
             return `
             <div class="run-idle-card">
@@ -1097,7 +1103,7 @@ class DataMigrationPanel {
                 </div>
                 ${isDone ? `<div class="done-banner">✅ Load complete. Check the Tracking tab for results.</div>` : ""}
             </div>
-            <div class="log-area" id="log-area" style="margin-top:16px">${loadLog.map((l) => `<div class="log-line">${esc(l)}</div>`).join("")}</div>`;
+            <div class="log-area" id="log-area" style="margin-top:16px">${loadLog.map((l) => `<div class="log-line ${l.level}">${esc(l.text)}</div>`).join("")}</div>`;
         };
         // ── Tab 4: Tracking ──────────────────────────────────────────────────
         const renderTrackingTab = () => {
@@ -1167,7 +1173,8 @@ class DataMigrationPanel {
             <div class="toolbar" style="margin-bottom:14px;align-items:center">
                 <label style="font-size:12px;color:var(--vscode-descriptionForeground)">Viewing org:</label>
                 <select class="select" ${dis} onchange="send('selectTrackingOrg',{org:this.value})">${orgSelectorOpts}</select>
-                <button class="icon-btn" ${dis} onclick="send('refreshOrgs')" title="Refresh org list">🔄</button>
+                <button class="icon-btn" onclick="send('refreshTracking')" title="Refresh stats from tracking file">🔄 Refresh Stats</button>
+                <button class="icon-btn" ${dis} onclick="send('refreshOrgs')" title="Refresh org list">⚙️ Orgs</button>
             </div>
 
             ${emptyMsg}
@@ -1222,7 +1229,7 @@ class DataMigrationPanel {
                 <button class="btn btn-primary" ${dis} onclick="send('checkAllExtIds',{targetOrg:${esc(JSON.stringify(targetOrg))}})">Re-check All</button>
                 <button class="btn" ${dis} onclick="send('createAllExtIds',{targetOrg:${esc(JSON.stringify(targetOrg))}})">Auto-Create All Missing</button>
             </div>
-            <div class="log-area" id="log-area" style="margin-top:16px">${loadLog.map((l) => `<div class="log-line">${esc(l)}</div>`).join("")}</div>`;
+            <div class="log-area" id="log-area" style="margin-top:16px">${loadLog.map((l) => `<div class="log-line ${l.level}">${esc(l.text)}</div>`).join("")}</div>`;
         };
         const tabContent = activeTab === "config" ? renderConfigTab()
             : activeTab === "pull" ? renderPullTab()
@@ -1340,10 +1347,11 @@ input:checked + .slider::before { transform: translateX(16px); }
 
 /* ── Log area ── */
 .log-area { background: var(--vscode-terminal-background, #1e1e1e); border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 10px; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; max-height: 320px; overflow-y: auto; color: var(--vscode-terminal-foreground, #ccc); }
-.log-line { white-space: pre-wrap; word-break: break-all; line-height: 1.55; }
-.log-line.warn  { color: #FFC107; }
-.log-line.error { color: #F44336; }
-.log-line.info  { color: #4CAF50; }
+.log-line { white-space: pre-wrap; word-break: break-all; line-height: 1.55; color: var(--vscode-terminal-foreground, #d4d4d4); }
+.log-line.success { color: #4EC9B0; }
+.log-line.info    { color: #9CDCFE; }
+.log-line.warn    { color: #FFC107; }
+.log-line.error   { color: #F44336; }
 
 /* ── Toolbar ── */
 .toolbar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }

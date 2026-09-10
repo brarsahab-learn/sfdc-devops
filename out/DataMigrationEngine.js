@@ -119,7 +119,7 @@ function chunkArray(arr, size) {
  *  every record already existed correctly in the target org (e.g. a re-run after a prior success,
  *  or an idempotent upsert that only matched existing records). */
 function summarizeObjectResult(status) {
-    const { created, updated, alreadyDone, total } = status;
+    const { created, updated, alreadyDone, total, failed = 0, skipped = 0 } = status;
     const parts = [];
     if (created > 0) {
         parts.push(`${created} created`);
@@ -130,8 +130,14 @@ function summarizeObjectResult(status) {
     if (alreadyDone > 0) {
         parts.push(`${alreadyDone} already up to date`);
     }
+    if (failed > 0) {
+        parts.push(`${failed} failed ✗`);
+    }
+    if (skipped > 0) {
+        parts.push(`${skipped} skipped`);
+    }
     if (parts.length === 0) {
-        return total > 0 ? "0 processed" : "0 created";
+        return total > 0 ? "0 processed" : "0 records";
     }
     return parts.join(", ");
 }
@@ -1011,7 +1017,7 @@ async function loadData(targetOrg, workspaceRoot, config, onLog, onProgress, con
     // ------------------------------------------------------------------
     const objStatusMap = new Map();
     for (const o of objectsToProcess) {
-        objStatusMap.set(o.sobject, { status: "pending", created: 0, updated: 0, alreadyDone: 0, total: 0 });
+        objStatusMap.set(o.sobject, { status: "pending", created: 0, updated: 0, alreadyDone: 0, total: 0, failed: 0, skipped: 0 });
     }
     let totalLoaded = 0;
     let totalFailed = 0;
@@ -1071,7 +1077,7 @@ async function loadData(targetOrg, workspaceRoot, config, onLog, onProgress, con
         const allRecords = readSeedRecords(seedDir, obj.sobject);
         if (allRecords.length === 0) {
             emit(`No seed records found for ${obj.sobject} — skipping`, "warn");
-            objStatusMap.set(obj.sobject, { status: "skipped", created: 0, updated: 0, alreadyDone: 0, total: 0 });
+            objStatusMap.set(obj.sobject, { status: "skipped", created: 0, updated: 0, alreadyDone: 0, total: 0, failed: 0, skipped: 0 });
             continue;
         }
         objStatusMap.get(obj.sobject).total = allRecords.length;
@@ -1147,8 +1153,22 @@ async function loadData(targetOrg, workspaceRoot, config, onLog, onProgress, con
             await loadBatch(obj, processable, targetOrg, workspaceRoot, tmpDir, tracking, globalRefIndex, emit, (created, updated, failed) => {
                 totalLoaded += created + updated;
                 totalFailed += failed;
-                objStatusMap.get(obj.sobject).created += created;
-                objStatusMap.get(obj.sobject).updated += updated;
+                const s = objStatusMap.get(obj.sobject);
+                s.created += created;
+                s.updated += updated;
+                s.failed += failed;
+                if (failed === 0) {
+                    const parts = [];
+                    if (created > 0) {
+                        parts.push(`${created} pushed ✓`);
+                    }
+                    if (updated > 0) {
+                        parts.push(`${updated} updated ✓`);
+                    }
+                    if (parts.length > 0) {
+                        emit(`  ${obj.sobject} batch ${batchIdx + 1}: ${parts.join(", ")}`, "success");
+                    }
+                }
             }, effectiveBatchSize, !obj.externalIdField ? insertedThisObject : undefined);
             (0, DataMigrationConfig_1.writeTracking)(workspaceRoot, targetOrg, tracking);
             onProgress(buildProgressEvent(obj, objIdx, batchIdx, batches.length, processable.length, batch.length));
@@ -1180,6 +1200,18 @@ async function loadData(targetOrg, workspaceRoot, config, onLog, onProgress, con
             totalBlocked,
         }, null, 2), "utf-8");
     }
+    // ── End-of-load summary ──────────────────────────────────────────────────
+    const summaryParts = [`${totalLoaded} pushed`];
+    if (totalFailed > 0) {
+        summaryParts.push(`${totalFailed} failed`);
+    }
+    if (totalSkipped > 0) {
+        summaryParts.push(`${totalSkipped} skipped`);
+    }
+    if (totalBlocked > 0) {
+        summaryParts.push(`${totalBlocked} blocked`);
+    }
+    emit(`─── Load complete: ${summaryParts.join(" · ")} ───`, totalFailed > 0 ? "warn" : "success");
     (0, DataMigrationConfig_1.writeLastRunLog)(workspaceRoot, logLines);
     (0, DataMigrationConfig_1.appendHistoryEntry)(workspaceRoot, {
         at: now(),
