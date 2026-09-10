@@ -549,7 +549,7 @@ function buildUpsertCsv(records, obj, referenceFields, objByName) {
  * Fixes the case where execSf throws for partial failures (non-zero exit) but some
  * records actually succeeded — the success CSV always has the full truth.
  */
-async function fetchBulkJobAllResults(jobId, targetOrg, tmpDir, extField) {
+async function fetchBulkJobAllResults(jobId, targetOrg, tmpDir, extField, emit) {
     try {
         const { stdout } = await (0, SfCli_1.execSf)(["data", "bulk", "results", "--job-id", jobId, "--target-org", targetOrg, "--json"], { cwd: tmpDir, timeout: 60000, maxBuffer: 20 * 1024 * 1024 });
         const parsed = JSON.parse(stdout);
@@ -567,6 +567,9 @@ async function fetchBulkJobAllResults(jobId, targetOrg, tmpDir, extField) {
                     });
                 }
             }
+            else {
+                emit(`  ⚠ Bulk job ${jobId}: success-results file was reported but not found at ${csvPath}`, "warn");
+            }
         }
         const failedFilePath = parsed?.result?.failedFilePath;
         if (failedFilePath) {
@@ -579,6 +582,12 @@ async function fetchBulkJobAllResults(jobId, targetOrg, tmpDir, extField) {
                     });
                 }
             }
+            else {
+                emit(`  ⚠ Bulk job ${jobId}: failed-results file was reported but not found at ${csvPath}`, "warn");
+            }
+        }
+        if (!successFilePath && !failedFilePath) {
+            emit(`  ⚠ Bulk job ${jobId}: "sf data bulk results" returned no result file paths — real per-record errors unavailable. Raw response: ${stdout.slice(0, 300)}`, "warn");
         }
         for (const suffix of ["-success-records.csv", "-failed-records.csv", "-unprocessed-records.csv"]) {
             try {
@@ -588,7 +597,12 @@ async function fetchBulkJobAllResults(jobId, targetOrg, tmpDir, extField) {
         }
         return { successes, failures };
     }
-    catch {
+    catch (e) {
+        // Previously swallowed entirely — the caller fell back to the CLI's generic
+        // "N records failed" summary with no explanation of why the detail fetch itself
+        // failed (e.g. the job wasn't actually done yet, or auth expired mid-run).
+        emit(`  ⚠ Could not fetch real per-record errors for bulk job ${jobId}: ${e?.message ?? String(e)}`, "warn");
+        emit(`  → Run manually to inspect: sf data bulk results --job-id ${jobId} --target-org ${targetOrg}`, "info");
         return null;
     }
 }
@@ -631,7 +645,15 @@ function parseImportResult(stdout) {
                 limitException = true;
             }
             failed.push({ refId: "", error: errStr });
-            const jobId = typeof parsed?.data?.jobId === "string" ? parsed.data.jobId : undefined;
+            // Only the "N records failed" completion error attaches `data.jobId` directly. A
+            // --wait timeout or a job that ended in state "Failed" throws a DIFFERENT top-level
+            // error with no `data` at all — but its message/actions still mention the job id
+            // (e.g. `... --job-id 750XX0000004CzYGAU`), so fall back to pulling it out of there.
+            // Without this, those two cases never even attempt the real-error fetch below.
+            const fromData = typeof parsed?.data?.jobId === "string" ? parsed.data.jobId : undefined;
+            const searchText = [errStr, ...(Array.isArray(parsed?.actions) ? parsed.actions : [])].join(" ");
+            const fromText = searchText.match(/\b(750[a-zA-Z0-9]{12,18})\b/)?.[1];
+            const jobId = fromData ?? fromText;
             return { created, createdByRef, failed, resultItems, limitException, jobId };
         }
         const rawResults = parsed?.result?.results ?? parsed?.result ?? [];
@@ -984,7 +1006,7 @@ async function loadBatch(obj, records, targetOrg, workspaceRoot, tmpDir, trackin
     const { resultItems, limitException, jobId } = parsedResult;
     let failed = parsedResult.failed;
     if (jobId && obj.externalIdField) {
-        const allResults = await fetchBulkJobAllResults(jobId, targetOrg, tmpDir, obj.externalIdField);
+        const allResults = await fetchBulkJobAllResults(jobId, targetOrg, tmpDir, obj.externalIdField, emit);
         if (allResults) {
             const successByExtId = new Map(allResults.successes.map(s => [s.extIdVal, s]));
             const failureByExtId = new Map(allResults.failures.map(f => [f.extIdVal, f]));

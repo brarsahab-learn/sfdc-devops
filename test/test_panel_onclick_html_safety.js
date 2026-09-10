@@ -93,12 +93,13 @@ checkAllOnclicksSafe(makePanel("extids")._renderHtml(makePanel("extids")._buildV
 checkAllOnclicksSafe(makePanel("config")._renderHtml(makePanel("config")._buildViewModel()), "Config tab");
 checkAllOnclicksSafe(makePanel("pull")._renderHtml(makePanel("pull")._buildViewModel()), "Pull tab");
 
-// The per-object "Auto-Create" button on the ExternalId tab was explicitly removed — only the
-// bulk "Auto-Create All Missing" action remains.
+// The redesign (5.3.2) removed field-creation entirely — the extension never creates Salesforce
+// custom fields, so BOTH the per-object "Auto-Create" and bulk "Auto-Create All Missing" buttons
+// are gone; the ExternalId tab is verify-only now.
 {
     const html = makePanel("extids")._renderHtml(makePanel("extids")._buildViewModel());
     check("per-object Auto-Create button is removed", !html.includes(">Auto-Create<"));
-    check("bulk Auto-Create All Missing button is kept", html.includes("Auto-Create All Missing"));
+    check("bulk Auto-Create All Missing button is removed", !html.includes("Auto-Create All Missing"));
 }
 
 console.log(allPass ? "\nALL PASS" : "\nSOME FAILED");

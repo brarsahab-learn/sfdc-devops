@@ -20,19 +20,20 @@ import { log } from "../Log";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-/** Count records stored in seed JSON files for a given sobject. */
+/** Count records in one object's seed file. Pull writes exactly `{sobject}.json` (single file,
+ *  exact name — see pullData) since the redesign dropped the old multi-file `sf data export
+ *  tree --plan` format, so this must match the filename exactly. A substring match here would
+ *  silently double-count (e.g. "Account" matching "AccountTeamMember.json" too) and previously
+ *  did — that's exactly the kind of thing that makes the Tracking/Pull tab counts look wrong. */
 function countSeedRecords(seedDir: string, sobject: string): number {
-    if (!fs.existsSync(seedDir)) { return 0; }
-    let count = 0;
+    const fp = path.join(seedDir, `${sobject}.json`);
+    if (!fs.existsSync(fp)) { return 0; }
     try {
-        for (const f of fs.readdirSync(seedDir)) {
-            if (!f.endsWith(".json") || f.endsWith("-plan.json")) { continue; }
-            if (!f.toLowerCase().includes(sobject.toLowerCase())) { continue; }
-            const data = JSON.parse(fs.readFileSync(path.join(seedDir, f), "utf-8"));
-            count += Array.isArray(data.records) ? data.records.length : 0;
-        }
-    } catch { /* ignore */ }
-    return count;
+        const data = JSON.parse(fs.readFileSync(fp, "utf-8"));
+        return Array.isArray(data.records) ? data.records.length : 0;
+    } catch {
+        return 0;
+    }
 }
 
 /** Read last-pull timestamp and per-object record counts from seed directory. */
@@ -312,13 +313,12 @@ export class DataMigrationPanel {
                 }
 
                 case "clearSeed": {
+                    // Exact filename only — a substring match here (e.g. "Account" matching
+                    // "AccountTeamMember.json") would delete an unrelated object's seed data too.
                     const seedDir = path.resolve(this._workspaceRoot, this._config.seedDir);
-                    if (fs.existsSync(seedDir)) {
-                        for (const f of fs.readdirSync(seedDir)) {
-                            if (f.toLowerCase().includes((msg.sobject as string).toLowerCase())) {
-                                try { fs.unlinkSync(path.join(seedDir, f)); } catch { /* ignore */ }
-                            }
-                        }
+                    const seedFile = path.join(seedDir, `${msg.sobject as string}.json`);
+                    if (fs.existsSync(seedFile)) {
+                        try { fs.unlinkSync(seedFile); } catch { /* ignore */ }
                     }
                     this._refresh();
                     break;

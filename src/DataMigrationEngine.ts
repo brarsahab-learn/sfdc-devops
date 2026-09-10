@@ -607,6 +607,7 @@ async function fetchBulkJobAllResults(
     targetOrg: string,
     tmpDir: string,
     extField: string,
+    emit: LogFn,
 ): Promise<{
     successes: { extIdVal: string; sfId: string; wasNewRecord: boolean }[];
     failures: { extIdVal: string; error: string }[];
@@ -632,6 +633,8 @@ async function fetchBulkJobAllResults(
                         wasNewRecord: r["sf__Created"] === "true",
                     });
                 }
+            } else {
+                emit(`  ⚠ Bulk job ${jobId}: success-results file was reported but not found at ${csvPath}`, "warn");
             }
         }
 
@@ -645,7 +648,13 @@ async function fetchBulkJobAllResults(
                         error: r["sf__Error"] || "Unknown error (see failed-records CSV)",
                     });
                 }
+            } else {
+                emit(`  ⚠ Bulk job ${jobId}: failed-results file was reported but not found at ${csvPath}`, "warn");
             }
+        }
+
+        if (!successFilePath && !failedFilePath) {
+            emit(`  ⚠ Bulk job ${jobId}: "sf data bulk results" returned no result file paths — real per-record errors unavailable. Raw response: ${stdout.slice(0, 300)}`, "warn");
         }
 
         for (const suffix of ["-success-records.csv", "-failed-records.csv", "-unprocessed-records.csv"]) {
@@ -653,7 +662,12 @@ async function fetchBulkJobAllResults(
         }
 
         return { successes, failures };
-    } catch {
+    } catch (e: any) {
+        // Previously swallowed entirely — the caller fell back to the CLI's generic
+        // "N records failed" summary with no explanation of why the detail fetch itself
+        // failed (e.g. the job wasn't actually done yet, or auth expired mid-run).
+        emit(`  ⚠ Could not fetch real per-record errors for bulk job ${jobId}: ${e?.message ?? String(e)}`, "warn");
+        emit(`  → Run manually to inspect: sf data bulk results --job-id ${jobId} --target-org ${targetOrg}`, "info");
         return null;
     }
 }
@@ -703,7 +717,15 @@ export function parseImportResult(stdout: string): {
             const errStr = parsed.message as string;
             if (errStr.includes("LimitException")) { limitException = true; }
             failed.push({ refId: "", error: errStr });
-            const jobId = typeof parsed?.data?.jobId === "string" ? parsed.data.jobId : undefined;
+            // Only the "N records failed" completion error attaches `data.jobId` directly. A
+            // --wait timeout or a job that ended in state "Failed" throws a DIFFERENT top-level
+            // error with no `data` at all — but its message/actions still mention the job id
+            // (e.g. `... --job-id 750XX0000004CzYGAU`), so fall back to pulling it out of there.
+            // Without this, those two cases never even attempt the real-error fetch below.
+            const fromData = typeof parsed?.data?.jobId === "string" ? parsed.data.jobId : undefined;
+            const searchText = [errStr, ...(Array.isArray(parsed?.actions) ? parsed.actions : [])].join(" ");
+            const fromText = searchText.match(/\b(750[a-zA-Z0-9]{12,18})\b/)?.[1];
+            const jobId = fromData ?? fromText;
             return { created, createdByRef, failed, resultItems, limitException, jobId };
         }
 
@@ -1090,7 +1112,7 @@ async function loadBatch(
     let failed = parsedResult.failed;
 
     if (jobId && obj.externalIdField) {
-        const allResults = await fetchBulkJobAllResults(jobId, targetOrg, tmpDir, obj.externalIdField);
+        const allResults = await fetchBulkJobAllResults(jobId, targetOrg, tmpDir, obj.externalIdField, emit);
         if (allResults) {
             const successByExtId = new Map(allResults.successes.map(s => [s.extIdVal, s]));
             const failureByExtId = new Map(allResults.failures.map(f => [f.extIdVal, f]));
