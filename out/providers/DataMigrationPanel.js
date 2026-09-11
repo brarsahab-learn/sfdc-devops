@@ -993,16 +993,34 @@ class DataMigrationPanel {
         const otherOrgs = (availableOrgs || []).filter((o) => !pipelineAliases.has(o.alias));
         function orgOptions(selectedAlias) {
             let out = "";
-            out += `<optgroup label="Pipeline Orgs">`;
-            for (const o of pipelineOrgs) {
-                out += `<option value="${esc(o.alias)}"${o.alias === selectedAlias ? " selected" : ""}>${esc(o.alias)}</option>`;
+            let selectedInList = false;
+            if (pipelineOrgs.length > 0) {
+                out += `<optgroup label="Pipeline Orgs">`;
+                for (const o of pipelineOrgs) {
+                    const sel = o.alias === selectedAlias;
+                    if (sel) {
+                        selectedInList = true;
+                    }
+                    out += `<option value="${esc(o.alias)}"${sel ? " selected" : ""}>${esc(o.alias)}</option>`;
+                }
+                out += `</optgroup>`;
             }
-            out += `</optgroup>`;
-            out += `<optgroup label="Other Orgs">`;
-            for (const o of otherOrgs) {
-                out += `<option value="${esc(o.alias)}"${o.alias === selectedAlias ? " selected" : ""}>${esc(o.alias)} — ${esc(o.username)}</option>`;
+            if (otherOrgs.length > 0) {
+                out += `<optgroup label="Other Orgs">`;
+                for (const o of otherOrgs) {
+                    const sel = o.alias === selectedAlias;
+                    if (sel) {
+                        selectedInList = true;
+                    }
+                    out += `<option value="${esc(o.alias)}"${sel ? " selected" : ""}>${esc(o.alias)} — ${esc(o.username)}</option>`;
+                }
+                out += `</optgroup>`;
             }
-            out += `</optgroup>`;
+            // If the saved alias hasn't appeared in any loaded group yet (e.g. orgs still loading),
+            // add it as the selected option so the dropdown doesn't silently fall through to "Connect…"
+            if (selectedAlias && !selectedInList) {
+                out += `<option value="${esc(selectedAlias)}" selected>${esc(selectedAlias)}</option>`;
+            }
             out += `<option value="**connect**">+ Connect New Org…</option>`;
             return out;
         }
@@ -1217,6 +1235,7 @@ class DataMigrationPanel {
                     <select id="loadTargetOrg" class="select" ${dis} onchange="if(this.value==='**connect**')send('openConnectOrg');else send('setTargetOrg',{alias:this.value})">
                         ${orgOptions(targetOrg)}
                     </select>
+                    <button class="icon-btn" ${dis} onclick="send('refreshOrgs')" title="Refresh orgs">🔄</button>
                 </div>
                 <div class="toggle-row" style="margin-bottom:16px">
                     <label class="toggle-sw"><input type="checkbox" id="dryRunToggle" ${dryRun ? "checked" : ""} ${dis}><span class="slider"></span></label>
