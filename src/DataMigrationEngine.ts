@@ -273,6 +273,34 @@ async function resolveRecordTypes(
     }
 }
 
+// Reverse of resolveRecordTypes: given DeveloperNames, return a Map<DeveloperName, TargetOrgId>.
+// Used by loadBatch to turn __RecordType__<DeveloperName> placeholders into real target org IDs.
+// Bulk API cannot use RecordType.DeveloperName as a relationship column because DeveloperName
+// is not an External ID field on RecordType — direct ID injection is the only supported path.
+async function resolveRecordTypesForTarget(
+    developerNames: string[],
+    sobject: string,
+    targetOrg: string,
+    workspaceRoot: string,
+): Promise<Map<string, string>> {
+    if (developerNames.length === 0) { return new Map(); }
+    const nameList = developerNames.map(n => `'${n.replace(/'/g, "\\'")}'`).join(",");
+    try {
+        const { stdout } = await execSf(
+            ["data", "query",
+             "--query", `SELECT Id, DeveloperName FROM RecordType WHERE SObjectType = '${sobject}' AND DeveloperName IN (${nameList})`,
+             "--target-org", targetOrg,
+             "--json"],
+            { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 10 * 1024 * 1024 },
+        );
+        const parsed = JSON.parse(stdout);
+        const recs: any[] = parsed?.result?.records ?? [];
+        return new Map(recs.map(r => [r.DeveloperName as string, r.Id as string]));
+    } catch {
+        return new Map();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // pullData
 // ---------------------------------------------------------------------------
@@ -695,16 +723,10 @@ function buildUpsertCsv(
     if (records.length === 0 || !obj.externalIdField) { return ""; }
 
     const lookupToRelCol = new Map<string, string>();
-    // Always handle __RecordType__ placeholders via RecordType.DeveloperName — even if
-    // referenceFields is empty or comes from an old plan.json that predates this feature.
-    if (records.some(r => typeof r.RecordTypeId === "string" && r.RecordTypeId.startsWith("__RecordType__"))) {
-        lookupToRelCol.set("RecordTypeId", "RecordType.DeveloperName");
-    }
+    // RecordTypeId is pre-resolved to a real target org ID by loadBatch before this function
+    // is called — treat it as a plain direct field (no relationship column needed).
     for (const rf of referenceFields) {
-        if (rf.field === "RecordTypeId") {
-            lookupToRelCol.set("RecordTypeId", "RecordType.DeveloperName");
-            continue;
-        }
+        if (rf.field === "RecordTypeId") { continue; }
         const parentSobject = rf.referenceTo.find(t => objByName.has(t));
         if (!parentSobject) { continue; }
         const parentCfg = objByName.get(parentSobject);
@@ -747,9 +769,6 @@ function buildUpsertCsv(
                 if (!lookupField) { return ""; }
                 const raw = record[lookupField];
                 if (!raw) { return ""; }
-                if (lookupField === "RecordTypeId" && typeof raw === "string" && raw.startsWith("__RecordType__")) {
-                    return csvEscape(raw.slice("__RecordType__".length));
-                }
                 return csvEscape(String(raw));
             }
             const val = record[h];
@@ -1324,6 +1343,32 @@ async function loadBatch(
         emit(`✗ ${obj.sobject}: no externalIdField configured — skipping batch`, "error");
         onCount(0, 0, records.length);
         return;
+    }
+
+    // Resolve __RecordType__<DeveloperName> placeholders to real target org IDs before
+    // splitting or building CSV. Bulk API requires a direct RecordTypeId value — it cannot
+    // use RecordType.DeveloperName as a relationship column because DeveloperName is not an
+    // External ID field. Recursive calls receive already-resolved records (no-op query).
+    const rtDevNames = [...new Set(
+        records
+            .map(r => r.RecordTypeId)
+            .filter((v): v is string => typeof v === "string" && v.startsWith("__RecordType__"))
+            .map(v => v.slice("__RecordType__".length)),
+    )];
+    if (rtDevNames.length > 0) {
+        const rtMap = await resolveRecordTypesForTarget(rtDevNames, obj.sobject, targetOrg, workspaceRoot);
+        records = records.map(r => {
+            if (typeof r.RecordTypeId === "string" && r.RecordTypeId.startsWith("__RecordType__")) {
+                const devName = r.RecordTypeId.slice("__RecordType__".length);
+                const targetId = rtMap.get(devName);
+                if (!targetId) {
+                    emit(`  ⚠ RecordType "${devName}" not found in ${obj.sobject} on target org — RecordTypeId will be blank`, "warn");
+                    return { ...r, RecordTypeId: "" };
+                }
+                return { ...r, RecordTypeId: targetId };
+            }
+            return r;
+        });
     }
 
     if (records.length > maxBatchSize) {
