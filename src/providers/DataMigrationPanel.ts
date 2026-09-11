@@ -76,6 +76,7 @@ export class DataMigrationPanel {
     private _loadState: "idle" | "running" | "paused" | "done" = "idle";
     private _pullLog: Array<{ text: string; level: string }> = [];
     private _loadLog: Array<{ text: string; level: string }> = [];
+    private _trackingLog: Array<{ text: string; level: string }> = [];
     private _dryRunMode = false;
     private _trackingViewOrg = "";
     // Covers operations with no pull/load state machine of their own (ExternalId check/create,
@@ -409,15 +410,15 @@ export class DataMigrationPanel {
                     const rOrg = msg.targetOrg as string;
                     if (!rOrg) { vscode.window.showWarningMessage("Select a target org first."); break; }
                     const cfg = readDmConfig(this._workspaceRoot);
+                    this._trackingLog = [];
                     await this._runExtBusy("Reconciling tracking…", async () => {
                         const postLog = (text: string, level: string) => {
                             const line = `[${new Date().toLocaleTimeString()}]  ${text}`;
-                            this._loadLog.push({ text: line, level });
+                            this._trackingLog.push({ text: line, level });
                             this._panel.webview.postMessage({ command: "logLine", text: line, level });
                             log(`[DM reconcile] ${text}`);
                         };
                         postLog(`Reconciling tracking for ${rOrg} — querying target org…`, "info");
-                        this._activeTab = "load";
                         const result = await reconcileTracking(rOrg, this._workspaceRoot, cfg, null, postLog);
                         vscode.window.showInformationMessage(
                             `Reconcile done: ${result.fixed} record(s) corrected, ${result.stillFailed} still failed.`
@@ -431,21 +432,20 @@ export class DataMigrationPanel {
                     const vOrg = msg.targetOrg as string;
                     if (!vOrg) { vscode.window.showWarningMessage("Select a target org first."); break; }
                     const cfg = readDmConfig(this._workspaceRoot);
+                    this._trackingLog = [];
                     await this._runExtBusy("Validating migration…", async () => {
                         const postLog = (text: string, level: string) => {
                             const line = `[${new Date().toLocaleTimeString()}]  ${text}`;
-                            this._loadLog.push({ text: line, level });
+                            this._trackingLog.push({ text: line, level });
                             this._panel.webview.postMessage({ command: "logLine", text: line, level });
                             log(`[DM validate] ${text}`);
                         };
-                        this._activeTab = "load";
                         const report = await validateMigration(vOrg, this._workspaceRoot, cfg, postLog);
                         const matched = report.totalMatched;
                         const total = report.objects.length;
                         vscode.window.showInformationMessage(`Validation: ${matched}/${total} objects matched in target org.`);
-                        // Write validation log
                         const vLogDir = path.join(dmBaseDir(this._workspaceRoot), "logs", "validation", safeOrgName(vOrg));
-                        writeJobLog(vLogDir, this._loadLog.slice(-200).map(l => `[${l.level.toUpperCase()}] ${l.text}`));
+                        writeJobLog(vLogDir, this._trackingLog.map(l => `[${l.level.toUpperCase()}] ${l.text}`));
                         this._trackingCache = undefined;
                     });
                     break;
@@ -609,11 +609,12 @@ export class DataMigrationPanel {
             loadState: this._loadState,
             activeTab: this._activeTab,
             dryRun:    this._dryRunMode,
-            pullLog:   this._pullLog,
-            loadLog:   this._loadLog,
-            busy:      this._anyRunning,
-            busyLabel: this._busyLabel,
-            lastError: this._lastError,
+            pullLog:      this._pullLog,
+            loadLog:      this._loadLog,
+            trackingLog:  this._trackingLog,
+            busy:         this._anyRunning,
+            busyLabel:    this._busyLabel,
+            lastError:    this._lastError,
         };
     }
 
@@ -908,7 +909,7 @@ export class DataMigrationPanel {
 
     private _renderHtml(vm: Awaited<ReturnType<DataMigrationPanel["_buildViewModel"]>>): string {
         const { config, sourceOrg, targetOrg, role, envs, tracking, trackingOrg, trackedOrgs, hasLog, seedInfo,
-                availableOrgs, pullState, loadState, activeTab, dryRun, pullLog, loadLog, busy, busyLabel, lastError } = vm;
+                availableOrgs, pullState, loadState, activeTab, dryRun, pullLog, loadLog, trackingLog, busy, busyLabel, lastError } = vm;
         // Disable-attribute fragment for every button that mutates state or shells out to the
         // Salesforce CLI, so nothing can be started while another operation is already running.
         const dis = busy ? "disabled" : "";
@@ -1247,7 +1248,9 @@ export class DataMigrationPanel {
                 <button class="btn danger-btn" ${dis} onclick="if(confirm('Delete ALL tracked records from ${esc(trackingOrg)}? This cannot be undone.'))send('rollback',{targetOrg:${jsonInject(trackingOrg)},dryRun:false})">🗑 Full Rollback</button>
                 <button class="btn" ${dis} onclick="send('exportCsv',{targetOrg:${jsonInject(trackingOrg)}})">Export CSV</button>
                 <button class="btn" onclick="send('viewLoadLog',{targetOrg:${jsonInject(trackingOrg)}})">📄 Load Log</button>
-            </div>` : ""}`;
+            </div>` : ""}
+            ${busy && busyLabel ? `<div style="display:flex;align-items:center;gap:8px;margin-top:14px;padding:8px 12px;background:var(--vscode-editorWidget-background);border:1px solid var(--vscode-editorWidget-border);border-radius:4px"><span class="spinner"></span><span style="font-size:13px">${esc(busyLabel)}</span></div>` : ""}
+            ${trackingLog.length > 0 ? `<div class="log-area" id="log-area" style="margin-top:10px">${trackingLog.map(l => `<div class="log-line ${esc(l.level)}">${esc(l.text)}</div>`).join("")}</div>` : ""}`;
         };
 
         // ── Tab 4: External IDs ──────────────────────────────────────────────
