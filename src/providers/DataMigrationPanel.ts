@@ -677,7 +677,16 @@ export class DataMigrationPanel {
         try {
             await loadData(targetOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, objectFilter: sobject ? [sobject] : undefined });
             if (!dryRun) {
-                try { await validateMigration(targetOrg, this._workspaceRoot, this._config, onLog); } catch { /* validation failure should not block load completion */ }
+                try {
+                    const report = await validateMigration(targetOrg, this._workspaceRoot, this._config, onLog);
+                    // Auto-reconcile if validation found discrepancies — this corrects stale "failed"
+                    // tracking entries for records that actually landed in the target org.
+                    if (report.totalDiscrepancies > 0) {
+                        onLog(`Auto-reconciling ${report.totalDiscrepancies} object(s) with discrepancies…`, "info");
+                        await reconcileTracking(targetOrg, this._workspaceRoot, this._config, null, onLog);
+                        this._trackingCache = undefined;
+                    }
+                } catch { /* validation/reconcile failure should not block load completion */ }
                 writeJobLog(loadLogsDir(this._workspaceRoot, targetOrg), this._loadLog.map(l => `[${l.level}] ${l.text}`));
             }
             this._panel.webview.postMessage({ command: "runDone", op: "load", dryRun });
@@ -721,7 +730,14 @@ export class DataMigrationPanel {
                 this._refresh();
                 await loadData(targetOrg, this._workspaceRoot, this._config, loadLog, loadProg, loadCtrl, { dryRun });
                 if (!dryRun) {
-                    try { await validateMigration(targetOrg, this._workspaceRoot, this._config, loadLog); } catch { /* validation failure should not block completion */ }
+                    try {
+                        const report = await validateMigration(targetOrg, this._workspaceRoot, this._config, loadLog);
+                        if (report.totalDiscrepancies > 0) {
+                            loadLog(`Auto-reconciling ${report.totalDiscrepancies} object(s) with discrepancies…`, "info");
+                            await reconcileTracking(targetOrg, this._workspaceRoot, this._config, null, loadLog);
+                            this._trackingCache = undefined;
+                        }
+                    } catch { /* validation/reconcile failure should not block completion */ }
                     writeJobLog(loadLogsDir(this._workspaceRoot, targetOrg), this._loadLog.map(l => `[${l.level}] ${l.text}`));
                 }
             }
