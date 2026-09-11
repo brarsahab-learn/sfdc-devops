@@ -1409,7 +1409,9 @@ async function loadBatch(
             const failureByExtId = new Map(allResults.failures.map(f => [f.extIdVal, f]));
             resultItems.length = 0;
             for (const record of records) {
-                const extIdVal = String(record.Id ?? "");
+                // Must match the value buildUpsertCsv puts in the ExternalId column:
+                // prefer record[externalIdField], fall back to record.Id (same as the CSV).
+                const extIdVal = String(record[obj.externalIdField!] ?? record.Id ?? "");
                 const success = successByExtId.get(extIdVal);
                 const failure = failureByExtId.get(extIdVal);
                 if (success) {
