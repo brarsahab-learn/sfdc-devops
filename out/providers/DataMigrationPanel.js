@@ -969,7 +969,7 @@ class DataMigrationPanel {
                         <button class="icon-btn" title="Edit" ${dis} onclick="openInlineEditor(${idx})">✏️</button>
                         <button class="icon-btn" title="Move Up" onclick="moveObj(${idx},-1)" ${idx === 0 || busy ? "disabled" : ""}>▲</button>
                         <button class="icon-btn" title="Move Down" onclick="moveObj(${idx},1)" ${idx === objects.length - 1 || busy ? "disabled" : ""}>▼</button>
-                        <button class="icon-btn danger-btn" title="Delete" ${dis} onclick="if(confirm('Delete '+${esc(JSON.stringify(esc(obj.sobject)))}+'?'))send('deleteObject',{id:${esc(JSON.stringify(obj.id))}})">🗑</button>
+                        <button class="icon-btn danger-btn" title="Delete" ${dis} onclick="if(confirm('Delete '+${jsonInject(obj.sobject)}+'?'))send('deleteObject',{id:${jsonInject(obj.id)}})">🗑</button>
                     </td>
                 </tr>
                 <tr id="editor-${esc(obj.id)}" class="inline-editor-row" style="display:none">
@@ -1058,7 +1058,7 @@ class DataMigrationPanel {
                 <td><strong>${r.count > 0 ? r.count : "—"}</strong></td>
                 <td style="color:var(--vscode-descriptionForeground);font-size:11px">${r.lastPulled ? new Date(r.lastPulled).toLocaleString() : "—"}</td>
                 <td class="row-actions">
-                    ${r.count > 0 ? `<button class="btn btn-sm danger-btn" ${dis} onclick="if(confirm('Clear seed for ${esc(r.sobject)}?'))send('clearSeed',{sobject:${esc(JSON.stringify(r.sobject))}})">Clear</button>` : ""}
+                    ${r.count > 0 ? `<button class="btn btn-sm danger-btn" ${dis} onclick="if(confirm('Clear seed for ${esc(r.sobject)}?'))send('clearSeed',{sobject:${jsonInject(r.sobject)}})">Clear</button>` : ""}
                 </td>
             </tr>`).join("");
             const recentLogs = (0, DataMigrationConfig_1.listRecentLogs)((0, DataMigrationConfig_1.pullLogsDir)(this._workspaceRoot), 3);
@@ -1142,7 +1142,7 @@ class DataMigrationPanel {
                 </div>
                 <div style="display:flex;gap:10px;flex-wrap:wrap">
                     <button class="btn btn-primary" ${dis} onclick="startLoad()">⬆ Load to Target</button>
-                    ${recentLogs.length > 0 ? `<button class="btn" onclick="send('viewLoadLog',{targetOrg:document.getElementById('loadTargetOrg')?.value||${esc(JSON.stringify(targetOrg))}})" style="margin-left:auto">📄 Last Load Log</button>` : ""}
+                    ${recentLogs.length > 0 ? `<button class="btn" onclick="send('viewLoadLog',{targetOrg:document.getElementById('loadTargetOrg')?.value||${jsonInject(targetOrg)}})" style="margin-left:auto">📄 Last Load Log</button>` : ""}
                 </div>
                 ${isDone ? `<div class="done-banner">✅ Load complete. Check the Tracking tab for results.</div>` : ""}
             </div>
@@ -1207,10 +1207,10 @@ class DataMigrationPanel {
                     <td>${pending > 0 ? `<span style="color:var(--vscode-descriptionForeground)">${pending}</span>` : "0"}</td>
                     <td>${blocked}</td>
                     <td class="row-actions">
-                        ${failed > 0 ? `<button class="btn btn-sm" ${dis} onclick="send('viewErrors',{sobject:${esc(JSON.stringify(obj))},targetOrg:${esc(JSON.stringify(trackingOrg))}})" title="Show error details for failed records">⚠ Errors</button>` : ""}
-                        ${failed > 0 ? `<button class="btn btn-sm" ${dis} onclick="send('retryFailed',{sobject:${esc(JSON.stringify(obj))},targetOrg:${esc(JSON.stringify(trackingOrg))}})">Retry Failed</button>` : ""}
-                        <button class="btn btn-sm btn-primary" title="Clear tracking history and reload this object" ${dis} onclick="send('clearAndReload',{sobject:${esc(JSON.stringify(obj))},targetOrg:${esc(JSON.stringify(trackingOrg))}})">↺ Rerun</button>
-                        <button class="btn btn-sm danger-btn" title="Clear tracking only (no Salesforce delete)" ${dis} onclick="if(confirm('Clear tracking for ${esc(obj)}?'))send('clearObject',{sobject:${esc(JSON.stringify(obj))},targetOrg:${esc(JSON.stringify(trackingOrg))}})">Clear</button>
+                        ${failed > 0 ? `<button class="btn btn-sm" ${dis} onclick="send('viewErrors',{sobject:${jsonInject(obj)},targetOrg:${jsonInject(trackingOrg)}})" title="Show error details for failed records">⚠ Errors</button>` : ""}
+                        ${failed > 0 ? `<button class="btn btn-sm" ${dis} onclick="send('retryFailed',{sobject:${jsonInject(obj)},targetOrg:${jsonInject(trackingOrg)}})">Retry Failed</button>` : ""}
+                        <button class="btn btn-sm btn-primary" title="Clear tracking history and reload this object" ${dis} onclick="send('clearAndReload',{sobject:${jsonInject(obj)},targetOrg:${jsonInject(trackingOrg)}})">↺ Rerun</button>
+                        <button class="btn btn-sm danger-btn" title="Clear tracking only (no Salesforce delete)" ${dis} onclick="if(confirm('Clear tracking for ${esc(obj)}?'))send('clearObject',{sobject:${jsonInject(obj)},targetOrg:${jsonInject(trackingOrg)}})">Clear</button>
                     </td>
                 </tr>`;
             }
@@ -1232,13 +1232,13 @@ class DataMigrationPanel {
                 </table>
             </div>
             <div class="toolbar" style="margin-top:14px">
-                <button class="btn btn-primary" ${dis} onclick="send('retryFailed',{targetOrg:${esc(JSON.stringify(trackingOrg))}})">Retry All Failed</button>
-                <button class="btn btn-accent" ${dis} onclick="send('clearAllAndReload',{targetOrg:${esc(JSON.stringify(trackingOrg))}})">↺ Clear All &amp; Reload</button>
-                <button class="btn" ${dis} title="Re-check failed records against target org and fix tracking for any that actually landed" onclick="if(confirm('Reconcile tracking for ${esc(trackingOrg)}? This will SOQL-query the target org to verify which failed records actually exist there.'))send('reconcileTracking',{targetOrg:${esc(JSON.stringify(trackingOrg))}})">🔍 Reconcile</button>
-                <button class="btn" ${dis} title="Query target org and verify record counts against tracking" onclick="send('validateMigration',{targetOrg:${esc(JSON.stringify(trackingOrg))}})">✓ Validate Migration</button>
-                <button class="btn danger-btn" ${dis} onclick="send('rollback',{targetOrg:${esc(JSON.stringify(trackingOrg))},dryRun:false})">🗑 Full Rollback</button>
-                <button class="btn" ${dis} onclick="send('exportCsv',{targetOrg:${esc(JSON.stringify(trackingOrg))}})">Export CSV</button>
-                <button class="btn" onclick="send('viewLoadLog',{targetOrg:${esc(JSON.stringify(trackingOrg))}})">📄 Load Log</button>
+                <button class="btn btn-primary" ${dis} onclick="send('retryFailed',{targetOrg:${jsonInject(trackingOrg)}})">Retry All Failed</button>
+                <button class="btn btn-accent" ${dis} onclick="send('clearAllAndReload',{targetOrg:${jsonInject(trackingOrg)}})">↺ Clear All &amp; Reload</button>
+                <button class="btn" ${dis} title="Re-check failed records against target org and fix tracking for any that actually landed" onclick="if(confirm('Reconcile tracking for ${esc(trackingOrg)}? This will SOQL-query the target org to verify which failed records actually exist there.'))send('reconcileTracking',{targetOrg:${jsonInject(trackingOrg)}})">🔍 Reconcile</button>
+                <button class="btn" ${dis} title="Query target org and verify record counts against tracking" onclick="send('validateMigration',{targetOrg:${jsonInject(trackingOrg)}})">✓ Validate Migration</button>
+                <button class="btn danger-btn" ${dis} onclick="if(confirm('Delete ALL tracked records from ${esc(trackingOrg)}? This cannot be undone.'))send('rollback',{targetOrg:${jsonInject(trackingOrg)},dryRun:false})">🗑 Full Rollback</button>
+                <button class="btn" ${dis} onclick="send('exportCsv',{targetOrg:${jsonInject(trackingOrg)}})">Export CSV</button>
+                <button class="btn" onclick="send('viewLoadLog',{targetOrg:${jsonInject(trackingOrg)}})">📄 Load Log</button>
             </div>` : ""}`;
         };
         // ── Tab 4: External IDs ──────────────────────────────────────────────
@@ -1257,7 +1257,7 @@ class DataMigrationPanel {
                     <td>${esc(obj.externalIdField ?? "—")}</td>
                     <td>${status}</td>
                     <td class="row-actions">
-                        <button class="btn btn-sm" ${dis} onclick="send('checkExtId',{sobject:${esc(JSON.stringify(obj.sobject))},targetOrg:${esc(JSON.stringify(targetOrg))}})">Re-check</button>
+                        <button class="btn btn-sm" ${dis} onclick="send('checkExtId',{sobject:${jsonInject(obj.sobject)},targetOrg:${jsonInject(targetOrg)}})">Re-check</button>
                     </td>
                 </tr>`;
             }
@@ -1269,7 +1269,7 @@ class DataMigrationPanel {
                 </table>
             </div>
             <div class="toolbar" style="margin-top:16px">
-                <button class="btn btn-primary" ${dis} onclick="send('checkAllExtIds',{targetOrg:${esc(JSON.stringify(targetOrg))}})">Re-check All</button>
+                <button class="btn btn-primary" ${dis} onclick="send('checkAllExtIds',{targetOrg:${jsonInject(targetOrg)}})">Re-check All</button>
                 <span style="color:var(--vscode-descriptionForeground);font-size:12px;margin-left:12px">If a field is missing, create it manually in Salesforce Setup.</span>
             </div>
             <div class="log-area" id="log-area" style="margin-top:16px">${loadLog.map((l) => `<div class="log-line ${l.level}">${esc(l.text)}</div>`).join("")}</div>`;

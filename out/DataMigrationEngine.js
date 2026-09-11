@@ -278,7 +278,19 @@ async function pullData(sourceOrg, workspaceRoot, config, onLog, onProgress, con
                 }
                 else {
                     const raw = parsed?.result?.records ?? [];
-                    records = raw.map(({ attributes: _a, ...rest }) => rest);
+                    records = raw.map(({ attributes: _a, ...rest }) => {
+                        // Flatten nested RecordType sub-object from relationship queries
+                        // e.g. SELECT RecordType.DeveloperName → { RecordType: { DeveloperName: "Foo" } }
+                        // Convert to RecordTypeId: "__RecordType__Foo" so the upsert CSV path handles it.
+                        if (rest.RecordType && typeof rest.RecordType === "object" && rest.RecordType.DeveloperName) {
+                            const { RecordType: rtObj, ...withoutRt } = rest;
+                            if (!withoutRt.RecordTypeId) {
+                                withoutRt.RecordTypeId = `__RecordType__${rtObj.DeveloperName}`;
+                            }
+                            return withoutRt;
+                        }
+                        return rest;
+                    });
                     pullSuccess = true;
                     break;
                 }
@@ -721,7 +733,17 @@ function readSeedRecords(seedDir, sobject) {
     }
     try {
         const raw = JSON.parse(fs.readFileSync(fp, "utf-8"));
-        return (raw?.records ?? (Array.isArray(raw) ? raw : []));
+        const records = (raw?.records ?? (Array.isArray(raw) ? raw : []));
+        // Normalize nested RecordType sub-object (from SOQL relationship queries like
+        // SELECT RecordType.DeveloperName) into RecordTypeId: "__RecordType__<DeveloperName>"
+        // so buildUpsertCsv emits the correct RecordType.DeveloperName CSV column.
+        return records.map(r => {
+            if (r.RecordType && typeof r.RecordType === "object" && r.RecordType.DeveloperName && !r.RecordTypeId) {
+                const { RecordType: rtObj, ...rest } = r;
+                return { ...rest, RecordTypeId: `__RecordType__${rtObj.DeveloperName}` };
+            }
+            return r;
+        });
     }
     catch {
         return [];
