@@ -215,6 +215,12 @@ export class DataMigrationPanel {
                 }
 
                 case "deleteObject": {
+                    const delObj = this._config.objects.find(o => o.id === msg.id);
+                    const delChoice = await vscode.window.showWarningMessage(
+                        `Delete ${delObj?.sobject ?? "this object"} from the migration config?`,
+                        { modal: true }, "Delete"
+                    );
+                    if (delChoice !== "Delete") { break; }
                     const cfg = readDmConfig(this._workspaceRoot);
                     cfg.objects = cfg.objects.filter((o) => o.id !== msg.id);
                     writeDmConfig(this._workspaceRoot, cfg);
@@ -338,6 +344,11 @@ export class DataMigrationPanel {
                 }
 
                 case "clearSeed": {
+                    const clearChoice = await vscode.window.showWarningMessage(
+                        `Clear seed data for ${msg.sobject}? The extracted records will be deleted.`,
+                        { modal: true }, "Clear"
+                    );
+                    if (clearChoice !== "Clear") { break; }
                     // Exact filename only — a substring match here (e.g. "Account" matching
                     // "AccountTeamMember.json") would delete an unrelated object's seed data too.
                     const base = path.resolve(this._workspaceRoot, this._config.seedDir);
@@ -444,6 +455,11 @@ export class DataMigrationPanel {
                 case "reconcileTracking": {
                     const rOrg = msg.targetOrg as string;
                     if (!rOrg) { vscode.window.showWarningMessage("Select a target org first."); break; }
+                    const rcChoice = await vscode.window.showWarningMessage(
+                        `Reconcile tracking for ${rOrg}? This will SOQL-query the target org to verify which failed records actually exist there.`,
+                        { modal: true }, "Reconcile"
+                    );
+                    if (rcChoice !== "Reconcile") { break; }
                     const cfg = readDmConfig(this._workspaceRoot);
                     this._trackingLog = [];
                     await this._runExtBusy("Reconciling tracking…", async () => {
@@ -838,6 +854,11 @@ export class DataMigrationPanel {
     private async _handleClearObject(sobject: string, trackOrg: string): Promise<void> {
         // Clears the tracking entries only — does NOT delete records from Salesforce.
         // Use Full Rollback for that.
+        const choice = await vscode.window.showWarningMessage(
+            `Clear tracking for ${sobject} in ${trackOrg}? This removes the local tracking entries but does NOT delete records from Salesforce.`,
+            { modal: true }, "Clear"
+        );
+        if (choice !== "Clear") { return; }
         const trk = readTracking(this._workspaceRoot, trackOrg);
         if (trk[sobject]) {
             delete trk[sobject];
@@ -1028,7 +1049,7 @@ export class DataMigrationPanel {
                         <button class="icon-btn" title="Edit" ${dis} onclick="openInlineEditor(${idx})">✏️</button>
                         <button class="icon-btn" title="Move Up" onclick="moveObj(${idx},-1)" ${idx === 0 || busy ? "disabled" : ""}>▲</button>
                         <button class="icon-btn" title="Move Down" onclick="moveObj(${idx},1)" ${idx === objects.length - 1 || busy ? "disabled" : ""}>▼</button>
-                        <button class="icon-btn danger-btn" title="Delete" ${dis} onclick="if(confirm('Delete '+${jsonAttr(obj.sobject)}+'?'))send('deleteObject',{id:${jsonAttr(obj.id)}})">🗑</button>`
+                        <button class="icon-btn danger-btn" title="Delete" ${dis} onclick="send('deleteObject',{id:${jsonAttr(obj.id)}})">🗑</button>`
                         }
                     </td>
                 </tr>
@@ -1128,7 +1149,7 @@ export class DataMigrationPanel {
                         ? `<span class="spinner" style="margin-right:4px"></span><span class="op-inline-label">Pulling…</span><button class="btn btn-sm" onclick="send('switchTab',{tab:'pull'})">▸ Full View</button>`
                         : `<button class="btn btn-sm" title="Re-pull from source org" ${dis} onclick="startOp(this,'pullObject',{sobject:${jsonAttr(r.sobject)},sourceOrg:${jsonAttr(sourceOrg)},dryRun:false})">↓ Re-Pull</button>
                     ${r.count > 0 ? `<button class="btn btn-sm" onclick="send('viewSeedFile',{sobject:${jsonAttr(r.sobject)},sourceOrg:${jsonAttr(sourceOrg)}})">View</button>` : ""}
-                    ${r.count > 0 ? `<button class="btn btn-sm danger-btn" ${dis} onclick="if(confirm('Clear seed for ${esc(r.sobject)}?'))send('clearSeed',{sobject:${jsonAttr(r.sobject)},sourceOrg:${jsonAttr(sourceOrg)}})">Clear</button>` : ""}`
+                    ${r.count > 0 ? `<button class="btn btn-sm danger-btn" ${dis} onclick="send('clearSeed',{sobject:${jsonAttr(r.sobject)},sourceOrg:${jsonAttr(sourceOrg)}})">Clear</button>` : ""}`
                     }
                 </td>
             </tr>`;
@@ -1290,7 +1311,7 @@ export class DataMigrationPanel {
                         ${failed > 0 ? `<button class="btn btn-sm" ${dis} onclick="send('viewErrors',{sobject:${jsonAttr(obj)},targetOrg:${jsonAttr(trackingOrg)}})" title="Show error details for failed records">⚠ Errors</button>` : ""}
                         ${failed > 0 ? `<button class="btn btn-sm" ${dis} onclick="startOp(this,'retryFailed',{sobject:${jsonAttr(obj)},targetOrg:${jsonAttr(trackingOrg)}})">↺ Retry</button>` : ""}
                         <button class="btn btn-sm btn-primary" title="Clear tracking and reload this object" ${dis} onclick="startOp(this,'clearAndReload',{sobject:${jsonAttr(obj)},targetOrg:${jsonAttr(trackingOrg)}})">↺ Reload</button>
-                        <button class="btn btn-sm danger-btn" title="Clear tracking only" ${dis} onclick="if(confirm('Clear tracking for ${esc(obj)}?'))send('clearObject',{sobject:${jsonAttr(obj)},targetOrg:${jsonAttr(trackingOrg)}})">Clear</button>`
+                        <button class="btn btn-sm danger-btn" title="Clear tracking only" ${dis} onclick="send('clearObject',{sobject:${jsonAttr(obj)},targetOrg:${jsonAttr(trackingOrg)}})">Clear</button>`
                         }
                     </td>
                 </tr>`;
@@ -1316,9 +1337,9 @@ export class DataMigrationPanel {
             <div class="toolbar" style="margin-top:14px">
                 <button class="btn btn-primary" ${dis} onclick="send('retryFailed',{targetOrg:${jsonAttr(trackingOrg)}})">Retry All Failed</button>
                 <button class="btn btn-accent" ${dis} onclick="send('clearAllAndReload',{targetOrg:${jsonAttr(trackingOrg)}})">↺ Clear All &amp; Reload</button>
-                <button class="btn" ${dis} title="Re-check failed records against target org and fix tracking for any that actually landed" onclick="if(confirm('Reconcile tracking for ${esc(trackingOrg)}? This will SOQL-query the target org to verify which failed records actually exist there.'))send('reconcileTracking',{targetOrg:${jsonAttr(trackingOrg)}})">🔍 Reconcile</button>
+                <button class="btn" ${dis} title="Re-check failed records against target org and fix tracking for any that actually landed" onclick="send('reconcileTracking',{targetOrg:${jsonAttr(trackingOrg)}})">🔍 Reconcile</button>
                 <button class="btn" ${dis} title="Query target org and verify record counts against tracking" onclick="send('validateMigration',{targetOrg:${jsonAttr(trackingOrg)}})">✓ Validate Migration</button>
-                <button class="btn danger-btn" ${dis} onclick="if(confirm('Delete ALL tracked records from ${esc(trackingOrg)}? This cannot be undone.'))send('rollback',{targetOrg:${jsonAttr(trackingOrg)},dryRun:false})">🗑 Full Rollback</button>
+                <button class="btn danger-btn" ${dis} onclick="send('rollback',{targetOrg:${jsonAttr(trackingOrg)},dryRun:false})">🗑 Full Rollback</button>
                 <button class="btn" ${dis} onclick="send('exportCsv',{targetOrg:${jsonAttr(trackingOrg)}})">Export CSV</button>
                 <button class="btn" onclick="send('viewLoadLog',{targetOrg:${jsonAttr(trackingOrg)}})">📄 Load Log</button>
             </div>` : ""}

@@ -695,6 +695,11 @@ function buildUpsertCsv(
     if (records.length === 0 || !obj.externalIdField) { return ""; }
 
     const lookupToRelCol = new Map<string, string>();
+    // Always handle __RecordType__ placeholders via RecordType.DeveloperName — even if
+    // referenceFields is empty or comes from an old plan.json that predates this feature.
+    if (records.some(r => typeof r.RecordTypeId === "string" && r.RecordTypeId.startsWith("__RecordType__"))) {
+        lookupToRelCol.set("RecordTypeId", "RecordType.DeveloperName");
+    }
     for (const rf of referenceFields) {
         if (rf.field === "RecordTypeId") {
             lookupToRelCol.set("RecordTypeId", "RecordType.DeveloperName");
