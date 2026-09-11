@@ -88,7 +88,8 @@ function jsonInject(data) {
     return JSON.stringify(data)
         .replace(/</g, "\\u003c")
         .replace(/>/g, "\\u003e")
-        .replace(/&/g, "\\u0026");
+        .replace(/&/g, "\\u0026")
+        .replace(/"/g, "\\u0022");
 }
 // ── panel ────────────────────────────────────────────────────────────────────
 class DataMigrationPanel {
@@ -1493,6 +1494,11 @@ input:checked + .slider::before { transform: translateX(16px); }
 
 <script>
 (function() {
+window.onerror = function(msg, _src, line) {
+    var b = document.getElementById('global-error-banner');
+    var t = document.getElementById('global-error-text');
+    if (b && t) { t.textContent = 'JS Error (line ' + line + '): ' + msg; b.hidden = false; }
+};
 const vscode = acquireVsCodeApi();
 const DATA = ${jsonInject(vm)};
 
