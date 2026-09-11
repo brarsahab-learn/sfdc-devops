@@ -538,11 +538,13 @@ export async function getRunningUserId(targetOrg: string, workspaceRoot: string)
  *  DataMigrationControls__c, creating that override if none exists yet. Returns enough state to
  *  undo this exactly via restoreAutomationControl — or null if it couldn't be set up at all
  *  (missing object/fields, no access, user not resolvable), in which case the load proceeds
- *  without automation control rather than failing outright. */
+ *  without automation control rather than failing outright.
+ *  Pass fieldsOverride to set only a subset of AUTOMATION_CONTROL_FIELDS (e.g. lookup-filter-only). */
 export async function enableAutomationControl(
     targetOrg: string,
     workspaceRoot: string,
     emit: LogFn,
+    fieldsOverride?: string[],
 ): Promise<AutomationControlState | null> {
     const userId = await getRunningUserId(targetOrg, workspaceRoot);
     if (!userId) {
@@ -551,6 +553,7 @@ export async function enableAutomationControl(
     }
 
     const state: AutomationControlState = { userId };
+    const fields = fieldsOverride ?? AUTOMATION_CONTROL_FIELDS;
 
     try {
         const { stdout } = await execSf(
@@ -560,7 +563,7 @@ export async function enableAutomationControl(
             { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
         );
         const existing = (JSON.parse(stdout)?.result?.records ?? [])[0];
-        const trueValues = AUTOMATION_CONTROL_FIELDS.map(f => `${f}=true`).join(" ");
+        const trueValues = fields.map(f => `${f}=true`).join(" ");
 
         if (existing) {
             await execSf(
@@ -955,86 +958,10 @@ function kahnSort(nodes: string[], deps: Record<string, string[]>): string[] {
 // loadData (main function)
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Skip_Lookup_Filters__c helpers — always applied during load, independent of
-// disableAutomationDuringLoad, so lookup filter validation exceptions cannot fire
-// against the running user regardless of the automation control toggle.
-// ---------------------------------------------------------------------------
-
-interface LookupFilterState {
-    userId: string;
-    originalValue: boolean;
-}
-
-async function enableLookupFilterBypass(
-    targetOrg: string,
-    workspaceRoot: string,
-    emit: LogFn,
-): Promise<LookupFilterState | null> {
-    const userId = await getRunningUserId(targetOrg, workspaceRoot);
-    if (!userId) {
-        emit(`⚠ Could not resolve the running user in ${targetOrg} — lookup filter bypass skipped`, "warn");
-        return null;
-    }
-    try {
-        const { stdout: descOut } = await execSf(
-            ["sobject", "describe", "--sobject", "User", "--target-org", targetOrg, "--json"],
-            { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 10 * 1024 * 1024 },
-        );
-        const userFields: any[] = JSON.parse(descOut)?.result?.fields ?? [];
-        const skipFilterField = userFields.find((f: any) => f.name === "Skip_Lookup_Filters__c");
-        if (!skipFilterField) {
-            emit(`⚠ User.Skip_Lookup_Filters__c not found in ${targetOrg} — lookup filters will not be bypassed.`, "warn");
-            emit(`  → Create a Checkbox field named "Skip_Lookup_Filters__c" on the User object, then re-run.`, "warn");
-            return null;
-        }
-        if (!skipFilterField.updateable) {
-            emit(`⚠ User.Skip_Lookup_Filters__c exists but is not editable by the running user — lookup filters will not be bypassed.`, "warn");
-            return null;
-        }
-        const { stdout } = await execSf(
-            ["data", "query", "--query", `SELECT Skip_Lookup_Filters__c FROM User WHERE Id = '${userId}'`,
-             "--target-org", targetOrg, "--json"],
-            { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
-        );
-        const userRecord = (JSON.parse(stdout)?.result?.records ?? [])[0];
-        const originalValue = userRecord?.Skip_Lookup_Filters__c === true;
-        await execSf(
-            ["data", "update", "record", "--sobject", "User", "--record-id", userId,
-             "--values", "Skip_Lookup_Filters__c=true", "--target-org", targetOrg, "--json"],
-            { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
-        );
-        emit(`✓ Set Skip_Lookup_Filters__c=true on the running user (will be restored to ${originalValue} after)`, "success");
-        return { userId, originalValue };
-    } catch (e: any) {
-        emit(`⚠ Could not set Skip_Lookup_Filters__c on the running user: ${e?.message ?? String(e)} — continuing without it`, "warn");
-        return null;
-    }
-}
-
-async function restoreLookupFilterBypass(
-    targetOrg: string,
-    workspaceRoot: string,
-    state: LookupFilterState,
-    emit: LogFn,
-): Promise<void> {
-    try {
-        await execSf(
-            ["data", "update", "record", "--sobject", "User", "--record-id", state.userId,
-             "--values", `Skip_Lookup_Filters__c=${state.originalValue}`, "--target-org", targetOrg, "--json"],
-            { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
-        );
-        emit(`✓ Restored Skip_Lookup_Filters__c to ${state.originalValue} on the running user`, "success");
-    } catch (e: any) {
-        emit(`✗ Could not restore Skip_Lookup_Filters__c on the running user — check it manually in ${targetOrg}: ${e?.message ?? String(e)}`, "error");
-    }
-}
-
-/** Public entry point — wraps loadDataImpl with automation control (config.
- *  disableAutomationDuringLoad) and always applies Skip_Lookup_Filters__c bypass so
- *  lookup filter validation exceptions cannot fire against the running user. Both are
- *  set up once before the load and torn down exactly once after, regardless of how
- *  loadDataImpl exits (success, thrown error, or an early return from cancellation). */
+/** Public entry point — wraps loadDataImpl with automation control via DataMigrationControls__c.
+ *  Disable_Lookup_Filters__c is always set (works with Bulk API 2.0). All other automation fields
+ *  (triggers, flows, validation rules) are also set when config.disableAutomationDuringLoad=true.
+ *  Torn down exactly once after, regardless of how loadDataImpl exits. */
 export async function loadData(
     targetOrg: string,
     workspaceRoot: string,
@@ -1048,23 +975,25 @@ export async function loadData(
         return loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress, controller, options);
     }
 
-    // Both setup calls are inside the try so the finally block always runs — even if
-    // enableAutomationControl throws, restoreLookupFilterBypass will still be called and
-    // Skip_Lookup_Filters__c will not be left stuck on the running user.
-    let lookupFilterState: Awaited<ReturnType<typeof enableLookupFilterBypass>> = null;
+    // Lookup filter bypass is always applied via DataMigrationControls__c (hierarchy custom
+    // setting) — this works with Bulk API 2.0 unlike the User.Skip_Lookup_Filters__c field.
+    // Full automation control (triggers/flows/validation rules) is opt-in via config.
+    // When disableAutomationDuringLoad is true, one call sets all fields including lookup
+    // filter; when false, a separate call sets only Disable_Lookup_Filters__c.
     let automationState: Awaited<ReturnType<typeof enableAutomationControl>> = null;
     try {
-        lookupFilterState = await enableLookupFilterBypass(targetOrg, workspaceRoot, onLog);
         if (config.disableAutomationDuringLoad) {
             automationState = await enableAutomationControl(targetOrg, workspaceRoot, onLog);
+        } else {
+            // Always bypass lookup filters even when full automation control is off
+            automationState = await enableAutomationControl(
+                targetOrg, workspaceRoot, onLog, ["Disable_Lookup_Filters__c"],
+            );
         }
         return await loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress, controller, options);
     } finally {
         if (automationState) {
             await restoreAutomationControl(targetOrg, workspaceRoot, automationState, onLog);
-        }
-        if (lookupFilterState) {
-            await restoreLookupFilterBypass(targetOrg, workspaceRoot, lookupFilterState, onLog);
         }
     }
 }
