@@ -51,6 +51,7 @@ export interface DmRunOptions {
     dryRun?: boolean;
     dryRunSampleSize?: number;
     objectFilter?: string[];
+    sourceOrg?: string;
 }
 
 // Internal controller shape that exposes _skip bookkeeping without polluting the public type
@@ -118,7 +119,8 @@ function resolvedSeedDir(workspaceRoot: string, config: DmConfig, options?: DmRu
     if (options?.dryRun) {
         return path.join(workspaceRoot, ".git", "sf-devops-dm", "dryrun", "seed");
     }
-    return path.resolve(workspaceRoot, config.seedDir);
+    const base = path.resolve(workspaceRoot, config.seedDir);
+    return options?.sourceOrg ? path.join(base, safeOrgName(options.sourceOrg)) : base;
 }
 
 function now(): string {

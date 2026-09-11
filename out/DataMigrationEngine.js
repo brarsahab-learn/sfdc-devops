@@ -98,7 +98,8 @@ function resolvedSeedDir(workspaceRoot, config, options) {
     if (options?.dryRun) {
         return path.join(workspaceRoot, ".git", "sf-devops-dm", "dryrun", "seed");
     }
-    return path.resolve(workspaceRoot, config.seedDir);
+    const base = path.resolve(workspaceRoot, config.seedDir);
+    return options?.sourceOrg ? path.join(base, (0, DataMigrationConfig_1.safeOrgName)(options.sourceOrg)) : base;
 }
 function now() {
     return new Date().toISOString();

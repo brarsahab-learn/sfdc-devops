@@ -9,7 +9,7 @@ import { getRoles, getEnvironments, getOrgAliasSlots } from "../config";
 import {
     readDmConfig, writeDmConfig, getSourceOrg, getTargetOrg, setSourceOrg, setTargetOrg,
     DmConfig, DmObjectConfig, readTracking, writeTracking, lastRunLogPath, dmBaseDir,
-    pullLogsDir, loadLogsDir, writeJobLog, listRecentLogs, safeOrgName
+    pullLogsDir, loadLogsDir, writeJobLog, listRecentLogs, safeOrgName,
 } from "../DataMigrationConfig";
 import {
     makeController, pullData, loadData, rollbackData, autoSortByDependencies,
@@ -37,8 +37,9 @@ function countSeedRecords(seedDir: string, sobject: string): number {
 }
 
 /** Read last-pull timestamp and per-object record counts from seed directory. */
-function getSeedInfo(workspaceRoot: string, config: DmConfig): { sobject: string; label: string; count: number; lastPulled: string | null }[] {
-    const seedDir = path.resolve(workspaceRoot, config.seedDir);
+function getSeedInfo(workspaceRoot: string, config: DmConfig, sourceOrg?: string): { sobject: string; label: string; count: number; lastPulled: string | null }[] {
+    const base = path.resolve(workspaceRoot, config.seedDir);
+    const seedDir = sourceOrg ? path.join(base, safeOrgName(sourceOrg)) : base;
     const planPath = path.join(seedDir, "plan.json");
     let lastPulled: string | null = null;
     try { const p = JSON.parse(fs.readFileSync(planPath, "utf-8")); lastPulled = p.generatedAt ?? null; } catch { /* ignore */ }
@@ -316,12 +317,23 @@ export class DataMigrationPanel {
                 case "clearSeed": {
                     // Exact filename only — a substring match here (e.g. "Account" matching
                     // "AccountTeamMember.json") would delete an unrelated object's seed data too.
-                    const seedDir = path.resolve(this._workspaceRoot, this._config.seedDir);
+                    const base = path.resolve(this._workspaceRoot, this._config.seedDir);
+                    const seedDir = msg.sourceOrg ? path.join(base, safeOrgName(msg.sourceOrg as string)) : base;
                     const seedFile = path.join(seedDir, `${msg.sobject as string}.json`);
                     if (fs.existsSync(seedFile)) {
                         try { fs.unlinkSync(seedFile); } catch { /* ignore */ }
                     }
                     this._refresh();
+                    break;
+                }
+
+                case "viewSeedFile": {
+                    const base = path.resolve(this._workspaceRoot, this._config.seedDir);
+                    const seedDir = msg.sourceOrg ? path.join(base, safeOrgName(msg.sourceOrg as string)) : base;
+                    const seedFile = path.join(seedDir, `${msg.sobject as string}.json`);
+                    if (!fs.existsSync(seedFile)) { vscode.window.showWarningMessage(`No seed file found for ${msg.sobject}.`); break; }
+                    const doc = await vscode.workspace.openTextDocument(seedFile);
+                    await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
                     break;
                 }
 
@@ -585,7 +597,7 @@ export class DataMigrationPanel {
             tracking = this._trackingCache.data;
         }
         const hasLog      = fs.existsSync(lastRunLogPath(this._workspaceRoot));
-        const seedInfo    = getSeedInfo(this._workspaceRoot, config);
+        const seedInfo    = getSeedInfo(this._workspaceRoot, config, sourceOrg || undefined);
 
         // List all orgs that have tracking files (for the Tracking org selector)
         const trackingDir = path.join(this._workspaceRoot, ".git", "sf-devops-dm", "tracking");
@@ -653,7 +665,7 @@ export class DataMigrationPanel {
         const { onLog, onProgress } = this._makeLogHandlers(this._pullLog);
         this._refresh();
         try {
-            await pullData(sourceOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, dryRunSampleSize: 5 });
+            await pullData(sourceOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, dryRunSampleSize: 5, sourceOrg });
             if (!dryRun) { writeJobLog(pullLogsDir(this._workspaceRoot), this._pullLog.map(l => `[${l.level}] ${l.text}`)); }
             this._panel.webview.postMessage({ command: "runDone", op: "pull", dryRun });
         } catch (err) {
@@ -674,9 +686,10 @@ export class DataMigrationPanel {
         const ctrl = makeController();
         this._loadController = ctrl;
         const { onLog, onProgress } = this._makeLogHandlers(this._loadLog);
+        const sourceOrg = getSourceOrg(this._ctx) || undefined;
         this._refresh();
         try {
-            await loadData(targetOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, objectFilter: sobject ? [sobject] : undefined });
+            await loadData(targetOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, objectFilter: sobject ? [sobject] : undefined, sourceOrg });
             if (!dryRun) {
                 try {
                     const report = await validateMigration(targetOrg, this._workspaceRoot, this._config, onLog);
@@ -715,7 +728,7 @@ export class DataMigrationPanel {
         this._refresh();
         let loadActuallyRan = false;
         try {
-            await pullData(sourceOrg, this._workspaceRoot, this._config, pullLog, pullProg, pullCtrl, { dryRun, dryRunSampleSize: 5 });
+            await pullData(sourceOrg, this._workspaceRoot, this._config, pullLog, pullProg, pullCtrl, { dryRun, dryRunSampleSize: 5, sourceOrg });
             if (!dryRun) { writeJobLog(pullLogsDir(this._workspaceRoot), this._pullLog.map(l => `[${l.level}] ${l.text}`)); }
             this._pullState = "done";
 
@@ -729,7 +742,7 @@ export class DataMigrationPanel {
                 this._activeTab = "load";
                 const { onLog: loadLog, onProgress: loadProg } = this._makeLogHandlers(this._loadLog);
                 this._refresh();
-                await loadData(targetOrg, this._workspaceRoot, this._config, loadLog, loadProg, loadCtrl, { dryRun });
+                await loadData(targetOrg, this._workspaceRoot, this._config, loadLog, loadProg, loadCtrl, { dryRun, sourceOrg });
                 if (!dryRun) {
                     try {
                         const report = await validateMigration(targetOrg, this._workspaceRoot, this._config, loadLog);
@@ -1064,7 +1077,8 @@ export class DataMigrationPanel {
                 <td><strong>${r.count > 0 ? r.count : "—"}</strong></td>
                 <td style="color:var(--vscode-descriptionForeground);font-size:11px">${r.lastPulled ? new Date(r.lastPulled).toLocaleString() : "—"}</td>
                 <td class="row-actions">
-                    ${r.count > 0 ? `<button class="btn btn-sm danger-btn" ${dis} onclick="if(confirm('Clear seed for ${esc(r.sobject)}?'))send('clearSeed',{sobject:${jsonInject(r.sobject)}})">Clear</button>` : ""}
+                    ${r.count > 0 ? `<button class="btn btn-sm" onclick="send('viewSeedFile',{sobject:${jsonInject(r.sobject)},sourceOrg:${jsonInject(sourceOrg)}})">View</button>` : ""}
+                    ${r.count > 0 ? `<button class="btn btn-sm danger-btn" ${dis} onclick="if(confirm('Clear seed for ${esc(r.sobject)}?'))send('clearSeed',{sobject:${jsonInject(r.sobject)},sourceOrg:${jsonInject(sourceOrg)}})">Clear</button>` : ""}
                 </td>
             </tr>`).join("");
 
@@ -1096,7 +1110,7 @@ export class DataMigrationPanel {
                 ${isDone && !isRunning ? `<div class="done-banner">✅ Pull complete — ${totalSeed} total records in seed.</div>` : ""}
             </div>
 
-            <h3 style="margin:20px 0 8px;font-size:13px">Seed Status${hasSeed ? ` — ${totalSeed} records total` : ""}</h3>
+            <h3 style="margin:20px 0 8px;font-size:13px">Seed Status${sourceOrg ? ` — ${esc(sourceOrg)}` : ""}${hasSeed ? ` (${totalSeed} records total)` : ""}</h3>
             ${seedInfo.length === 0
                 ? `<p style="color:var(--vscode-descriptionForeground)">No active objects configured. Add objects in the Config tab.</p>`
                 : `<div class="table-wrap"><table class="data-table">
