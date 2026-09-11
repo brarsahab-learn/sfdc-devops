@@ -244,7 +244,11 @@ async function resolveRecordTypes(ids, org, workspaceRoot) {
 // ---------------------------------------------------------------------------
 async function pullData(sourceOrg, workspaceRoot, config, onLog, onProgress, controller, options) {
     const ctrl = asInternal(controller);
-    const objects = activeObjects(config);
+    let objects = activeObjects(config);
+    if (options?.objectFilter && options.objectFilter.length > 0) {
+        const filterSet = new Set(options.objectFilter);
+        objects = objects.filter(o => filterSet.has(o.sobject));
+    }
     const seedDir = resolvedSeedDir(workspaceRoot, config, options);
     const startMs = Date.now();
     (0, DataMigrationConfig_1.ensureDmDirs)(workspaceRoot, config.seedDir);

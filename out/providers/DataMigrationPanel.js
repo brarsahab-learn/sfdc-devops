@@ -152,6 +152,7 @@ class DataMigrationPanel {
             "pull", "load", "pullAndLoad", "rollback", "autoSort",
             "checkExtId", "checkAllExtIds",
             "retryFailed", "clearAndReload", "clearAllAndReload",
+            "pullObject", "loadObject",
         ]);
         this._panel.webview.onDidReceiveMessage(async (msg) => {
             if (EXCLUSIVE_COMMANDS.has(msg.command) && this._anyRunning) {
@@ -243,6 +244,12 @@ class DataMigrationPanel {
                         break;
                     case "pull":
                         await this._startPull(msg.sourceOrg, !!msg.dryRun);
+                        break;
+                    case "pullObject":
+                        await this._startPull(msg.sourceOrg, !!msg.dryRun, msg.sobject);
+                        break;
+                    case "loadObject":
+                        await this._startLoad(msg.targetOrg, !!msg.dryRun, msg.sobject);
                         break;
                     case "load":
                         await this._startLoad(msg.targetOrg, !!msg.dryRun);
@@ -621,6 +628,8 @@ class DataMigrationPanel {
             busy: this._anyRunning,
             busyLabel: this._busyLabel,
             lastError: this._lastError,
+            currentOpSobject: this._currentOpSobject,
+            currentOpType: this._currentOpType,
         };
     }
     // ── operations ───────────────────────────────────────────────────────────
@@ -646,18 +655,22 @@ class DataMigrationPanel {
         };
         return { onLog, onProgress };
     }
-    async _startPull(sourceOrg, dryRun) {
+    async _startPull(sourceOrg, dryRun, sobject) {
+        this._currentOpSobject = sobject;
+        this._currentOpType = "pull";
         this._pullState = "running";
         this._lastError = null;
         this._pullLog = [];
         this._dryRunMode = dryRun;
-        this._activeTab = "pull";
+        if (!sobject) {
+            this._activeTab = "pull";
+        }
         const ctrl = (0, DataMigrationEngine_1.makeController)();
         this._pullController = ctrl;
         const { onLog, onProgress } = this._makeLogHandlers(this._pullLog);
         this._refresh();
         try {
-            await (0, DataMigrationEngine_1.pullData)(sourceOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, dryRunSampleSize: 5, sourceOrg });
+            await (0, DataMigrationEngine_1.pullData)(sourceOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, dryRunSampleSize: 5, sourceOrg, objectFilter: sobject ? [sobject] : undefined });
             if (!dryRun) {
                 (0, DataMigrationConfig_1.writeJobLog)((0, DataMigrationConfig_1.pullLogsDir)(this._workspaceRoot), this._pullLog.map(l => `[${l.level}] ${l.text}`));
             }
@@ -669,15 +682,21 @@ class DataMigrationPanel {
         finally {
             this._pullState = "done";
             this._pullController = undefined;
+            this._currentOpSobject = undefined;
+            this._currentOpType = undefined;
             this._refresh();
         }
     }
     async _startLoad(targetOrg, dryRun, sobject) {
+        this._currentOpSobject = sobject;
+        this._currentOpType = "load";
         this._loadState = "running";
         this._lastError = null;
         this._loadLog = [];
         this._dryRunMode = dryRun;
-        this._activeTab = "load";
+        if (!sobject) {
+            this._activeTab = "load";
+        }
         const ctrl = (0, DataMigrationEngine_1.makeController)();
         this._loadController = ctrl;
         const { onLog, onProgress } = this._makeLogHandlers(this._loadLog);
@@ -708,6 +727,8 @@ class DataMigrationPanel {
             this._loadState = "done";
             this._loadController = undefined;
             this._trackingCache = undefined;
+            this._currentOpSobject = undefined;
+            this._currentOpType = undefined;
             this._refresh();
         }
     }
@@ -771,6 +792,8 @@ class DataMigrationPanel {
             this._pullController = undefined;
             this._loadController = undefined;
             this._trackingCache = undefined;
+            this._currentOpSobject = undefined;
+            this._currentOpType = undefined;
             this._refresh();
         }
     }
@@ -925,7 +948,7 @@ class DataMigrationPanel {
         </html>`;
     }
     _renderHtml(vm) {
-        const { config, sourceOrg, targetOrg, role, envs, tracking, trackingOrg, trackedOrgs, hasLog, seedInfo, availableOrgs, pullState, loadState, activeTab, dryRun, pullLog, loadLog, trackingLog, busy, busyLabel, lastError } = vm;
+        const { config, sourceOrg, targetOrg, role, envs, tracking, trackingOrg, trackedOrgs, hasLog, seedInfo, availableOrgs, pullState, loadState, activeTab, dryRun, pullLog, loadLog, trackingLog, busy, busyLabel, lastError, currentOpSobject, currentOpType } = vm;
         // Disable-attribute fragment for every button that mutates state or shells out to the
         // Salesforce CLI, so nothing can be started while another operation is already running.
         const dis = busy ? "disabled" : "";
@@ -957,7 +980,7 @@ class DataMigrationPanel {
         }
         const tabs = [
             { id: "config", label: "⚙ Config" },
-            { id: "pull", label: "⬇ Pull" },
+            { id: "pull", label: `⬇ Pull${pullState === "running" ? " ●" : ""}` },
             { id: "load", label: `⬆ Load${loadState === "running" ? " ●" : loadState === "paused" ? " ⏸" : ""}` },
             { id: "tracking", label: "📊 Tracking" },
             { id: "extids", label: "🔑 External IDs" },
@@ -972,8 +995,11 @@ class DataMigrationPanel {
                     ? `<span class="badge badge-green" title="${esc(obj.externalIdField)}">✅ ${esc(obj.externalIdField)}</span>`
                     : `<span class="badge badge-amber" style="cursor:pointer" onclick="send('switchTab',{tab:'extids'})">⚠️ Not set</span>`;
                 const queryPreview = (obj.query || "").length > 60 ? esc(obj.query.slice(0, 60)) + "…" : esc(obj.query ?? "");
+                const isOpRunning = currentOpSobject === obj.sobject;
+                const opLabel = currentOpType === "pull" ? "Pulling…" : "Loading…";
+                const opTab = currentOpType === "pull" ? "pull" : "load";
                 rows += `
-                <tr id="row-${esc(obj.id)}" class="${active ? "" : "inactive-row"}">
+                <tr id="row-${esc(obj.id)}" class="${active ? "" : "inactive-row"}${isOpRunning ? " row-op-running" : ""}">
                     <td>${idx + 1}</td>
                     <td><code>${esc(obj.sobject)}</code></td>
                     <td>${esc(obj.label ?? obj.sobject)}</td>
@@ -982,10 +1008,14 @@ class DataMigrationPanel {
                     <td><label class="toggle-sw"><input type="checkbox" ${active ? "checked" : ""} ${dis} onchange="send('updateObject',{obj:Object.assign({},DATA.config.objects[${idx}],{active:this.checked})})"><span class="slider"></span></label></td>
                     <td>${extIdBadge}</td>
                     <td class="row-actions">
+                        ${isOpRunning
+                    ? `<span class="spinner" style="margin-right:4px"></span><span class="op-inline-label">${opLabel}</span><button class="btn btn-sm" onclick="send('switchTab',{tab:'${opTab}'})">▸ View</button>`
+                    : `<button class="btn btn-sm" title="Pull this object from source org" ${dis} onclick="startOp(this,'pullObject',{sobject:${jsonInject(obj.sobject)},sourceOrg:${jsonInject(sourceOrg)},dryRun:false})">↓ Pull</button>
+                        <button class="btn btn-sm" title="Load this object to target org" ${dis} onclick="startOp(this,'loadObject',{sobject:${jsonInject(obj.sobject)},targetOrg:${jsonInject(targetOrg)},dryRun:false})">↑ Load</button>
                         <button class="icon-btn" title="Edit" ${dis} onclick="openInlineEditor(${idx})">✏️</button>
                         <button class="icon-btn" title="Move Up" onclick="moveObj(${idx},-1)" ${idx === 0 || busy ? "disabled" : ""}>▲</button>
                         <button class="icon-btn" title="Move Down" onclick="moveObj(${idx},1)" ${idx === objects.length - 1 || busy ? "disabled" : ""}>▼</button>
-                        <button class="icon-btn danger-btn" title="Delete" ${dis} onclick="if(confirm('Delete '+${jsonInject(obj.sobject)}+'?'))send('deleteObject',{id:${jsonInject(obj.id)}})">🗑</button>
+                        <button class="icon-btn danger-btn" title="Delete" ${dis} onclick="if(confirm('Delete '+${jsonInject(obj.sobject)}+'?'))send('deleteObject',{id:${jsonInject(obj.id)}})">🗑</button>`}
                     </td>
                 </tr>
                 <tr id="editor-${esc(obj.id)}" class="inline-editor-row" style="display:none">
@@ -1047,6 +1077,7 @@ class DataMigrationPanel {
                 <thead><tr><th>#</th><th>Object</th><th>Label</th><th>Depends On</th><th>Query</th><th>Active</th><th>Ext ID</th><th>Actions</th></tr></thead>
                 <tbody id="objects-tbody">${rows}</tbody>
             </table></div>`}
+            <p style="font-size:11px;color:var(--vscode-descriptionForeground);margin-top:8px">↓ Pull / ↑ Load buttons run single-object operations using the configured source / target orgs.</p>
 
             <div id="add-object-modal" class="modal" style="display:none">
                 <div class="modal-box">
@@ -1069,15 +1100,21 @@ class DataMigrationPanel {
             const isDone = pullState === "done";
             const totalSeed = seedInfo.reduce((s, r) => s + r.count, 0);
             const hasSeed = totalSeed > 0;
-            const seedRows = seedInfo.map(r => `<tr>
+            const seedRows = seedInfo.map(r => {
+                const isRowRunning = currentOpSobject === r.sobject && currentOpType === "pull";
+                return `<tr class="${isRowRunning ? "row-op-running" : ""}">
                 <td><code>${esc(r.sobject)}</code></td>
                 <td><strong>${r.count > 0 ? r.count : "—"}</strong></td>
                 <td style="color:var(--vscode-descriptionForeground);font-size:11px">${r.lastPulled ? new Date(r.lastPulled).toLocaleString() : "—"}</td>
                 <td class="row-actions">
+                    ${isRowRunning
+                    ? `<span class="spinner" style="margin-right:4px"></span><span class="op-inline-label">Pulling…</span><button class="btn btn-sm" onclick="send('switchTab',{tab:'pull'})">▸ Full View</button>`
+                    : `<button class="btn btn-sm" title="Re-pull from source org" ${dis} onclick="startOp(this,'pullObject',{sobject:${jsonInject(r.sobject)},sourceOrg:${jsonInject(sourceOrg)},dryRun:false})">↓ Re-Pull</button>
                     ${r.count > 0 ? `<button class="btn btn-sm" onclick="send('viewSeedFile',{sobject:${jsonInject(r.sobject)},sourceOrg:${jsonInject(sourceOrg)}})">View</button>` : ""}
-                    ${r.count > 0 ? `<button class="btn btn-sm danger-btn" ${dis} onclick="if(confirm('Clear seed for ${esc(r.sobject)}?'))send('clearSeed',{sobject:${jsonInject(r.sobject)},sourceOrg:${jsonInject(sourceOrg)}})">Clear</button>` : ""}
+                    ${r.count > 0 ? `<button class="btn btn-sm danger-btn" ${dis} onclick="if(confirm('Clear seed for ${esc(r.sobject)}?'))send('clearSeed',{sobject:${jsonInject(r.sobject)},sourceOrg:${jsonInject(sourceOrg)}})">Clear</button>` : ""}`}
                 </td>
-            </tr>`).join("");
+            </tr>`;
+            }).join("");
             const recentLogs = (0, DataMigrationConfig_1.listRecentLogs)((0, DataMigrationConfig_1.pullLogsDir)(this._workspaceRoot), 3);
             return `
             <div class="run-idle-card" style="max-width:680px">
@@ -1099,7 +1136,7 @@ class DataMigrationPanel {
                     ${recentLogs.length > 0 ? `<button class="btn" onclick="send('viewPullLog',{})" style="margin-left:auto">📄 Last Pull Log</button>` : ""}
                 </div>
                 ${isRunning ? `<div class="run-banner banner-teal" id="run-banner" style="margin-bottom:12px">
-                    <span>Pulling…</span><span style="flex:1"></span><span id="run-elapsed">00:00</span>
+                    <span>Pulling${currentOpSobject ? ` — ${esc(currentOpSobject)} (single object)` : " — All Objects"}…</span><span style="flex:1"></span><span id="run-elapsed">00:00</span>
                 </div>` : ""}
                 ${isDone && !isRunning ? `<div class="done-banner">✅ Pull complete — ${totalSeed} total records in seed.</div>` : ""}
             </div>
@@ -1124,7 +1161,7 @@ class DataMigrationPanel {
                 const bannerLabel = dryRun ? "DRY RUN" : "LOADING";
                 return `
                 <div class="run-banner ${bannerClass}" id="run-banner">
-                    <span id="run-op-label">${bannerLabel}</span>
+                    <span id="run-op-label">${bannerLabel}${currentOpSobject ? ` — ${esc(currentOpSobject)}` : ""}</span>
                     <span style="flex:1"></span>
                     <span id="run-elapsed">00:00</span>
                 </div>
@@ -1214,7 +1251,10 @@ class DataMigrationPanel {
                 const progressBar = seedCount > 0
                     ? `<div style="width:80px;height:6px;background:var(--vscode-editorWidget-border);border-radius:3px;display:inline-block;vertical-align:middle;margin-left:4px"><div style="width:${progressPct}%;height:100%;background:#00c9b1;border-radius:3px"></div></div>`
                     : "";
-                rows += `<tr>
+                const isObjRunning = currentOpSobject === obj;
+                const objOpLabel = currentOpType === "pull" ? "Pulling…" : "Loading…";
+                const objOpTab = currentOpType === "pull" ? "pull" : "load";
+                rows += `<tr class="${isObjRunning ? "row-op-running" : ""}">
                     <td><code>${esc(obj)}</code></td>
                     <td>${seedCount > 0 ? `<strong>${seedCount}</strong>` : "—"}</td>
                     <td>${loadTotal > 0 ? loadTotal : "—"}</td>
@@ -1224,10 +1264,13 @@ class DataMigrationPanel {
                     <td>${pending > 0 ? `<span style="color:var(--vscode-descriptionForeground)">${pending}</span>` : "0"}</td>
                     <td>${blocked}</td>
                     <td class="row-actions">
+                        ${isObjRunning
+                    ? `<span class="spinner" style="margin-right:4px"></span><span class="op-inline-label">${objOpLabel}</span><button class="btn btn-sm" onclick="send('switchTab',{tab:'${objOpTab}'})">▸ View Progress</button>`
+                    : `<button class="btn btn-sm" title="Re-pull this object from source org" ${dis} onclick="startOp(this,'pullObject',{sobject:${jsonInject(obj)},sourceOrg:${jsonInject(sourceOrg)},dryRun:false})">↓ Re-Pull</button>
                         ${failed > 0 ? `<button class="btn btn-sm" ${dis} onclick="send('viewErrors',{sobject:${jsonInject(obj)},targetOrg:${jsonInject(trackingOrg)}})" title="Show error details for failed records">⚠ Errors</button>` : ""}
-                        ${failed > 0 ? `<button class="btn btn-sm" ${dis} onclick="send('retryFailed',{sobject:${jsonInject(obj)},targetOrg:${jsonInject(trackingOrg)}})">Retry Failed</button>` : ""}
-                        <button class="btn btn-sm btn-primary" title="Clear tracking history and reload this object" ${dis} onclick="send('clearAndReload',{sobject:${jsonInject(obj)},targetOrg:${jsonInject(trackingOrg)}})">↺ Rerun</button>
-                        <button class="btn btn-sm danger-btn" title="Clear tracking only (no Salesforce delete)" ${dis} onclick="if(confirm('Clear tracking for ${esc(obj)}?'))send('clearObject',{sobject:${jsonInject(obj)},targetOrg:${jsonInject(trackingOrg)}})">Clear</button>
+                        ${failed > 0 ? `<button class="btn btn-sm" ${dis} onclick="startOp(this,'retryFailed',{sobject:${jsonInject(obj)},targetOrg:${jsonInject(trackingOrg)}})">↺ Retry</button>` : ""}
+                        <button class="btn btn-sm btn-primary" title="Clear tracking and reload this object" ${dis} onclick="startOp(this,'clearAndReload',{sobject:${jsonInject(obj)},targetOrg:${jsonInject(trackingOrg)}})">↺ Reload</button>
+                        <button class="btn btn-sm danger-btn" title="Clear tracking only" ${dis} onclick="if(confirm('Clear tracking for ${esc(obj)}?'))send('clearObject',{sobject:${jsonInject(obj)},targetOrg:${jsonInject(trackingOrg)}})">Clear</button>`}
                     </td>
                 </tr>`;
             }
@@ -1414,6 +1457,14 @@ input:checked + .slider::before { transform: translateX(16px); }
 
 /* ── Toolbar ── */
 .toolbar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+
+/* ── Per-object operation states ── */
+.row-op-running > td { background: rgba(0,201,177,0.06) !important; }
+.row-op-running .row-actions { font-size: 12px; }
+.btn-loading { opacity: 0.6; pointer-events: none; }
+.op-inline-label { font-size: 11px; color: #00C9B1; font-weight: 600; margin: 0 4px; vertical-align: middle; }
+.row-starting > td { opacity: 0.7; transition: opacity 0.2s; }
+.spinner-white { width: 12px; height: 12px; border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; display: inline-block; vertical-align: middle; }
 </style>
 </head>
 <body>
@@ -1654,8 +1705,28 @@ window.addEventListener('message', function(event) {
     if (area) { area.scrollTop = area.scrollHeight; }
 })();
 
+// ── startOp — immediate client-side feedback before server refresh ───────────
+function startOp(el, op, params) {
+    if (el) {
+        el.disabled = true;
+        el.classList.add('btn-loading');
+        const row = el.closest('tr');
+        if (row) { row.classList.add('row-starting'); }
+    }
+    const busyBanner = document.getElementById('global-busy-banner');
+    const busyLabel  = document.getElementById('global-busy-label');
+    if (busyBanner && busyLabel) {
+        busyLabel.textContent = 'Starting…';
+        busyBanner.hidden = false;
+    }
+    startElapsedTimer(true);
+    send(op, params);
+}
+
 // Expose to onclick handlers
+window.DATA              = DATA;
 window.send              = send;
+window.startOp           = startOp;
 window.startPull         = startPull;
 window.startLoad         = startLoad;
 window.startPullAndLoad  = startPullAndLoad;
