@@ -902,12 +902,16 @@ async function loadData(targetOrg, workspaceRoot, config, onLog, onProgress, con
     if (options?.dryRun) {
         return loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress, controller, options);
     }
-    // Always bypass lookup filters for the running user — independent of disableAutomationDuringLoad.
-    const lookupFilterState = await enableLookupFilterBypass(targetOrg, workspaceRoot, onLog);
-    const automationState = config.disableAutomationDuringLoad
-        ? await enableAutomationControl(targetOrg, workspaceRoot, onLog)
-        : null;
+    // Both setup calls are inside the try so the finally block always runs — even if
+    // enableAutomationControl throws, restoreLookupFilterBypass will still be called and
+    // Skip_Lookup_Filters__c will not be left stuck on the running user.
+    let lookupFilterState = null;
+    let automationState = null;
     try {
+        lookupFilterState = await enableLookupFilterBypass(targetOrg, workspaceRoot, onLog);
+        if (config.disableAutomationDuringLoad) {
+            automationState = await enableAutomationControl(targetOrg, workspaceRoot, onLog);
+        }
         return await loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress, controller, options);
     }
     finally {

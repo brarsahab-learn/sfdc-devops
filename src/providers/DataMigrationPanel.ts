@@ -720,7 +720,10 @@ export class DataMigrationPanel {
                 const { onLog: loadLog, onProgress: loadProg } = this._makeLogHandlers(this._loadLog);
                 this._refresh();
                 await loadData(targetOrg, this._workspaceRoot, this._config, loadLog, loadProg, loadCtrl, { dryRun });
-                if (!dryRun) { writeJobLog(loadLogsDir(this._workspaceRoot, targetOrg), this._loadLog.map(l => `[${l.level}] ${l.text}`)); }
+                if (!dryRun) {
+                    try { await validateMigration(targetOrg, this._workspaceRoot, this._config, loadLog); } catch { /* validation failure should not block completion */ }
+                    writeJobLog(loadLogsDir(this._workspaceRoot, targetOrg), this._loadLog.map(l => `[${l.level}] ${l.text}`));
+                }
             }
             this._panel.webview.postMessage({ command: "runDone", op: "pullAndLoad", dryRun });
         } catch (err) {

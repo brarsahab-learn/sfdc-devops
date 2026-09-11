@@ -719,6 +719,10 @@ class DataMigrationPanel {
                 this._refresh();
                 await (0, DataMigrationEngine_1.loadData)(targetOrg, this._workspaceRoot, this._config, loadLog, loadProg, loadCtrl, { dryRun });
                 if (!dryRun) {
+                    try {
+                        await (0, DataMigrationEngine_1.validateMigration)(targetOrg, this._workspaceRoot, this._config, loadLog);
+                    }
+                    catch { /* validation failure should not block completion */ }
                     (0, DataMigrationConfig_1.writeJobLog)((0, DataMigrationConfig_1.loadLogsDir)(this._workspaceRoot, targetOrg), this._loadLog.map(l => `[${l.level}] ${l.text}`));
                 }
             }
