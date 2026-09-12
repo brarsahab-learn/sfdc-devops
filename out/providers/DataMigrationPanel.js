@@ -57,7 +57,9 @@ function countSeedRecords(seedDir, sobject) {
     }
     try {
         const data = JSON.parse(fs.readFileSync(fp, "utf-8"));
-        return Array.isArray(data.records) ? data.records.length : 0;
+        // Match readSeedRecords in DataMigrationEngine: handle both {records:[]} and bare []
+        const records = Array.isArray(data.records) ? data.records : Array.isArray(data) ? data : [];
+        return records.length;
     }
     catch {
         return 0;
@@ -379,7 +381,7 @@ class DataMigrationPanel {
                     case "retryFailed": {
                         const cfg = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
                         this._config = cfg;
-                        await this._startLoad(msg.targetOrg, false, msg.sobject);
+                        await this._startLoad(msg.targetOrg, false, msg.sobject, true);
                         break;
                     }
                     case "rollback":
@@ -711,7 +713,7 @@ class DataMigrationPanel {
             this._refresh();
         }
     }
-    async _startLoad(targetOrg, dryRun, sobject) {
+    async _startLoad(targetOrg, dryRun, sobject, retryFailedOnly = false) {
         this._currentOpSobject = sobject;
         this._currentOpType = "load";
         this._loadState = "running";
@@ -727,7 +729,7 @@ class DataMigrationPanel {
         const sourceOrg = (0, DataMigrationConfig_1.getSourceOrg)(this._ctx) || undefined;
         this._refresh();
         try {
-            await (0, DataMigrationEngine_1.loadData)(targetOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, objectFilter: sobject ? [sobject] : undefined, sourceOrg });
+            await (0, DataMigrationEngine_1.loadData)(targetOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, objectFilter: sobject ? [sobject] : undefined, sourceOrg, retryFailedOnly });
             if (!dryRun) {
                 try {
                     const report = await (0, DataMigrationEngine_1.validateMigration)(targetOrg, this._workspaceRoot, this._config, onLog);
