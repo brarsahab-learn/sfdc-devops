@@ -52,6 +52,7 @@ export interface DmRunOptions {
     dryRunSampleSize?: number;
     objectFilter?: string[];
     sourceOrg?: string;
+    retryFailedOnly?: boolean; // when true, skip records already explicitly skipped (not just "created")
 }
 
 // Internal controller shape that exposes _skip bookkeeping without polluting the public type
@@ -217,6 +218,11 @@ function parseFieldError(sobject: string, raw: string): string | null {
     if (unknown) {
         return `Unknown field '${unknown[1]}' on ${sobject}. The field may have been deleted or renamed.`;
     }
+    // "INVALID_CROSS_REFERENCE_KEY: invalid cross reference id for field ParentId__c"
+    const xref = raw.match(/INVALID_CROSS_REFERENCE_KEY[^:]*:[^:]*:\s*([^\s,\n]+)/i);
+    if (xref) {
+        return `Relationship field '${xref[1]}' could not be resolved in the target org — the parent record may not have been migrated yet, or its ExternalId field value does not match what was used during the parent load. Load the parent object first, then retry.`;
+    }
     return null;
 }
 
@@ -341,6 +347,13 @@ export async function pullData(
         const topFields = selectPart.split(",").map(f => f.trim().split(/\s+/)[0].toLowerCase());
         if (!topFields.includes("id")) {
             query = query.replace(/^SELECT\s+/i, "SELECT Id, ");
+        }
+        // Auto-inject the configured ExternalId field so seed data always contains it.
+        // Without it, buildUpsertCsv silently falls back to the source SF ID as the external
+        // ID value — which breaks child relationship resolution and causes duplicates on re-run.
+        if (obj.externalIdField && !topFields.includes(obj.externalIdField.toLowerCase())) {
+            query = query.replace(/^SELECT\s+/i, `SELECT ${obj.externalIdField}, `);
+            onLog(`ℹ  Auto-added '${obj.externalIdField}' to SOQL for ${obj.sobject} — required for external ID matching and child relationship resolution`, "info");
         }
         if (options?.dryRun && !/LIMIT\s+\d+/i.test(query)) {
             query += ` LIMIT ${options.dryRunSampleSize ?? 5}`;
@@ -719,10 +732,12 @@ function buildUpsertCsv(
     obj: DmObjectConfig,
     referenceFields: RefField[],
     objByName: Map<string, DmObjectConfig>,
+    parentExtIdBySourceId?: Map<string, Map<string, string>>,
 ): string {
     if (records.length === 0 || !obj.externalIdField) { return ""; }
 
     const lookupToRelCol = new Map<string, string>();
+    const lookupFieldToParentSobject = new Map<string, string>();
     // RecordTypeId is pre-resolved to a real target org ID by loadBatch before this function
     // is called — treat it as a plain direct field (no relationship column needed).
     for (const rf of referenceFields) {
@@ -732,6 +747,7 @@ function buildUpsertCsv(
         const parentCfg = objByName.get(parentSobject);
         if (!parentCfg?.externalIdField) { continue; }
         lookupToRelCol.set(rf.field, `${rf.relationshipName}.${parentCfg.externalIdField}`);
+        lookupFieldToParentSobject.set(rf.field, parentSobject);
     }
 
     const lookupFields = new Set(lookupToRelCol.keys());
@@ -769,6 +785,17 @@ function buildUpsertCsv(
                 if (!lookupField) { return ""; }
                 const raw = record[lookupField];
                 if (!raw) { return ""; }
+                // Resolve source org SF ID to the parent's external ID value.
+                // Bulk API resolves the relationship column against the parent's ExternalId
+                // field in the target org — if that ExternalId is a legacy system ID rather
+                // than the source SF ID, using the raw SF ID here causes a lookup failure.
+                if (parentExtIdBySourceId) {
+                    const parentSobject = lookupFieldToParentSobject.get(lookupField);
+                    if (parentSobject) {
+                        const extVal = parentExtIdBySourceId.get(parentSobject)?.get(String(raw));
+                        if (extVal) { return csvEscape(extVal); }
+                    }
+                }
                 return csvEscape(String(raw));
             }
             const val = record[h];
@@ -1117,9 +1144,132 @@ async function loadDataImpl(
             ctrl._setState("done");
             return { loaded: 0, failed: 0, skipped: 0, blocked: 0 };
         }
+
+        // ExternalId drift detection: for each object with prior tracking, sample a few
+        // "created" records and confirm their ExternalId value in the target matches what the
+        // current seed file would produce. A mismatch means the value used as ExternalId changed
+        // between runs (e.g. seed was re-pulled with ExternalId__c now in the SELECT after
+        // previously being absent) — upsert would create duplicates instead of updating.
+        for (const obj of objectList) {
+            if (!obj.externalIdField) { continue; }
+            const tracking = readTracking(workspaceRoot, targetOrg);
+            const objTracking = tracking[obj.sobject] ?? {};
+            const createdEntries = Object.entries(objTracking)
+                .filter(([, e]) => e.status === "created" && e.id)
+                .slice(0, 5); // sample only
+            if (createdEntries.length === 0) { continue; }
+
+            // What the current seed would use as ExternalId for these source IDs
+            const seedMap = new Map<string, string>();
+            for (const r of readSeedRecords(seedDir, obj.sobject)) {
+                const srcId = String(r.Id ?? "");
+                if (srcId) { seedMap.set(srcId, String(r[obj.externalIdField] ?? r.Id ?? "")); }
+            }
+            if (seedMap.size === 0) { continue; }
+
+            const sampleSrcIds = createdEntries.map(([srcId]) => srcId).filter(id => seedMap.has(id));
+            if (sampleSrcIds.length === 0) { continue; }
+
+            try {
+                const inList = sampleSrcIds.map(v => `'${v.replace(/'/g, "\\'")}'`).join(",");
+                const { stdout } = await execSf(
+                    ["data", "query",
+                     "--query", `SELECT Id, ${obj.externalIdField} FROM ${obj.sobject} WHERE Id IN (${inList})`,
+                     "--target-org", targetOrg, "--json"],
+                    { cwd: workspaceRoot, timeout: 30_000, maxBuffer: 5 * 1024 * 1024 },
+                );
+                const recs: any[] = JSON.parse(stdout)?.result?.records ?? [];
+                for (const r of recs) {
+                    const targetExtVal = String(r[obj.externalIdField] ?? "");
+                    const entry = createdEntries.find(([, e]) => e.id === r.Id);
+                    if (!entry) { continue; }
+                    const srcId = entry[0];
+                    const seedExtVal = seedMap.get(srcId) ?? "";
+                    if (targetExtVal && seedExtVal && targetExtVal !== seedExtVal) {
+                        emit(
+                            `⚠  ExternalId drift detected on ${obj.sobject}: target has '${targetExtVal}' but current seed would use '${seedExtVal}'. ` +
+                            `Re-running the load will create DUPLICATES instead of updating existing records. ` +
+                            `Run a rollback first, or reconcile the ExternalId values before proceeding.`,
+                            "warn",
+                        );
+                        break;
+                    }
+                }
+            } catch { /* non-fatal — drift detection is best-effort */ }
+        }
     }
 
     emit(`Load order: ${objectList.map(o => o.sobject).join(" → ")}`, "info");
+
+    // Pre-flight: warn when a dependency's seed file is absent. Relationship columns for that
+    // parent will fall back to source SF IDs, which likely won't resolve in the target org.
+    if (!dryRun) {
+        for (const obj of objectList) {
+            const deps = obj.dependsOn ?? [];
+            for (const dep of deps) {
+                const depSeedPath = path.join(seedDir, `${dep}.json`);
+                if (!fs.existsSync(depSeedPath)) {
+                    emit(
+                        `⚠  Seed file for dependency '${dep}' (required by '${obj.sobject}') is missing. ` +
+                        `Relationship fields pointing to '${dep}' will use source SF IDs — load will likely fail with INVALID_CROSS_REFERENCE_KEY unless '${dep}' was already migrated with matching ExternalId values. Pull '${dep}' first to resolve this.`,
+                        "warn",
+                    );
+                }
+            }
+        }
+    }
+
+    // Build a lookup map for every seed object: sourceId → externalIdValue.
+    // buildUpsertCsv uses this to emit the correct parent external ID in relationship
+    // columns — Bulk API resolves the parent by its ExternalId field value in the target
+    // org, which may be a legacy system ID rather than the source org's Salesforce ID.
+    const parentExtIdBySourceId = new Map<string, Map<string, string>>();
+    for (const o of allActive) {
+        if (!o.externalIdField) { continue; }
+        const idMap = new Map<string, string>();
+        for (const r of readSeedRecords(seedDir, o.sobject)) {
+            const srcId = String(r.Id ?? "");
+            if (!srcId) { continue; }
+            idMap.set(srcId, String(r[o.externalIdField] ?? r.Id ?? ""));
+        }
+        parentExtIdBySourceId.set(o.sobject, idMap);
+    }
+
+    // For parent objects whose seed file is missing (migrated in a prior run), query the
+    // target org for their Id ↔ ExternalId mapping so relationship columns still resolve.
+    // This covers partial loads (child-only) and re-runs after seed files were cleared.
+    if (!dryRun) {
+        const missingParents = allActive.filter(o =>
+            o.externalIdField &&
+            (!parentExtIdBySourceId.has(o.sobject) || parentExtIdBySourceId.get(o.sobject)!.size === 0)
+        );
+        for (const o of missingParents) {
+            try {
+                emit(`ℹ  Seed file absent for '${o.sobject}' — querying target org for ExternalId mapping (cross-run relationship resolution)`, "info");
+                const { stdout } = await execSf(
+                    ["data", "query",
+                     "--query", `SELECT Id, ${o.externalIdField} FROM ${o.sobject} WHERE ${o.externalIdField} != null LIMIT 50000`,
+                     "--target-org", targetOrg, "--json"],
+                    { cwd: workspaceRoot, timeout: 120_000, maxBuffer: 50 * 1024 * 1024 },
+                );
+                const recs: any[] = JSON.parse(stdout)?.result?.records ?? [];
+                const idMap = new Map<string, string>();
+                for (const r of recs) {
+                    // Map both directions: target SF ID → ext value, and ext value → ext value
+                    // (so child lookup fields holding either form can resolve)
+                    const extVal = String(r[o.externalIdField!] ?? "");
+                    if (extVal) {
+                        idMap.set(r.Id as string, extVal);
+                        idMap.set(extVal, extVal);
+                    }
+                }
+                parentExtIdBySourceId.set(o.sobject, idMap);
+                emit(`  ✓ Loaded ${idMap.size / 2} ExternalId mappings for '${o.sobject}' from target org`, "success");
+            } catch (e: any) {
+                emit(`  ⚠ Could not query ExternalId mapping for '${o.sobject}' from target org: ${e?.message ?? String(e)} — relationship columns will fall back to source SF IDs`, "warn");
+            }
+        }
+    }
 
     let tracking = readTracking(workspaceRoot, targetOrg);
     let totalLoaded = 0, totalFailed = 0, totalSkipped = 0, totalBlocked = 0;
@@ -1211,8 +1361,13 @@ async function loadDataImpl(
             const toLoad: Record<string, any>[] = [];
             for (const rec of batch) {
                 const srcId = String(rec.Id ?? "");
-                if (tracking[obj.sobject][srcId]?.status === "created") {
+                const status = tracking[obj.sobject][srcId]?.status;
+                if (status === "created") {
                     objStatusMap.get(obj.sobject)!.alreadyDone++;
+                } else if (options?.retryFailedOnly && status === "skipped") {
+                    // "Retry Failed" should not re-attempt records the user explicitly skipped
+                    objStatusMap.get(obj.sobject)!.skipped++;
+                    totalSkipped++;
                 } else {
                     toLoad.push(rec);
                 }
@@ -1246,9 +1401,9 @@ async function loadDataImpl(
                     s.failed  += failed;
                 },
                 config.batchSize,
+                parentExtIdBySourceId,
             );
 
-            writeTracking(workspaceRoot, targetOrg, tracking);
             onProgress(buildProgressEvent(obj, objIdx, batchIdx, batches.length, toLoad.length, batch.length));
         }
 
@@ -1338,6 +1493,7 @@ async function loadBatch(
     emit: LogFn,
     onCount: (created: number, updated: number, failed: number) => void,
     maxBatchSize: number,
+    parentExtIdBySourceId?: Map<string, Map<string, string>>,
 ): Promise<void> {
     if (!obj.externalIdField) {
         emit(`✗ ${obj.sobject}: no externalIdField configured — skipping batch`, "error");
@@ -1373,12 +1529,12 @@ async function loadBatch(
 
     if (records.length > maxBatchSize) {
         const half = Math.ceil(records.length / 2);
-        await loadBatch(obj, records.slice(0, half), targetOrg, workspaceRoot, tmpDir, tracking, referenceFields, objByName, emit, onCount, maxBatchSize);
-        await loadBatch(obj, records.slice(half),    targetOrg, workspaceRoot, tmpDir, tracking, referenceFields, objByName, emit, onCount, maxBatchSize);
+        await loadBatch(obj, records.slice(0, half), targetOrg, workspaceRoot, tmpDir, tracking, referenceFields, objByName, emit, onCount, maxBatchSize, parentExtIdBySourceId);
+        await loadBatch(obj, records.slice(half),    targetOrg, workspaceRoot, tmpDir, tracking, referenceFields, objByName, emit, onCount, maxBatchSize, parentExtIdBySourceId);
         return;
     }
 
-    const csv = buildUpsertCsv(records, obj, referenceFields, objByName);
+    const csv = buildUpsertCsv(records, obj, referenceFields, objByName, parentExtIdBySourceId);
     if (!csv) { return; }
 
     const csvPath = path.join(tmpDir, `${safeOrgName(obj.sobject)}-${Date.now()}.csv`);
@@ -1455,8 +1611,8 @@ async function loadBatch(
     if (limitException && records.length > 1) {
         const half = Math.ceil(records.length / 2);
         emit(`Governor limit hit for ${obj.sobject} batch of ${records.length} — splitting`, "warn");
-        await loadBatch(obj, records.slice(0, half), targetOrg, workspaceRoot, tmpDir, tracking, referenceFields, objByName, emit, onCount, maxBatchSize);
-        await loadBatch(obj, records.slice(half),    targetOrg, workspaceRoot, tmpDir, tracking, referenceFields, objByName, emit, onCount, maxBatchSize);
+        await loadBatch(obj, records.slice(0, half), targetOrg, workspaceRoot, tmpDir, tracking, referenceFields, objByName, emit, onCount, maxBatchSize, parentExtIdBySourceId);
+        await loadBatch(obj, records.slice(half),    targetOrg, workspaceRoot, tmpDir, tracking, referenceFields, objByName, emit, onCount, maxBatchSize, parentExtIdBySourceId);
         return;
     }
 
@@ -1793,11 +1949,11 @@ export async function validateMigration(
         const tgt = o.targetCount !== null ? String(o.targetCount) : "?";
         const status = o.targetCount === null ? "⚠ query failed"
             : o.match ? "✓ match"
-            : o.discrepancy > 0 ? `+${o.discrepancy} in target (not tracked)`
+            : o.discrepancy > 0 ? `+${o.discrepancy} in target (loaded outside this tool or from a prior session — not a failure)`
             : `${o.discrepancy} missing from target`;
         emit(
             `${o.sobject.padEnd(colW)}  ${String(o.trackingCreated).padStart(9)}  ${tgt.padStart(8)}  ${status}`,
-            o.targetCount === null ? "warn" : o.match ? "success" : "error",
+            o.targetCount === null ? "warn" : o.match ? "success" : o.discrepancy > 0 ? "warn" : "error",
         );
     }
     emit("─".repeat(colW + 32), "info");

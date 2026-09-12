@@ -30,7 +30,9 @@ function countSeedRecords(seedDir: string, sobject: string): number {
     if (!fs.existsSync(fp)) { return 0; }
     try {
         const data = JSON.parse(fs.readFileSync(fp, "utf-8"));
-        return Array.isArray(data.records) ? data.records.length : 0;
+        // Match readSeedRecords in DataMigrationEngine: handle both {records:[]} and bare []
+        const records = Array.isArray(data.records) ? data.records : Array.isArray(data) ? data : [];
+        return records.length;
     } catch {
         return 0;
     }
@@ -392,7 +394,7 @@ export class DataMigrationPanel {
                 case "retryFailed": {
                     const cfg = readDmConfig(this._workspaceRoot);
                     this._config = cfg;
-                    await this._startLoad(msg.targetOrg, false, msg.sobject);
+                    await this._startLoad(msg.targetOrg, false, msg.sobject, true);
                     break;
                 }
 
@@ -722,7 +724,7 @@ export class DataMigrationPanel {
         }
     }
 
-    private async _startLoad(targetOrg: string, dryRun: boolean, sobject?: string): Promise<void> {
+    private async _startLoad(targetOrg: string, dryRun: boolean, sobject?: string, retryFailedOnly = false): Promise<void> {
         this._currentOpSobject = sobject;
         this._currentOpType = "load";
         this._loadState = "running";
@@ -736,7 +738,7 @@ export class DataMigrationPanel {
         const sourceOrg = getSourceOrg(this._ctx) || undefined;
         this._refresh();
         try {
-            await loadData(targetOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, objectFilter: sobject ? [sobject] : undefined, sourceOrg });
+            await loadData(targetOrg, this._workspaceRoot, this._config, onLog, onProgress, ctrl, { dryRun, objectFilter: sobject ? [sobject] : undefined, sourceOrg, retryFailedOnly });
             if (!dryRun) {
                 try {
                     const report = await validateMigration(targetOrg, this._workspaceRoot, this._config, onLog);
