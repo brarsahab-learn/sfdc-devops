@@ -85,6 +85,10 @@ function stateOf(ctrl) {
 function activeObjects(config) {
     return config.objects.filter(o => o.active).sort((a, b) => a.order - b.order);
 }
+// Write tracking every TRACKING_FLUSH_INTERVAL batches. Per-batch is too expensive for large
+// migrations; per-object risks losing a full object's progress on crash. Every 10 batches
+// means at most ~1900 records (at default 190 batch size) are re-processed after a crash.
+const TRACKING_FLUSH_INTERVAL = 10;
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -283,12 +287,13 @@ async function pullData(sourceOrg, workspaceRoot, config, onLog, onProgress, con
     const pulledObjects = [];
     const dependencyGraph = {};
     const referenceFieldsMap = {};
-    for (let i = 0; i < objects.length; i++) {
-        if (ctrl.state === "cancelled") {
-            break;
-        }
-        const obj = objects[i];
-        onLog(`Pulling ${obj.sobject} (${i + 1}/${objects.length})...`, "info");
+    // Track per-object status for progress reporting across concurrent pulls
+    const objPullStatus = new Map(objects.map(o => [o.sobject, "pending"]));
+    let objectsDone = 0;
+    // Pull one object — extracted so it can be called concurrently within a level.
+    const pullOne = async (obj) => {
+        objPullStatus.set(obj.sobject, "running");
+        onLog(`Pulling ${obj.sobject}...`, "info");
         let query = obj.query?.trim() || `SELECT Id FROM ${obj.sobject}`;
         const selectPart = query.match(/^SELECT\s+([\s\S]+?)\s+FROM\b/i)?.[1] ?? "";
         const topFields = selectPart.split(",").map(f => f.trim().split(/\s+/)[0].toLowerCase());
@@ -362,24 +367,26 @@ async function pullData(sourceOrg, workspaceRoot, config, onLog, onProgress, con
                 break;
             }
         }
+        objectsDone++;
         if (!pullSuccess) {
+            objPullStatus.set(obj.sobject, "skipped");
             const elapsed = Date.now() - startMs;
             onProgress({
                 phase: "pull", currentObject: obj.sobject,
-                objectIndex: i + 1, objectCount: objects.length,
+                objectIndex: objectsDone, objectCount: objects.length,
                 batchIndex: 1, batchCount: 1,
-                recordsDone: i + 1, recordsTotal: objects.length,
+                recordsDone: objectsDone, recordsTotal: objects.length,
                 recordsCreated: pulledObjects.length,
-                recordsFailed: (i + 1) - pulledObjects.length,
+                recordsFailed: objectsDone - pulledObjects.length,
                 recordsSkipped: 0,
-                objectStatuses: objects.map((o, idx) => ({
+                objectStatuses: objects.map(o => ({
                     sobject: o.sobject,
-                    status: idx < i ? "done" : idx === i ? "skipped" : "pending",
+                    status: (objPullStatus.get(o.sobject) ?? "pending"),
                     created: 0, total: 1,
                 })),
                 elapsedMs: elapsed, estimatedRemainingMs: 0,
             });
-            continue;
+            return;
         }
         if (!options?.dryRun) {
             const rtIds = [...new Set(records.filter(r => r.RecordTypeId && typeof r.RecordTypeId === "string")
@@ -396,7 +403,9 @@ async function pullData(sourceOrg, workspaceRoot, config, onLog, onProgress, con
         const seedFile = path.join(seedDir, `${obj.sobject}.json`);
         fs.writeFileSync(seedFile, JSON.stringify({ records }, null, 2), "utf-8");
         onLog(`✓ Pulled ${obj.sobject}: ${records.length} record${records.length !== 1 ? "s" : ""}`, "success");
+        // pulledObjects is shared but JS is single-threaded — push is safe across concurrent async tasks
         pulledObjects.push(obj.sobject);
+        objPullStatus.set(obj.sobject, "done");
         if (!options?.dryRun) {
             const refFields = await getReferenceFields(obj.sobject, sourceOrg, workspaceRoot);
             referenceFieldsMap[obj.sobject] = refFields;
@@ -409,23 +418,62 @@ async function pullData(sourceOrg, workspaceRoot, config, onLog, onProgress, con
             dependencyGraph[obj.sobject] = obj.dependsOn ?? [];
         }
         const elapsedMs = Date.now() - startMs;
-        const remaining = objects.length - (i + 1);
-        const estimatedRemainingMs = i > 0 ? Math.round((elapsedMs / (i + 1)) * remaining) : 0;
+        const remaining = Math.max(0, objects.length - objectsDone);
+        const estimatedRemainingMs = objectsDone > 0 ? Math.round((elapsedMs / objectsDone) * remaining) : 0;
         onProgress({
             phase: "pull", currentObject: obj.sobject,
-            objectIndex: i + 1, objectCount: objects.length,
+            objectIndex: objectsDone, objectCount: objects.length,
             batchIndex: 1, batchCount: 1,
-            recordsDone: i + 1, recordsTotal: objects.length,
+            recordsDone: objectsDone, recordsTotal: objects.length,
             recordsCreated: pulledObjects.length,
-            recordsFailed: (i + 1) - pulledObjects.length,
+            recordsFailed: objectsDone - pulledObjects.length,
             recordsSkipped: 0,
-            objectStatuses: objects.map((o, idx) => ({
+            objectStatuses: objects.map(o => ({
                 sobject: o.sobject,
-                status: idx < i ? "done" : idx === i ? "running" : "pending",
-                created: idx <= i ? 1 : 0, total: 1,
+                status: (objPullStatus.get(o.sobject) ?? "pending"),
+                created: objPullStatus.get(o.sobject) === "done" ? 1 : 0, total: 1,
             })),
             elapsedMs, estimatedRemainingMs,
         });
+    };
+    // Group objects into dependency levels so objects with no inter-dependency can pull in parallel.
+    // Build initial deps from config.dependsOn; refine after each level using the describe data.
+    const objectSet = new Set(objects.map(o => o.sobject));
+    const levelDeps = new Map(objects.map(o => [o.sobject, new Set((o.dependsOn ?? []).filter(d => objectSet.has(d)))]));
+    const launched = new Set();
+    const completed = new Set();
+    while (launched.size < objects.length) {
+        if (stateOf(ctrl) === "cancelled") {
+            break;
+        }
+        // Find objects whose dependencies are all already completed
+        const ready = objects.filter(o => !launched.has(o.sobject) &&
+            [...(levelDeps.get(o.sobject) ?? [])].every(d => completed.has(d)));
+        if (ready.length === 0) {
+            // Cycle or everything already launched — fall back to remaining unlaunched objects
+            const remaining = objects.filter(o => !launched.has(o.sobject));
+            if (remaining.length === 0) {
+                break;
+            }
+            onLog(`⚠  Dependency cycle detected — pulling remaining objects sequentially: ${remaining.map(o => o.sobject).join(", ")}`, "warn");
+            for (const obj of remaining) {
+                if (stateOf(ctrl) === "cancelled") {
+                    break;
+                }
+                launched.add(obj.sobject);
+                await pullOne(obj);
+                completed.add(obj.sobject);
+            }
+            break;
+        }
+        onLog(`Pulling level: ${ready.map(o => o.sobject).join(", ")}${ready.length > 1 ? " (parallel)" : ""}`, "info");
+        for (const o of ready) {
+            launched.add(o.sobject);
+        }
+        await Promise.all(ready.map(obj => pullOne(obj)));
+        for (const o of ready) {
+            completed.add(o.sobject);
+        }
     }
     if (!options?.dryRun) {
         const planPath = path.join(seedDir, "plan.json");
@@ -627,7 +675,7 @@ function parseCsv(text) {
         return obj;
     });
 }
-function buildUpsertCsv(records, obj, referenceFields, objByName, parentExtIdBySourceId) {
+function buildUpsertCsv(records, obj, referenceFields, objByName, parentExtIdBySourceId, onWarn) {
     if (records.length === 0 || !obj.externalIdField) {
         return "";
     }
@@ -639,7 +687,15 @@ function buildUpsertCsv(records, obj, referenceFields, objByName, parentExtIdByS
         if (rf.field === "RecordTypeId") {
             continue;
         }
-        const parentSobject = rf.referenceTo.find(t => objByName.has(t));
+        // Polymorphic check: warn when multiple types in referenceTo are in the migration set.
+        // We can only map to one parent type in the relationship column — records pointing to
+        // the non-first type will have their lookup left blank (null in target).
+        const managedTypes = rf.referenceTo.filter(t => objByName.has(t));
+        if (managedTypes.length > 1 && onWarn) {
+            onWarn(`Polymorphic field '${rf.field}' on ${obj.sobject} references multiple migrated types: [${managedTypes.join(", ")}]. ` +
+                `Only '${managedTypes[0]}' will be resolved via the relationship column — records pointing to other types will have this field set to null in the target.`);
+        }
+        const parentSobject = managedTypes[0];
         if (!parentSobject) {
             continue;
         }
@@ -778,12 +834,16 @@ async function fetchBulkJobAllResults(jobId, targetOrg, tmpDir, extField, emit) 
         return null;
     }
 }
-function readSeedRecords(seedDir, sobject) {
+function readSeedRecords(seedDir, sobject, onWarn) {
     const fp = path.join(seedDir, `${sobject}.json`);
     if (!fs.existsSync(fp)) {
         return [];
     }
     try {
+        const fileSizeMb = fs.statSync(fp).size / (1024 * 1024);
+        if (fileSizeMb > 50 && onWarn) {
+            onWarn(`⚠ Seed file for ${sobject} is ${fileSizeMb.toFixed(0)} MB — this entire file loads into memory. Consider narrowing your SOQL query or splitting the migration into smaller subsets.`);
+        }
         const raw = JSON.parse(fs.readFileSync(fp, "utf-8"));
         const records = (raw?.records ?? (Array.isArray(raw) ? raw : []));
         // Normalize nested RecordType sub-object (from SOQL relationship queries like
@@ -977,6 +1037,15 @@ async function loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress,
         try {
             const plan = JSON.parse(fs.readFileSync(planPath, "utf-8"));
             planRefFields = plan.referenceFields ?? {};
+            // Warn when plan.json is stale — reference fields may reflect a schema that no
+            // longer matches the target org, causing wrong relationship columns at load time.
+            if (typeof plan.generatedAt === "string") {
+                const ageDays = (Date.now() - new Date(plan.generatedAt).getTime()) / 86400000;
+                if (ageDays > 7) {
+                    onLog(`⚠  plan.json was generated ${Math.round(ageDays)} days ago (${plan.generatedAt}). ` +
+                        `If the object schema changed since then, relationship fields may be incorrect — consider re-pulling to regenerate it.`, "warn");
+                }
+            }
         }
         catch { /* ignore */ }
     }
@@ -1071,6 +1140,21 @@ async function loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress,
         }
     }
     emit(`Load order: ${objectList.map(o => o.sobject).join(" → ")}`, "info");
+    // Pre-flight: warn about self-referential objects. These have a lookup to themselves
+    // (e.g. Account.ParentId → Account). Records that mutually reference each other cannot
+    // be resolved in a single pass — they require a two-step load: first without the lookup
+    // field, then a second load patching only the lookup field.
+    if (!dryRun) {
+        for (const obj of objectList) {
+            const deps = obj.dependsOn ?? [];
+            if (deps.includes(obj.sobject)) {
+                emit(`⚠  '${obj.sobject}' has a self-referential lookup (it depends on itself). ` +
+                    `Records with circular parent-child references cannot be resolved in one pass. ` +
+                    `Recommended: (1) remove the self-referential field from the SOQL query, load all records, ` +
+                    `(2) then run a second load using a SOQL that selects only Id + the lookup field to patch the references.`, "warn");
+            }
+        }
+    }
     // Pre-flight: warn when a dependency's seed file is absent. Relationship columns for that
     // parent will fall back to source SF IDs, which likely won't resolve in the target org.
     if (!dryRun) {
@@ -1081,6 +1165,29 @@ async function loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress,
                 if (!fs.existsSync(depSeedPath)) {
                     emit(`⚠  Seed file for dependency '${dep}' (required by '${obj.sobject}') is missing. ` +
                         `Relationship fields pointing to '${dep}' will use source SF IDs — load will likely fail with INVALID_CROSS_REFERENCE_KEY unless '${dep}' was already migrated with matching ExternalId values. Pull '${dep}' first to resolve this.`, "warn");
+                }
+            }
+        }
+    }
+    // Pre-flight: warn about system-type reference fields (OwnerId, CreatedById, etc.) present
+    // in seed data. These hold source org SF IDs that almost certainly don't exist in the target.
+    // The field is treated as a direct column (User/Group not in migration set), so Bulk API
+    // receives a source SF ID that fails silently or causes "INVALID_CROSS_REFERENCE_KEY".
+    const SYSTEM_TYPES = new Set(["User", "Group", "Profile", "Role", "UserRole", "DelegatedAccount"]);
+    if (!dryRun) {
+        for (const obj of objectList) {
+            const seedRecordsForCheck = readSeedRecords(seedDir, obj.sobject);
+            if (seedRecordsForCheck.length === 0) {
+                continue;
+            }
+            const sampleRecord = seedRecordsForCheck[0];
+            const refFieldsForCheck = planRefFields[obj.sobject] ?? [];
+            for (const rf of refFieldsForCheck) {
+                const isSystemField = rf.referenceTo.every(t => SYSTEM_TYPES.has(t)) && !objByName.has(rf.referenceTo[0]);
+                if (isSystemField && rf.field in sampleRecord && sampleRecord[rf.field]) {
+                    emit(`⚠  Field '${rf.field}' on ${obj.sobject} references a system type (${rf.referenceTo.join("/")}) not in the migration set. ` +
+                        `Its source org SF ID will be sent as-is to the target — remove it from the SOQL query or it will cause failures. ` +
+                        `Exception: OwnerId defaults to the running user when omitted.`, "warn");
                 }
             }
         }
@@ -1114,8 +1221,11 @@ async function loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress,
             try {
                 emit(`ℹ  Seed file absent for '${o.sobject}' — querying target org for ExternalId mapping (cross-run relationship resolution)`, "info");
                 const { stdout } = await (0, SfCli_1.execSf)(["data", "query",
-                    "--query", `SELECT Id, ${o.externalIdField} FROM ${o.sobject} WHERE ${o.externalIdField} != null LIMIT 50000`,
-                    "--target-org", targetOrg, "--json"], { cwd: workspaceRoot, timeout: 120000, maxBuffer: 50 * 1024 * 1024 });
+                    "--query", `SELECT Id, ${o.externalIdField} FROM ${o.sobject} WHERE ${o.externalIdField} != null`,
+                    "--target-org", targetOrg, "--json"], 
+                // sf data query follows nextRecordsUrl automatically — no LIMIT needed.
+                // Allow generous timeout + buffer for large parent objects.
+                { cwd: workspaceRoot, timeout: 300000, maxBuffer: 200 * 1024 * 1024 });
                 const recs = JSON.parse(stdout)?.result?.records ?? [];
                 const idMap = new Map();
                 for (const r of recs) {
@@ -1186,7 +1296,7 @@ async function loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress,
         if (refFields.length === 0 && !dryRun) {
             refFields = await getReferenceFields(obj.sobject, targetOrg, workspaceRoot);
         }
-        const allRecords = readSeedRecords(seedDir, obj.sobject);
+        const allRecords = readSeedRecords(seedDir, obj.sobject, msg => emit(msg, "warn"));
         if (allRecords.length === 0) {
             emit(`No seed records found for ${obj.sobject} — skipping`, "warn");
             objStatusMap.set(obj.sobject, { ...objStatusMap.get(obj.sobject), status: "skipped" });
@@ -1196,7 +1306,8 @@ async function loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress,
             tracking[obj.sobject] = {};
         }
         objStatusMap.get(obj.sobject).total = allRecords.length;
-        const batches = chunkArray(allRecords, config.batchSize);
+        const effectiveBatchSize = obj.batchSize ?? config.batchSize;
+        const batches = chunkArray(allRecords, effectiveBatchSize);
         for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
             if (stateOf(ctrl) === "cancelled") {
                 (0, DataMigrationConfig_1.writeTracking)(workspaceRoot, targetOrg, tracking);
@@ -1254,12 +1365,26 @@ async function loadDataImpl(targetOrg, workspaceRoot, config, onLog, onProgress,
                 s.created += created;
                 s.updated += updated;
                 s.failed += failed;
-            }, config.batchSize, parentExtIdBySourceId);
+            }, effectiveBatchSize, parentExtIdBySourceId);
             onProgress(buildProgressEvent(obj, objIdx, batchIdx, batches.length, toLoad.length, batch.length));
+            if ((batchIdx + 1) % TRACKING_FLUSH_INTERVAL === 0) {
+                (0, DataMigrationConfig_1.writeTracking)(workspaceRoot, targetOrg, tracking);
+            }
         }
         (0, DataMigrationConfig_1.writeTracking)(workspaceRoot, targetOrg, tracking);
         objStatusMap.set(obj.sobject, { ...objStatusMap.get(obj.sobject), status: "done" });
         emit(`✓ ${obj.sobject}: ${summarizeObjectResult(objStatusMap.get(obj.sobject))}`, "success");
+        // Write per-record failure report so users can see exactly which records failed and why.
+        const objFailures = Object.entries(tracking[obj.sobject] ?? {})
+            .filter(([, e]) => e.status === "failed")
+            .map(([srcId, e]) => ({ sourceId: srcId, error: e.error ?? "unknown" }));
+        if (objFailures.length > 0) {
+            const failuresDir = path.join(workspaceRoot, ".git", "sf-devops-dm", "failures", (0, DataMigrationConfig_1.safeOrgName)(targetOrg));
+            fs.mkdirSync(failuresDir, { recursive: true });
+            const failurePath = path.join(failuresDir, `${(0, DataMigrationConfig_1.safeOrgName)(obj.sobject)}.json`);
+            fs.writeFileSync(failurePath, JSON.stringify({ generatedAt: now(), sobject: obj.sobject, targetOrg, failures: objFailures }, null, 2), "utf-8");
+            emit(`  → Failure report: ${failurePath}`, "info");
+        }
     }
     const summaryParts = [`${totalLoaded} pushed`];
     if (totalFailed > 0) {
@@ -1357,7 +1482,13 @@ async function loadBatch(obj, records, targetOrg, workspaceRoot, tmpDir, trackin
         await loadBatch(obj, records.slice(half), targetOrg, workspaceRoot, tmpDir, tracking, referenceFields, objByName, emit, onCount, maxBatchSize, parentExtIdBySourceId);
         return;
     }
-    const csv = buildUpsertCsv(records, obj, referenceFields, objByName, parentExtIdBySourceId);
+    const warnedPolymorphic = new Set();
+    const csv = buildUpsertCsv(records, obj, referenceFields, objByName, parentExtIdBySourceId, msg => {
+        if (!warnedPolymorphic.has(msg)) {
+            warnedPolymorphic.add(msg);
+            emit(`⚠  ${msg}`, "warn");
+        }
+    });
     if (!csv) {
         return;
     }
@@ -1451,7 +1582,7 @@ async function loadBatch(obj, records, targetOrg, workspaceRoot, tmpDir, trackin
             const sourceId = String(records[i].Id ?? `unknown-${i}`);
             const posResult = resultItems[i];
             if (posResult?.success) {
-                tracking[obj.sobject][sourceId] = { status: "created", id: posResult.sfId, at: now() };
+                tracking[obj.sobject][sourceId] = { status: "created", id: posResult.sfId, wasNew: posResult.wasNewRecord, at: now() };
                 if (posResult.wasNewRecord) {
                     batchCreated++;
                 }
@@ -1513,17 +1644,46 @@ async function loadBatch(obj, records, targetOrg, workspaceRoot, tmpDir, trackin
 // ---------------------------------------------------------------------------
 // autoSortByDependencies
 // ---------------------------------------------------------------------------
-async function autoSortByDependencies(targetOrg, workspaceRoot, config, onLog) {
+async function autoSortByDependencies(targetOrg, workspaceRoot, config, onLog, seedDir) {
     const objects = activeObjects(config);
     const sobjectNames = new Set(objects.map(o => o.sobject));
     // ------------------------------------------------------------------
-    // Pass A: schema-based dependency discovery (5-concurrent)
+    // Pass A: use plan.json referenceFields when available (avoids re-describe)
     // ------------------------------------------------------------------
     const schemaDeps = new Map();
     for (const o of objects) {
         schemaDeps.set(o.sobject, new Set());
     }
-    const describeChunks = chunkArray(objects, 5);
+    let planRefFields = {};
+    if (seedDir) {
+        const planPath = path.join(seedDir, "plan.json");
+        if (fs.existsSync(planPath)) {
+            try {
+                const plan = JSON.parse(fs.readFileSync(planPath, "utf-8"));
+                planRefFields = plan.referenceFields ?? {};
+                onLog(`ℹ  Using reference fields from plan.json — skipping describe for objects already in plan`, "info");
+            }
+            catch { /* fall through to describe */ }
+        }
+    }
+    // Objects whose deps are already known from plan.json
+    for (const obj of objects) {
+        const planFields = planRefFields[obj.sobject];
+        if (planFields && planFields.length > 0) {
+            const deps = new Set();
+            for (const rf of planFields) {
+                for (const ref of rf.referenceTo) {
+                    if (sobjectNames.has(ref) && ref !== obj.sobject) {
+                        deps.add(ref);
+                    }
+                }
+            }
+            schemaDeps.set(obj.sobject, deps);
+        }
+    }
+    // Objects not covered by plan.json — describe from target org (5-concurrent)
+    const needsDescribe = objects.filter(o => !planRefFields[o.sobject]);
+    const describeChunks = chunkArray(needsDescribe, 5);
     for (const chunk of describeChunks) {
         const results = await Promise.allSettled(chunk.map(async (obj) => {
             try {
@@ -1771,11 +1931,19 @@ async function rollbackData(targetOrg, workspaceRoot, config, onLog, options) {
     let deleteFailed = 0;
     for (const obj of objects) {
         const objTracking = tracking[obj.sobject] ?? {};
-        const createdEntries = Object.entries(objTracking).filter(([, e]) => e.status === "created" && e.id);
+        // Only delete records this tool genuinely inserted (wasNew: true).
+        // wasNew === false means the upsert matched a pre-existing record — deleting those
+        // would destroy data that existed before the migration. Entries from before wasNew
+        // was introduced (wasNew undefined) are treated conservatively as inserts.
+        const createdEntries = Object.entries(objTracking).filter(([, e]) => e.status === "created" && e.id && e.wasNew !== false);
+        const updatedOnlyCount = Object.values(objTracking).filter(e => e.status === "created" && e.wasNew === false).length;
         if (createdEntries.length === 0) {
+            if (updatedOnlyCount > 0) {
+                onLog(`Skipping ${obj.sobject}: ${updatedOnlyCount} record(s) were updated (not inserted) — rollback skips these to avoid deleting pre-existing data`, "info");
+            }
             continue;
         }
-        onLog(`Rolling back ${obj.sobject}: ${createdEntries.length} record(s)`, "info");
+        onLog(`Rolling back ${obj.sobject}: ${createdEntries.length} inserted record(s)${updatedOnlyCount > 0 ? ` (skipping ${updatedOnlyCount} updated-only)` : ""}`, "info");
         if (dryRun) {
             onLog(`[dry-run] Would delete ${createdEntries.length} ${obj.sobject} records`, "info");
             continue;

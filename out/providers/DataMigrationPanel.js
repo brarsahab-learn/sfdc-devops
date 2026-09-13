@@ -192,6 +192,34 @@ class DataMigrationPanel {
                             this._panel.webview.postMessage({ command: "logLine", text: "Invalid seedDir: must be inside the workspace.", level: "error" });
                             break;
                         }
+                        // Validate each configured object before saving
+                        const validApiName = /^[A-Za-z][A-Za-z0-9_]*(__[a-zA-Z]+)?$/;
+                        const validFieldName = /^[A-Za-z][A-Za-z0-9_]*(__[a-zA-Z]+)?$/;
+                        const configErrors = [];
+                        for (const obj of incomingConfig.objects ?? []) {
+                            if (!obj.sobject || !validApiName.test(obj.sobject)) {
+                                configErrors.push(`Object "${obj.sobject || "(empty)"}" has an invalid API name — must be alphanumeric with underscores (e.g. Account, Custom_Object__c).`);
+                            }
+                            const q = (obj.query ?? "").trim().toUpperCase();
+                            if (!q.startsWith("SELECT") || !q.includes(" FROM ")) {
+                                configErrors.push(`Object "${obj.sobject}": query must be a valid SOQL SELECT statement (e.g. SELECT Id, Name FROM Account).`);
+                            }
+                            if (obj.externalIdField && !validFieldName.test(obj.externalIdField)) {
+                                configErrors.push(`Object "${obj.sobject}": externalIdField "${obj.externalIdField}" is not a valid field API name.`);
+                            }
+                            if (obj.batchSize !== undefined && (typeof obj.batchSize !== "number" || obj.batchSize < 1 || obj.batchSize > 10000)) {
+                                configErrors.push(`Object "${obj.sobject}": batchSize must be a number between 1 and 10000.`);
+                            }
+                        }
+                        if (typeof incomingConfig.batchSize === "number" && (incomingConfig.batchSize < 1 || incomingConfig.batchSize > 10000)) {
+                            configErrors.push(`Global batchSize must be between 1 and 10000.`);
+                        }
+                        if (configErrors.length > 0) {
+                            for (const err of configErrors) {
+                                this._panel.webview.postMessage({ command: "logLine", text: `Config error: ${err}`, level: "error" });
+                            }
+                            break;
+                        }
                         (0, DataMigrationConfig_1.writeDmConfig)(this._workspaceRoot, incomingConfig);
                         this._config = incomingConfig;
                         this._refresh();
@@ -245,7 +273,10 @@ class DataMigrationPanel {
                         }
                         await this._runExtBusy("Auto-sorting…", async () => {
                             let cfg = (0, DataMigrationConfig_1.readDmConfig)(this._workspaceRoot);
-                            cfg = await (0, DataMigrationEngine_1.autoSortByDependencies)(msg.targetOrg, this._workspaceRoot, cfg, () => { });
+                            const sourceOrg = (0, DataMigrationConfig_1.getSourceOrg)(this._ctx) || undefined;
+                            const seedBase = path.resolve(this._workspaceRoot, cfg.seedDir);
+                            const seedDirForSort = sourceOrg ? path.join(seedBase, (0, DataMigrationConfig_1.safeOrgName)(sourceOrg)) : seedBase;
+                            cfg = await (0, DataMigrationEngine_1.autoSortByDependencies)(msg.targetOrg, this._workspaceRoot, cfg, () => { }, seedDirForSort);
                             (0, DataMigrationConfig_1.writeDmConfig)(this._workspaceRoot, cfg);
                             this._config = cfg;
                         });
