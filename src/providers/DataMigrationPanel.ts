@@ -1299,7 +1299,9 @@ export class DataMigrationPanel {
 
         // ── Tab 4: Tracking ──────────────────────────────────────────────────
         const renderTrackingTab = () => {
-            const seedDir = path.resolve(this._workspaceRoot, config.seedDir);
+            const seedBase = path.resolve(this._workspaceRoot, config.seedDir);
+            // Seed files are stored per-source-org (mirrors resolvedSeedDir in the engine)
+            const seedDir = sourceOrg ? path.join(seedBase, safeOrgName(sourceOrg)) : seedBase;
             const trackMap = tracking ?? {};
 
             // Org selector: pipeline orgs + tracked orgs + availableOrgs (deduplicated)
