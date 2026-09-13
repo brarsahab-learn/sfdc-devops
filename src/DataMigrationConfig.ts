@@ -13,6 +13,7 @@ export interface DmObjectConfig {
     order:            number;
     dependsOn?:       string[];
     externalIdField?: string;
+    batchSize?:       number; // overrides config.batchSize for this object (e.g. for wide records)
 }
 
 export interface DmConfig {
@@ -108,6 +109,7 @@ export interface TrackingEntry {
     status:   TrackingStatus;
     id?:      string;
     error?:   string;
+    wasNew?:  boolean; // true = inserted by this tool; false = upsert matched existing record
     at:       string;
 }
 
