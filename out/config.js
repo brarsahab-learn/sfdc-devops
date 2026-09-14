@@ -41,6 +41,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.initOrgAliasStore = initOrgAliasStore;
 exports.ensureOrgAliasMigration = ensureOrgAliasMigration;
 exports.getBaseBranch = getBaseBranch;
+exports.saveBaseBranch = saveBaseBranch;
 exports.getDevBranch = getDevBranch;
 exports.getFeatureBranchTemplate = getFeatureBranchTemplate;
 exports.getPromotionBranchTemplate = getPromotionBranchTemplate;
@@ -162,6 +163,12 @@ async function writeOrgAlias(key, alias) {
 // ── Branch naming ────────────────────────────────────────────────────────────
 function getBaseBranch() {
     return cfg().get("baseBranch") || "main";
+}
+async function saveBaseBranch(branch) {
+    const target = vscode.workspace.workspaceFolders?.length
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global;
+    await vscode.workspace.getConfiguration("sfDevops").update("baseBranch", branch || "main", target);
 }
 /**
  * The branch the first configured environment publishes to (legacy "dev"). Prefers the

@@ -96,6 +96,9 @@ class AdminPanel {
                 case "saveEnvironments":
                     await this._saveEnvironments(msg.envs);
                     break;
+                case "saveBaseBranch":
+                    await this._saveBaseBranch(msg.branch);
+                    break;
                 case "openTerminal":
                     vscode.window.createTerminal("Salesforce-DevOps").show();
                     break;
@@ -109,6 +112,20 @@ class AdminPanel {
         this._panel.dispose();
         while (this._disposables.length) {
             this._disposables.pop()?.dispose();
+        }
+    }
+    async _saveBaseBranch(branch) {
+        const role = (0, RoleManager_2.getEffectiveRole)(this._ctx);
+        if (!(0, RoleManager_1.canAccessConfig)(role)) {
+            return;
+        }
+        try {
+            await (0, config_1.saveBaseBranch)(branch.trim());
+            vscode.window.showInformationMessage(`Default branch set to "${branch.trim() || "main"}".`);
+            await this._refresh();
+        }
+        catch (err) {
+            vscode.window.showErrorMessage(`Could not save default branch: ${err}`);
         }
     }
     async _saveEnvironments(envs) {
@@ -135,9 +152,10 @@ class AdminPanel {
             const checks = await (0, SetupCheck_1.runSetupChecks)(this._git, this._bb, this._ctx, role);
             const slots = (0, config_1.getOrgAliasSlots)();
             const envs = (0, config_1.getEnvironments)();
+            const baseBranch = (0, config_1.getBaseBranch)();
             const sizeKb = Math.round(await this._git.getAuditLogSizeBytes() / 1024);
             const retentionDays = (0, config_1.getAuditLogRetentionDays)();
-            this._panel.webview.html = this._renderHtml(checks, slots, envs, role, sizeKb, retentionDays);
+            this._panel.webview.html = this._renderHtml(checks, slots, envs, baseBranch, role, sizeKb, retentionDays);
         }
         catch (err) {
             this._panel.webview.html = `<body style="padding:20px;font-family:sans-serif;color:#f48771">Error: ${String(err)}</body>`;
@@ -175,7 +193,7 @@ class AdminPanel {
     _loadingHtml() {
         return (0, shared_1.loadingHtml)("Checking setup…");
     }
-    _renderHtml(checks, slots, envs, role, auditSizeKb, retentionDays) {
+    _renderHtml(checks, slots, envs, baseBranch, role, auditSizeKb, retentionDays) {
         const isAdmin = (0, RoleManager_1.canAccessConfig)(role);
         const failing = checks.filter(c => c.required && !c.passed).length;
         // Serialize environments for the webview (strip resolved-only fields; keep editable ones)
@@ -248,6 +266,13 @@ ol.fix { margin: 5px 0 0 24px; padding-left: 16px; font-size: 12px; color: var(-
 .opt { font-size: 11px; font-weight: normal; color: var(--vscode-descriptionForeground); }
 .cb-cell { display: flex; gap: 10px; align-items: center; }
 .cb-label { font-size: 11px; color: var(--vscode-descriptionForeground); display: flex; align-items: center; gap: 3px; white-space: nowrap; }
+.et-id { font-size: 11px; padding: 2px 6px; border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 3px; background: var(--vscode-input-background); color: var(--vscode-descriptionForeground); width: 100%; min-width: 50px; margin-top: 3px; }
+.default-branch-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+.default-branch-row label { font-size: 12px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
+.default-branch-row input { width: 160px; }
+.collapsible-h2 { display: flex; align-items: center; gap: 6px; }
+.collapsible-h2 span { font-size: 11px; transition: transform 0.15s; display: inline-block; }
+.collapsible-h2.collapsed span { transform: rotate(-90deg); }
 </style>
 </head>
 <body>
@@ -262,8 +287,12 @@ ol.fix { margin: 5px 0 0 24px; padding-left: 16px; font-size: 12px; color: var(-
 
 ${statusBanner}
 
-<h2>Setup Checks</h2>
+<h2 class="collapsible-h2" onclick="toggleSection('setupChecks', this)" style="cursor:pointer;user-select:none">
+  <span id="setupChecksArrow">▼</span> Setup Checks
+</h2>
+<div id="setupChecks">
 ${checkRows}
+</div>
 
 <h2>Org Aliases</h2>
 <p style="font-size:12px;color:var(--muted);margin:0 0 8px">
@@ -274,15 +303,22 @@ ${slotRows}
 
 <h2>Pipeline / Branch Setup</h2>
 <p style="font-size:12px;color:var(--muted);margin:0 0 10px">
-  Define the promotion pipeline in order. The first stage is where feature branches publish directly; all later stages require a promotion PR.
+  Define the promotion pipeline in order. New stories are cut from the <strong>Default Branch</strong>; the first stage is where feature branches publish directly; all later stages require a promotion PR.
   ${isAdmin ? "Changes save to <code>.vscode/settings.json</code>." : "<strong>Admin access required to edit.</strong>"}
 </p>
+<div class="default-branch-row">
+  <label>Default branch (new stories cut from):</label>
+  ${isAdmin
+            ? `<input class="et-input" id="defaultBranchInput" value="${escapeHtml(baseBranch)}" placeholder="main" style="width:160px">
+       <button class="btn btn-sm" onclick="saveDefaultBranch()">Save</button>
+       <span id="defaultBranchMsg" style="font-size:11px;color:var(--ok);display:none">Saved ✓</span>`
+            : `<code>${escapeHtml(baseBranch)}</code>`}
+</div>
 ${isAdmin ? `
 <table class="env-table" id="envTable">
   <thead><tr>
     <th style="width:44px"></th>
-    <th>Name <span style="font-weight:normal;color:var(--muted)">(ID)</span></th>
-    <th>Label</th>
+    <th>Name</th>
     <th>Branch</th>
     <th>Required Role</th>
     <th>Test Level</th>
@@ -298,10 +334,9 @@ ${isAdmin ? `
   <span id="saveMsg" style="font-size:11px;color:var(--ok);display:none">Saved ✓</span>
 </div>` : `
 <table class="env-table">
-  <thead><tr><th>Name</th><th>Label</th><th>Branch</th><th>Required Role</th><th>Test Level</th><th>Gates</th><th>Flags</th></tr></thead>
+  <thead><tr><th>Name</th><th>Branch</th><th>Required Role</th><th>Test Level</th><th>Gates</th><th>Flags</th></tr></thead>
   <tbody>${envs.map(e => `<tr>
-    <td>${escapeHtml(e.name)}</td>
-    <td>${escapeHtml(e.label)}</td>
+    <td><span style="font-size:12px">${escapeHtml(e.label)}</span><br><span style="font-size:10px;color:var(--vscode-descriptionForeground)">${escapeHtml(e.name)}</span></td>
     <td><code>${escapeHtml(e.branch)}</code></td>
     <td>${escapeHtml(e.requiredRole ?? "Any")}</td>
     <td style="font-size:11px">${escapeHtml(e.deployTestLevel)}</td>
@@ -341,6 +376,14 @@ ${isAdmin ? `
     vscode.postMessage({ command: 'setOrgAlias', key: key, alias: val });
   }
 
+  function toggleSection(id, header) {
+    var el = document.getElementById(id);
+    if (!el) { return; }
+    var collapsed = el.style.display === 'none';
+    el.style.display = collapsed ? '' : 'none';
+    if (collapsed) { header.classList.remove('collapsed'); } else { header.classList.add('collapsed'); }
+  }
+
   /* ── Pipeline / Branch editor ── */
   var envs = (function() {
     try { return JSON.parse(document.getElementById('__sfdo-env-data__').textContent).map(function(e) { return Object.assign({}, e); }); }
@@ -368,8 +411,10 @@ ${isAdmin ? `
       +   '<button class="order-btn" data-action="up" data-row="' + i + '"' + upDis + ' title="Move up">▲</button> '
       +   '<button class="order-btn" data-action="dn" data-row="' + i + '"' + dnDis + ' title="Move down">▼</button>'
       + '</td>'
-      + '<td><input class="et-input" data-field="name" data-row="' + i + '" value="' + hesc(e.name) + '" placeholder="dev"></td>'
-      + '<td><input class="et-input" data-field="label" data-row="' + i + '" value="' + hesc(e.label) + '" placeholder="DEV"></td>'
+      + '<td>'
+      +   '<input class="et-input" data-field="label" data-row="' + i + '" value="' + hesc(e.label) + '" placeholder="DEV">'
+      +   '<input class="et-id" data-field="name" data-row="' + i + '" value="' + hesc(e.name) + '" placeholder="dev">'
+      + '</td>'
       + '<td><input class="et-input" data-field="branch" data-row="' + i + '" value="' + hesc(e.branch) + '" placeholder="dev"></td>'
       + '<td><select class="et-select" data-field="requiredRole" data-row="' + i + '">' + roleOpts + '</select></td>'
       + '<td><select class="et-select" data-field="deployTestLevel" data-row="' + i + '">' + testOpts + '</select></td>'
@@ -437,6 +482,13 @@ ${isAdmin ? `
     if (body && body.lastElementChild) {
       body.lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
+  }
+
+  function saveDefaultBranch() {
+    var val = (document.getElementById('defaultBranchInput').value || '').trim() || 'main';
+    vscode.postMessage({ command: 'saveBaseBranch', branch: val });
+    var msg = document.getElementById('defaultBranchMsg');
+    if (msg) { msg.style.display = 'inline'; setTimeout(function() { msg.style.display = 'none'; }, 2500); }
   }
 
   function saveEnvs() {
