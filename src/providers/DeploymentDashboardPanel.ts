@@ -208,6 +208,17 @@ export class DeploymentDashboardPanel {
             }
             groups = groupChangesByStory(commits, filesByHash);
             allFiles = dedupe(groups.flatMap(g => g.files));
+
+            // Stories marked inactive in the Story Pipeline panel are done/abandoned work —
+            // never surface (or let the user deploy) their changes here. A file only drops
+            // out of allFiles if every group touching it is inactive; a file shared with a
+            // still-active story stays visible under that story.
+            const inactiveStories = await this._gitHelper.getInactiveStories();
+            if (inactiveStories.size > 0) {
+                groups = groups.filter(g => !inactiveStories.has(g.storyId));
+                const activePaths = new Set(groups.flatMap(g => g.files.map(f => f.path)));
+                allFiles = allFiles.filter(f => activePaths.has(f.path));
+            }
         }
 
         let diffVsNext: AuditChangedFile[] | null = null;
@@ -243,6 +254,22 @@ export class DeploymentDashboardPanel {
         };
     }
 
+    /**
+     * `runDeploy`'s `sourceDirs` argument for a given selection: an empty array means
+     * "no --source-dir override, deploy the whole source root" (see DeploymentEngine.runDeploy).
+     * That whole-root fallback is only safe for genuine bootstrap deploys (`files` empty because
+     * nothing has ever been tracked here, so there's no other way to know what to send) — the
+     * moment there IS a computed pending list, deploying the untouched source root would bypass
+     * sfDevops.ignorePatterns and inactive-story filtering entirely (both only trim `files`,
+     * never touch what's physically on the branch), silently deploying files the dashboard
+     * just finished hiding. So "all" only means "everything currently pending" (scoped to the
+     * already-filtered `files`), never "everything in the repo," once a pending list exists.
+     */
+    private deploySourceDirs(selection: DeploySelection, files: AuditChangedFile[]): string[] {
+        if (selection.mode === "all" && files.length === 0) { return []; }
+        return files.map(f => f.path);
+    }
+
     /** Runs one Validate or Deploy step against an already-resolved file selection, and records the outcome (deploy-state + audit log) — shared by a single manual action and each half of an auto-deploy chain. */
     private async _executeStep(
         env: ResolvedEnvironment,
@@ -259,7 +286,7 @@ export class DeploymentDashboardPanel {
         const result = await runDeploy(
             this._gitHelper.getWorkspaceRoot(),
             getSourceRootFolder(),
-            selection.mode === "all" ? [] : files.map(f => f.path),
+            this.deploySourceDirs(selection, files),
             env.orgAlias ?? "",
             testLevel,
             getDeployTimeoutSeconds(),
@@ -311,7 +338,7 @@ export class DeploymentDashboardPanel {
         const result = await runDeploy(
             this._gitHelper.getWorkspaceRoot(),
             getSourceRootFolder(),
-            selection.mode === "all" ? [] : files.map(f => f.path),
+            this.deploySourceDirs(selection, files),
             demoAlias,
             testLevel,
             getDeployTimeoutSeconds(),
@@ -860,7 +887,7 @@ export class DeploymentDashboardPanel {
 
     private _renderHtml(model: EnvViewModel): string {
         const notice = model.groups.length > 0
-            ? `<div class="notice">⚠ ${model.groups.length} story/PR group(s), ${model.allFiles.length} file(s) pending deployment</div>`
+            ? `<div class="notice" id="pendingSummary-${model.env.name}">⚠ ${model.groups.length} story/PR group(s), ${model.allFiles.length} file(s) pending deployment</div>`
             : (model.lastDeploy === null && model.currentSha)
             ? `<div class="notice muted">ℹ Never deployed from this dashboard yet — nothing pending to bootstrap from</div>`
             : "";
@@ -1211,14 +1238,28 @@ ${envPane}
   function filterTree(env) {
     var sel = document.querySelector('.story-filter[data-env="' + env + '"]');
     var val = sel ? sel.value : '';
+    var visibleCount = 0;
+    var visibleStories = {};
     document.querySelectorAll('.tree-row[data-env="' + env + '"]').forEach(function (row) {
       var stories = (row.dataset.stories || '').split(',');
-      row.style.display = (!val || stories.indexOf(val) !== -1) ? '' : 'none';
+      var visible = (!val || stories.indexOf(val) !== -1);
+      row.style.display = visible ? '' : 'none';
+      if (visible) {
+        visibleCount++;
+        stories.forEach(function (id) { if (id) { visibleStories[id] = true; } });
+      }
     });
     document.querySelectorAll('.type-group[data-env="' + env + '"]').forEach(function (grp) {
-      var anyVisible = Array.prototype.some.call(grp.querySelectorAll('.tree-row'), function (r) { return r.style.display !== 'none'; });
-      grp.style.display = anyVisible ? '' : 'none';
+      var visibleRows = Array.prototype.filter.call(grp.querySelectorAll('.tree-row'), function (r) { return r.style.display !== 'none'; });
+      grp.style.display = visibleRows.length ? '' : 'none';
+      var countEl = grp.querySelector('.type-count');
+      if (countEl) { countEl.textContent = visibleRows.length; }
     });
+    var summaryEl = document.getElementById('pendingSummary-' + env);
+    if (summaryEl) {
+      var storyCount = val ? Object.keys(visibleStories).length : (sel ? sel.options.length - 1 : Object.keys(visibleStories).length);
+      summaryEl.textContent = '⚠ ' + storyCount + ' story/PR group(s), ' + visibleCount + ' file(s) pending deployment' + (val ? ' (filtered to ' + val + ')' : '');
+    }
     syncGroupCheckboxes(env);
   }
 
@@ -1562,12 +1603,12 @@ ${envPane}
         };
         const typeGroupsHtml = Array.from(byType.keys()).sort().map(type => `
       <details class="type-group" data-env="${env.name}" open>
-        <summary><input type="checkbox" class="group-check" title="Select all ${escapeHtml(type)}" onclick="event.stopPropagation()" onchange="selectGroupAll(this)"> ${escapeHtml(type)} (${byType.get(type)!.length})</summary>
+        <summary><input type="checkbox" class="group-check" title="Select all ${escapeHtml(type)}" onclick="event.stopPropagation()" onchange="selectGroupAll(this)"> ${escapeHtml(type)} (<span class="type-count">${byType.get(type)!.length}</span>)</summary>
         <ul class="files">${byType.get(type)!.map(renderFileRow).join("")}</ul>
       </details>`).join("");
         const unmappedHtml = unmappedFiles.length
             ? `<details class="type-group" data-env="${env.name}" open>
-             <summary><input type="checkbox" class="group-check" title="Select all Other" onclick="event.stopPropagation()" onchange="selectGroupAll(this)"> Other (${unmappedFiles.length})</summary>
+             <summary><input type="checkbox" class="group-check" title="Select all Other" onclick="event.stopPropagation()" onchange="selectGroupAll(this)"> Other (<span class="type-count">${unmappedFiles.length}</span>)</summary>
              <ul class="files">${unmappedFiles.map(renderFileRow).join("")}</ul>
            </details>`
             : "";

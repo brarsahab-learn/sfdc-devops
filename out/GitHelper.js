@@ -47,6 +47,7 @@ const config_1 = require("./config");
 const AuditLog_1 = require("./AuditLog");
 const Log_1 = require("./Log");
 const DeploymentPlanner_1 = require("./DeploymentPlanner");
+const GlobMatch_1 = require("./GlobMatch");
 const execFileAsync = (0, util_1.promisify)(child_process_1.execFile);
 class GitHelper {
     constructor() {
@@ -435,16 +436,25 @@ class GitHelper {
             return null;
         }
     }
+    /** Drops paths matching sfDevops.ignorePatterns — applied at every raw git listing below so every panel that lists files (Deployment Dashboard, Diff Viewer, Coverage) hides them uniformly, without each caller having to remember to. */
+    ignoreFiltered(items) {
+        const patterns = (0, config_1.getIgnorePatterns)();
+        if (patterns.length === 0) {
+            return items;
+        }
+        return items.filter(item => !(0, GlobMatch_1.matchesAnyGlob)(item.path, patterns));
+    }
     /** Files touched by a single commit, in the same shape as `diffNameStatusBetween`. */
     async filesInCommit(sha) {
         const raw = await this.git(["show", "--name-status", "--format=", sha]);
-        return raw.split("\n").filter(Boolean).map(line => {
+        const files = raw.split("\n").filter(Boolean).map(line => {
             const tab = line.indexOf("\t");
             const code = line.slice(0, tab).trim();
             const filePath = line.slice(tab + 1).trim();
             const change = code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : "modified";
             return { path: filePath, change };
         });
+        return this.ignoreFiltered(files);
     }
     /** Logs the file list a squashed commit is about to cherry-pick, so it's visible before the pick runs. */
     async logChangedFiles(sha) {
@@ -1479,13 +1489,14 @@ class GitHelper {
             args.push("--", pathspec);
         }
         const raw = await this.git(args);
-        return raw.split("\n").filter(Boolean).map(line => {
+        const files = raw.split("\n").filter(Boolean).map(line => {
             const tab = line.indexOf("\t");
             const code = line.slice(0, tab).trim();
             const filePath = line.slice(tab + 1).trim();
             const change = code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : "modified";
             return { path: filePath, change };
         });
+        return this.ignoreFiltered(files);
     }
     /** Every file path at a remote ref, optionally restricted to `pathspec` — used to find candidate test classes without needing a local checkout. */
     async listFilesAtRef(ref, pathspec) {
@@ -1497,7 +1508,8 @@ class GitHelper {
                 args.push("--", pathspec);
             }
             const out = await this.git(args);
-            return out ? out.split("\n").filter(Boolean) : [];
+            const files = out ? out.split("\n").filter(Boolean) : [];
+            return this.ignoreFiltered(files.map(path => ({ path }))).map(f => f.path);
         }
         catch {
             return [];
@@ -1532,7 +1544,7 @@ class GitHelper {
             if (!raw) {
                 return warning ? [{ path: "", status: "", _warning: warning }].slice(0, 0) : [];
             }
-            const files = raw.split("\n").filter(Boolean).map(line => {
+            const files = this.ignoreFiltered(raw.split("\n").filter(Boolean).map(line => {
                 const parts = line.split("\t");
                 const code = parts[0].trim();
                 const s0 = code.charAt(0).toUpperCase();
@@ -1541,7 +1553,7 @@ class GitHelper {
                     return { path: parts[2].trim(), oldPath: parts[1].trim(), status };
                 }
                 return { path: (parts[1] ?? parts[0]).trim(), status };
-            });
+            }));
             if (warning && files.length > 0) {
                 files[0]._warning = warning;
             }

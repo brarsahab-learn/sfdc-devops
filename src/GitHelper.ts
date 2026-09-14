@@ -10,12 +10,13 @@ import * as path          from "path";
 import {
     getBaseBranch, getDevBranch, featureBranchName, isFeatureBranch as isFeatureBranchName,
     promoBranchName as buildPromoBranchName, getSourceRootFolder, getRepoWorkspace, getRepoSlug,
-    ResolvedEnvironment, getTicketKeyPattern, getPromotionBranchTemplate,
+    ResolvedEnvironment, getTicketKeyPattern, getPromotionBranchTemplate, getIgnorePatterns,
 } from "./config";
 import { IGitProviderClient } from "./GitProviderClient";
 import { AuditEntry, renderAuditHtml } from "./AuditLog";
 import { log, revealLog, debugLog } from "./Log";
 import { storyIdFromMessage } from "./DeploymentPlanner";
+import { matchesAnyGlob } from "./GlobMatch";
 
 const execFileAsync = promisify(execFile);
 
@@ -407,10 +408,17 @@ export class GitHelper {
         }
     }
 
+    /** Drops paths matching sfDevops.ignorePatterns — applied at every raw git listing below so every panel that lists files (Deployment Dashboard, Diff Viewer, Coverage) hides them uniformly, without each caller having to remember to. */
+    private ignoreFiltered<T extends { path: string }>(items: T[]): T[] {
+        const patterns = getIgnorePatterns();
+        if (patterns.length === 0) { return items; }
+        return items.filter(item => !matchesAnyGlob(item.path, patterns));
+    }
+
     /** Files touched by a single commit, in the same shape as `diffNameStatusBetween`. */
     async filesInCommit(sha: string): Promise<{ path: string; change: "added" | "modified" | "deleted" }[]> {
         const raw = await this.git(["show", "--name-status", "--format=", sha]);
-        return raw.split("\n").filter(Boolean).map(line => {
+        const files = raw.split("\n").filter(Boolean).map(line => {
             const tab = line.indexOf("\t");
             const code = line.slice(0, tab).trim();
             const filePath = line.slice(tab + 1).trim();
@@ -418,6 +426,7 @@ export class GitHelper {
                 code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : "modified";
             return { path: filePath, change };
         });
+        return this.ignoreFiltered(files);
     }
 
     /** Logs the file list a squashed commit is about to cherry-pick, so it's visible before the pick runs. */
@@ -1528,7 +1537,7 @@ export class GitHelper {
         if (pathspec) { args.push("--", pathspec); }
         const raw = await this.git(args);
 
-        return raw.split("\n").filter(Boolean).map(line => {
+        const files = raw.split("\n").filter(Boolean).map(line => {
             const tab = line.indexOf("\t");
             const code = line.slice(0, tab).trim();
             const filePath = line.slice(tab + 1).trim();
@@ -1536,6 +1545,7 @@ export class GitHelper {
                 code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : "modified";
             return { path: filePath, change };
         });
+        return this.ignoreFiltered(files);
     }
 
     /** Every file path at a remote ref, optionally restricted to `pathspec` — used to find candidate test classes without needing a local checkout. */
@@ -1546,7 +1556,8 @@ export class GitHelper {
             const args = ["ls-tree", "-r", "--name-only", treeRef];
             if (pathspec) { args.push("--", pathspec); }
             const out = await this.git(args);
-            return out ? out.split("\n").filter(Boolean) : [];
+            const files = out ? out.split("\n").filter(Boolean) : [];
+            return this.ignoreFiltered(files.map(path => ({ path }))).map(f => f.path);
         } catch {
             return [];
         }
@@ -1582,7 +1593,7 @@ export class GitHelper {
         try {
             const raw = await this.git(["diff", "--name-status", "-M", from, to]);
             if (!raw) { return warning ? [{ path: "", status: "", _warning: warning }].slice(0, 0) : []; }
-            const files = raw.split("\n").filter(Boolean).map(line => {
+            const files = this.ignoreFiltered(raw.split("\n").filter(Boolean).map(line => {
                 const parts = line.split("\t");
                 const code  = parts[0].trim();
                 const s0    = code.charAt(0).toUpperCase();
@@ -1591,7 +1602,7 @@ export class GitHelper {
                     return { path: parts[2].trim(), oldPath: parts[1].trim(), status };
                 }
                 return { path: (parts[1] ?? parts[0]).trim(), status };
-            });
+            }));
             if (warning && files.length > 0) { (files[0] as any)._warning = warning; }
             return files;
         } catch {

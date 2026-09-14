@@ -2,7 +2,7 @@
 	"name": "salesforce-devops",
 	"displayName": "Salesforce-DevOps",
 	"description": "Generic, settings-driven Salesforce CI/CD workflow — 1-click story management, pipeline status, environment promotion, and an org-per-branch 2GP packaging release gate",
-	"version": "6.3.0",
+	"version": "6.4.0",
 	"publisher": "your-company",
 	"engines": {
 		"vscode": "^1.85.0"
@@ -448,6 +448,14 @@
 					"type": "number",
 					"description": "How often the Story Progress sidebar re-checks state on its own, in seconds. This is only a safety net — real branch switches and file changes are already picked up live, so you rarely need to lower this; raise it (or set it very high) to reduce background work.",
 					"default": 180
+				},
+				"sfDevops.ignorePatterns": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"description": "Glob patterns (repo-relative, e.g. \"**/profiles/**\") for files hidden from every file listing this extension shows — Deployment Dashboard tree/counts, Diff Viewer, Coverage panels. Distinct from sfDevops.packaging.excludedMetadata, which only affects 2GP packaging.",
+					"default": []
 				},
 				"sfDevops.packageBaselineBranch": {
 					"type": "string",

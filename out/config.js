@@ -91,6 +91,7 @@ exports.getFallbackRefreshSeconds = getFallbackRefreshSeconds;
 exports.getPackageBaselineBranch = getPackageBaselineBranch;
 exports.getPackagingSourceBranch = getPackagingSourceBranch;
 exports.getPackagingRequiredRole = getPackagingRequiredRole;
+exports.getIgnorePatterns = getIgnorePatterns;
 exports.getPackagingSettings = getPackagingSettings;
 const vscode = __importStar(require("vscode"));
 // ── Raw config access ────────────────────────────────────────────────────────
@@ -578,6 +579,17 @@ const DEFAULT_PACKAGING = {
     excludedMetadata: ["**/profiles/**", "**/settings/**"],
     devHubOrgAlias: "",
 };
+/**
+ * Glob patterns (repo-relative, matched against forward-slash paths) for files that
+ * should never appear in any file listing this extension shows — Deployment Dashboard
+ * tree/counts, Diff Viewer, Coverage panels. Distinct from sfDevops.packaging.excludedMetadata,
+ * which routes 2GP-beta files to neither package bucket but still needs to see and report
+ * on them; this setting hides files from view entirely. Empty by default — no behavior
+ * change until configured.
+ */
+function getIgnorePatterns() {
+    return cfg().get("ignorePatterns") || [];
+}
 /** Everything the 2GP Release Gate needs — a single settings object, sfDevops.packaging. */
 function getPackagingSettings() {
     const raw = cfg().get("packaging") || {};
