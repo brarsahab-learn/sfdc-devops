@@ -83,6 +83,13 @@ export function getBaseBranch(): string {
     return cfg().get<string>("baseBranch") || "main";
 }
 
+export async function saveBaseBranch(branch: string): Promise<void> {
+    const target = vscode.workspace.workspaceFolders?.length
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global;
+    await vscode.workspace.getConfiguration("sfDevops").update("baseBranch", branch || "main", target);
+}
+
 /**
  * The branch the first configured environment publishes to (legacy "dev"). Prefers the
  * first entry of sfDevops.environments; falls back to the deprecated sfDevops.devBranch
