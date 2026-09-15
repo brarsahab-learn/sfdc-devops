@@ -278,11 +278,11 @@ class AdminPanel {
             if (!c.passed && isAdmin) {
                 if (c.key === "baseBranch") {
                     quickActionHtml = `<div style="margin:6px 0 0 24px">
-  <button class="btn btn-sm" onclick="pushBranch(${JSON.stringify(baseBranch)})">⬆ Push "${escapeHtml(baseBranch)}" to origin</button>
+  <button class="btn btn-sm" onclick='pushBranch(${JSON.stringify(baseBranch)})'>⬆ Push "${escapeHtml(baseBranch)}" to origin</button>
 </div>`;
                 }
                 else if (c.key === "environmentBranches" && c.missingEnvBranches?.length) {
-                    const btns = c.missingEnvBranches.map(m => `<button class="btn btn-sm" onclick="createEnvBranch(${JSON.stringify(m.branch)})">+ ${escapeHtml(m.label)} (${escapeHtml(m.branch)})</button>`).join(" ");
+                    const btns = c.missingEnvBranches.map(m => `<button class="btn btn-sm" onclick='createEnvBranch(${JSON.stringify(m.branch)})'>+ ${escapeHtml(m.label)} (${escapeHtml(m.branch)})</button>`).join(" ");
                     quickActionHtml = `<div style="margin:6px 0 0 24px">
   <span style="font-size:11px;color:var(--vscode-descriptionForeground)">Create on origin from base branch: </span>${btns}
 </div>`;
