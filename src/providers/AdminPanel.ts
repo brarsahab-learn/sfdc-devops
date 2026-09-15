@@ -359,7 +359,7 @@ ${isAdmin ? `
   })();
 
   var ROLES       = ['', 'Lead', 'Admin'];
-  var TEST_LEVELS = ['RunLocalTests', 'RunAllTestsInOrg', 'RunSpecifiedTests'];
+  var TEST_LEVELS = ['RunLocalTests', 'RunAllTestsInOrg'];
 
   function hesc(s) {
     return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
