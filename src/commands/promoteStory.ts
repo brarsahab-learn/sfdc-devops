@@ -19,7 +19,7 @@ import { runDeploy, DeployResult } from "../DeploymentEngine";
 import { apexClassNamesIn, buildApexTestMap, resolveEffectiveTestLevel } from "../DeploymentPlanner";
 import {
     isFeatureBranch, extractStoryId, getFeatureBranchPrefix,
-    getCoverageGateEnvironment, promoBranchName, getBaseBranch, featureBranchName, getEnvironments,
+    promoBranchName, getBaseBranch, featureBranchName, getEnvironments,
     findEnvironment, getPromotableEnvironments, getSourceRootFolder, getDeployTimeoutSeconds,
     ResolvedEnvironment, buildTicketUrl,
 } from "../config";
@@ -117,7 +117,7 @@ async function runPromotionValidate(
     targetEnv: string,
     envCfg:    ResolvedEnvironment,
     progress?: vscode.Progress<{ message?: string }>
-): Promise<DeployResult> {
+): Promise<{ result: DeployResult; testLevel: string; tests?: string[] }> {
     const promotionBranch = gitHelper.promoBranchName(storyId, targetEnv, "promote");
     const targetBranch    = envCfg.branch;
 
@@ -135,7 +135,7 @@ async function runPromotionValidate(
     if (files.length === 0) {
         // Nothing actually differs from the target branch (e.g. re-validating a no-op
         // reuse) — nothing to check-only deploy, so there's nothing to fail either.
-        return { ran: false, success: true, numberComponentsDeployed: 0 };
+        return { result: { ran: false, success: true, numberComponentsDeployed: 0 }, testLevel: "NoTestRun" };
     }
 
     // A deleted file doesn't exist on disk after the checkout above — passing it as
@@ -154,7 +154,7 @@ async function runPromotionValidate(
             `delete them manually in ${targetEnv.toUpperCase()} for now.`
         );
         if (files.length === 0) {
-            return { ran: false, success: true, numberComponentsDeployed: 0 };
+            return { result: { ran: false, success: true, numberComponentsDeployed: 0 }, testLevel: "NoTestRun" };
         }
     }
 
@@ -176,7 +176,7 @@ async function runPromotionValidate(
     }
 
     progress?.report({ message: `Validating against ${targetEnv.toUpperCase()}...` });
-    return runDeploy(
+    const result = await runDeploy(
         gitHelper.getWorkspaceRoot(),
         getSourceRootFolder(),
         files.map(f => f.path),
@@ -187,6 +187,7 @@ async function runPromotionValidate(
         tests,
         status => progress?.report({ message: status })
     );
+    return { result, testLevel, tests };
 }
 
 export async function runPromotion(
@@ -249,18 +250,17 @@ export async function runPromotion(
         }
     }
 
-    // One-time coverage gate: block the first promotion into the configured gate
-    // environment when the story has Apex classes and coverage hasn't reached the
-    // threshold in the dev org yet. sfDevops.environments[].coverageGate decides which
-    // environment (if any) this applies to.
-    const gateEnv = getCoverageGateEnvironment();
-    if (mode === "promote" && gateEnv && targetEnv === gateEnv.name) {
+    // One-time coverage gate: block promotion into any environment that has coverageGate
+    // enabled when the story has Apex classes and coverage hasn't reached the threshold yet.
+    // Uses envCfg.coverageGate directly (same as the Dashboard deploy gate) so every gated
+    // environment is enforced, not just the first one getCoverageGateEnvironment() finds.
+    if (mode === "promote" && envCfg?.coverageGate) {
         const apex = await gitHelper.featureApexClasses(storyId);
         if (apex.length > 0 && !(await gitHelper.isCoveragePassed(storyId))) {
             const { threshold } = coverageSettings();
             const choice = await vscode.window.showWarningMessage(
                 `${storyId} has Apex classes (${apex.slice(0, 4).join(", ")}${apex.length > 4 ? ", …" : ""}). ` +
-                `Run the Code Coverage check (≥ ${threshold}%) in the Code Coverage panel before promoting to ${gateEnv.label}.`,
+                `Run the Code Coverage check (≥ ${threshold}%) in the Code Coverage panel before promoting to ${envUpper}.`,
                 "Open Coverage Panel"
             );
             if (choice === "Open Coverage Panel") {
@@ -528,7 +528,7 @@ export async function finalizeAndFinish(
     // fallthrough from runPromotion's Copado-reuse check), there's nothing fresh to push;
     // pushing here unconditionally would risk pushing a stale or unrelated local branch by
     // the same name instead of leaving origin's real content alone.
-    const valResult = await runPromotionValidate(gitHelper, storyId, targetEnv, envCfg, progress);
+    const { result: valResult, testLevel: resolvedTestLevel, tests: resolvedTests } = await runPromotionValidate(gitHelper, storyId, targetEnv, envCfg, progress);
     const changedFiles = await storyChangedFiles(gitHelper, storyId);
     const { xml: packageXml, unmapped: unmappedFiles } = buildPackageXml(changedFiles);
 
@@ -541,7 +541,8 @@ export async function finalizeAndFinish(
         details: {
             changedFiles, packageXml, unmappedFiles,
             componentFailures: valResult.componentFailures,
-            testLevel: envCfg.deployTestLevel,
+            testLevel: resolvedTestLevel,
+            ...(resolvedTests?.length ? { tests: resolvedTests } : {}),
         },
     });
 
@@ -559,8 +560,9 @@ export async function finalizeAndFinish(
     await gitHelper.recordPromotionValidated(storyId, targetEnv, { numberComponentsDeployed: valResult.numberComponentsDeployed });
 
     if (mode === "validate") {
+        const testNote = resolvedTests?.length ? ` (tests: ${resolvedTests.join(", ")})` : "";
         vscode.window.showInformationMessage(
-            `✅ Validated ${storyId} against ${envUpper} — ${valResult.numberComponentsDeployed ?? 0} component(s), no errors. ` +
+            `✅ Validated ${storyId} against ${envUpper} — ${valResult.numberComponentsDeployed ?? 0} component(s), no errors${testNote}. ` +
             `Click "Promote" to open the PR from this exact validated branch.`
         );
         storyProvider.refresh();
