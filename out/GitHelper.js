@@ -88,7 +88,7 @@ class GitHelper {
     }
     acquireGitLock() {
         if (this.gitOperationBusy) {
-            throw new Error("Another promotion/publish operation is already running — wait for it to finish before starting a new one.");
+            throw new Error("Another operation is still in progress — please wait for it to finish before starting a new one.");
         }
         this.gitOperationBusy = true;
     }
@@ -190,7 +190,7 @@ class GitHelper {
         const base = (0, config_1.getBaseBranch)();
         await this.git(["fetch", "origin", "--prune"]);
         if (!(await this.remoteBranchExists(base))) {
-            throw new Error(`Base branch origin/${base} doesn't exist either — push that first (or fix sfDevops.baseBranch).`);
+            throw new Error(`The base branch (${base}) has not been pushed to the server yet. Please push it first, or check your sfDevops.baseBranch setting.`);
         }
         await this.git(["push", "origin", `origin/${base}:refs/heads/${branchName}`]);
     }
@@ -198,7 +198,7 @@ class GitHelper {
     async pushLocalBranchToOrigin(branchName) {
         const localExists = await this.git(["rev-parse", "--verify", branchName]).then(() => true).catch(() => false);
         if (!localExists) {
-            throw new Error(`"${branchName}" doesn't exist locally — create it first or update sfDevops.baseBranch.`);
+            throw new Error(`Branch "${branchName}" doesn't exist locally. Create it first or check your sfDevops.baseBranch setting.`);
         }
         await this.git(["push", "-u", "origin", branchName]);
     }
@@ -476,6 +476,51 @@ class GitHelper {
             (0, Log_1.log)(`  ${f.change === "added" ? "+" : f.change === "deleted" ? "-" : "~"} ${f.path}`);
         }
     }
+    /**
+     * After a cherry-pick conflict: for every conflicted file that lives OUTSIDE the
+     * Salesforce source root (e.g. `.forceignore`, `.sf/`, `config/`, `README.md`), accepts
+     * the incoming story version automatically and stages it.  Returns the files that are
+     * still conflicted after the auto-resolution — these are the metadata files the user
+     * must resolve manually.
+     *
+     * Using --theirs keeps the story's intent: the developer changed a config file for a
+     * reason, and those changes should propagate.  The environment-specific files (if any)
+     * will surface during PR review before ever reaching prod.
+     */
+    async autoResolveNonMetadataConflicts(conflicts) {
+        const sourceRoot = (0, config_1.getSourceRootFolder)();
+        const nonMeta = conflicts.filter(f => !f.startsWith(sourceRoot + "/") && f !== sourceRoot);
+        const meta = conflicts.filter(f => f.startsWith(sourceRoot + "/") || f === sourceRoot);
+        if (nonMeta.length > 0) {
+            try {
+                await this.git(["checkout", "--theirs", "--", ...nonMeta]);
+                await this.git(["add", "--", ...nonMeta]);
+                (0, Log_1.log)(`Auto-resolved ${nonMeta.length} non-metadata conflict(s): ${nonMeta.join(", ")}`);
+            }
+            catch (e) {
+                (0, Log_1.log)(`[warn] Could not auto-resolve non-metadata conflicts: ${e}`);
+            }
+        }
+        return meta;
+    }
+    /** Resolves a single cherry-pick conflicted file by choosing one side, then stages it. */
+    async resolveCherryPickFile(filePath, side) {
+        await this.git(["checkout", `--${side}`, "--", filePath]);
+        await this.git(["add", "--", filePath]);
+    }
+    /**
+     * Continues an in-progress cherry-pick after all conflicts have been resolved and staged.
+     * Returns the list of any NEW conflicts that appeared (should be empty for a single squash).
+     */
+    async continueCherryPick() {
+        try {
+            await this.git(["-c", "core.editor=true", "cherry-pick", "--continue"]);
+            return [];
+        }
+        catch {
+            return await this.unmergedFiles();
+        }
+    }
     async cherryPickInProgress() {
         try {
             await this.git(["rev-parse", "--verify", "--quiet", "CHERRY_PICK_HEAD"]);
@@ -494,19 +539,39 @@ class GitHelper {
     async storySquashRef(storyId, base) {
         const featureBranch = (0, config_1.featureBranchName)(storyId);
         const tmpBranch = `sf-devops-squash/${storyId}`;
+        const sourceRoot = (0, config_1.getSourceRootFolder)();
         if (!(await this.remoteBranchExists(featureBranch))) {
-            throw new Error(`Feature branch origin/${featureBranch} not found. Expected it to be pushed under this name ` +
-                `for story "${storyId}" — check that the branch was created via Start New Story and pushed.`);
+            throw new Error(`Feature branch origin/${featureBranch} not found. ` +
+                `Make sure the story "${storyId}" was started using "Start New Story" and the branch has been uploaded (pushed) to the server.`);
         }
         const mergeBase = await this.git(["merge-base", `origin/${base}`, `origin/${featureBranch}`]);
-        await this.git(["checkout", "-B", tmpBranch, `origin/${featureBranch}`]);
-        await this.git(["reset", "--soft", mergeBase]);
-        try {
-            await this.git(["-c", "core.editor=true", "commit", "--no-verify", "-m", `${storyId}: consolidated story changes`]);
+        // Compute the story's net diff scoped to the Salesforce source root only.
+        // Using a scoped diff rather than "reset --soft + commit everything" prevents
+        // squash commit drift: if the developer ran `git merge origin/<env>` on their feature
+        // branch (instead of rebase), the unscoped approach would pull base-branch metadata
+        // changes into the squash even though the developer never authored them.
+        const diffRaw = await this.git(["diff", "--name-status", mergeBase, `origin/${featureBranch}`, "--", sourceRoot]);
+        const changedFiles = diffRaw.split("\n").filter(Boolean).map(line => {
+            const tab = line.indexOf("\t");
+            const status = line.slice(0, tab).trim();
+            const relPath = line.slice(tab + 1).trim();
+            return { status, path: relPath };
+        });
+        if (changedFiles.length === 0) {
+            throw new Error(`No Salesforce metadata changes found for story "${storyId}". Make sure you have saved and uploaded your changes before promoting.`);
         }
-        catch {
-            throw new Error(`No changes found for ${storyId} relative to ${base}.`);
+        // Build the squash on a branch cut from the merge-base so its parent is clean.
+        await this.git(["checkout", "-B", tmpBranch, mergeBase]);
+        const added = changedFiles.filter(f => !f.status.startsWith("D")).map(f => f.path);
+        const deleted = changedFiles.filter(f => f.status.startsWith("D")).map(f => f.path);
+        if (added.length > 0) {
+            await this.git(["checkout", `origin/${featureBranch}`, "--", ...added]);
         }
+        if (deleted.length > 0) {
+            await this.git(["rm", "--force", "--", ...deleted]).catch(() => { });
+        }
+        await this.git(["add", "--", sourceRoot]);
+        await this.git(["-c", "core.editor=true", "commit", "--no-verify", "-m", `${storyId}: consolidated story changes`]);
         return this.git(["rev-parse", "HEAD"]);
     }
     async deleteSquashRef(storyId) {
@@ -524,8 +589,8 @@ class GitHelper {
         const featureBranch = (0, config_1.featureBranchName)(storyId);
         const base = (0, config_1.getBaseBranch)();
         if (!(await this.remoteBranchExists(featureBranch))) {
-            throw new Error(`Feature branch origin/${featureBranch} not found. Expected it to be pushed under this name ` +
-                `for story "${storyId}" — check that the branch was created via Start New Story and pushed.`);
+            throw new Error(`Feature branch origin/${featureBranch} not found. ` +
+                `Make sure the story "${storyId}" was started using "Start New Story" and the branch has been uploaded (pushed) to the server.`);
         }
         const mb = await this.mergeBase(base, featureBranch);
         if (!mb) {
@@ -583,14 +648,14 @@ class GitHelper {
                 await this.git(["rev-parse", "--verify", `origin/${devBranch}`]);
             }
             catch {
-                throw new Error(`${devBranch} branch not found on remote (origin/${devBranch}).`);
+                throw new Error(`The dev branch "${devBranch}" was not found on the server. Ask your admin to create and push it.`);
             }
             const conflicting = await this.conflictingPendingOperation(storyId);
             if (conflicting) {
                 if (!force) {
-                    throw new Error(`Another operation is still pending for ${conflicting.storyId}` +
-                        `${conflicting.targetEnv ? ` → ${conflicting.targetEnv}` : ""} (unresolved conflict). ` +
-                        `Resolve or discard it before starting a new one.`);
+                    throw new Error(`Story "${conflicting.storyId}" still has unresolved conflicts` +
+                        `${conflicting.targetEnv ? ` (sending to ${conflicting.targetEnv})` : ""}. ` +
+                        `Resolve or cancel that story's conflicts first before starting another operation.`);
                 }
                 await this.abortPendingOperationImpl(conflicting.storyId);
             }
@@ -604,15 +669,25 @@ class GitHelper {
                 (0, Log_1.log)("Applied cleanly.");
             }
             catch {
-                const conflicts = await this.unmergedFiles();
-                if (conflicts.length === 0) {
+                const allConflicts = await this.unmergedFiles();
+                if (allConflicts.length === 0) {
                     // Story already present in dev → finish the no-op cherry-pick.
                     await this.git(["cherry-pick", "--skip"]).catch(() => { });
                     (0, Log_1.log)("Already up to date in dev — nothing new to apply.");
                 }
                 else {
-                    (0, Log_1.log)(`Conflicts in ${conflicts.length} file(s) — resolve them, then click Resume.`);
-                    return { status: "conflict", branch: devBranch, conflicts };
+                    // Auto-resolve conflicts in non-metadata files so the developer doesn't have to
+                    // manually fix e.g. `.forceignore` or `.sf/` diffs that aren't deployed anyway.
+                    const remaining = await this.autoResolveNonMetadataConflicts(allConflicts);
+                    if (remaining.length === 0) {
+                        // All conflicts were in config/ignore files — continue the cherry-pick.
+                        await this.git(["-c", "core.editor=true", "cherry-pick", "--continue"]);
+                        (0, Log_1.log)("Applied after auto-resolving non-metadata conflicts.");
+                    }
+                    else {
+                        (0, Log_1.log)(`Conflicts in ${remaining.length} metadata file(s) — resolve them, then click Resume.`);
+                        return { status: "conflict", branch: devBranch, conflicts: remaining };
+                    }
                 }
             }
             await this.completeDevPublish(storyId);
@@ -659,20 +734,20 @@ class GitHelper {
                 await this.git(["rev-parse", "--verify", `origin/${featureBranch}`]);
             }
             catch {
-                throw new Error(`Source branch not found on remote: ${featureBranch}. Push the feature branch first.`);
+                throw new Error(`Your story branch "${featureBranch}" has not been uploaded to the server. Please upload (push) it first.`);
             }
             try {
                 await this.git(["rev-parse", "--verify", `origin/${targetBranch}`]);
             }
             catch {
-                throw new Error(`Target environment branch not found: origin/${targetBranch}.`);
+                throw new Error(`The target environment branch "${targetBranch}" was not found on the server. Ask your admin to create and push it.`);
             }
             const conflicting = await this.conflictingPendingOperation(storyId, targetEnv);
             if (conflicting) {
                 if (!force) {
-                    throw new Error(`Another operation is still pending for ${conflicting.storyId}` +
-                        `${conflicting.targetEnv ? ` → ${conflicting.targetEnv}` : ""} (unresolved conflict). ` +
-                        `Resolve or discard it before starting a new one.`);
+                    throw new Error(`Story "${conflicting.storyId}" still has unresolved conflicts` +
+                        `${conflicting.targetEnv ? ` (sending to ${conflicting.targetEnv})` : ""}. ` +
+                        `Resolve or cancel that story's conflicts first before starting another operation.`);
                 }
                 await this.abortPendingOperationImpl(conflicting.storyId);
             }
@@ -688,15 +763,22 @@ class GitHelper {
                 return { status: "clean", branch: promotionBranch, conflicts: [] };
             }
             catch {
-                const conflicts = await this.unmergedFiles();
-                if (conflicts.length === 0) {
+                const allConflicts = await this.unmergedFiles();
+                if (allConflicts.length === 0) {
                     // Story already present in the target → finish the no-op cherry-pick.
                     await this.git(["cherry-pick", "--skip"]).catch(() => { });
                     (0, Log_1.log)(`Already up to date in ${targetEnv} — nothing new to apply.`);
                     return { status: "clean", branch: promotionBranch, conflicts: [] };
                 }
-                (0, Log_1.log)(`Conflicts in ${conflicts.length} file(s) — resolve them, then click Resume.`);
-                return { status: "conflict", branch: promotionBranch, conflicts };
+                // Auto-resolve conflicts in non-metadata files (e.g. .forceignore, .sf/, config/).
+                const remaining = await this.autoResolveNonMetadataConflicts(allConflicts);
+                if (remaining.length === 0) {
+                    await this.git(["-c", "core.editor=true", "cherry-pick", "--continue"]);
+                    (0, Log_1.log)("Applied after auto-resolving non-metadata conflicts.");
+                    return { status: "clean", branch: promotionBranch, conflicts: [] };
+                }
+                (0, Log_1.log)(`Conflicts in ${remaining.length} metadata file(s) — resolve them, then click Resume.`);
+                return { status: "conflict", branch: promotionBranch, conflicts: remaining };
             }
         }
         finally {

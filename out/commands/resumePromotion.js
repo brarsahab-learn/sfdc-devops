@@ -69,13 +69,28 @@ async function resumePromotion(bbClient, gitHelper, storyProvider) {
                 progress.report({ message: "Continuing after conflict resolution..." });
                 const outcome = await gitHelper.continuePendingOperation();
                 if (outcome.status === "conflict") {
+                    const resolution = await (0, promoteStory_1.reportOperationConflict)(gitHelper, outcome.conflicts, label);
+                    if (resolution === "resolved") {
+                        if (op.kind === "dev-publish") {
+                            progress.report({ message: "Pushing dev branch..." });
+                            await gitHelper.completeDevPublish(op.storyId);
+                            vscode.window.showInformationMessage(`✅ ${op.storyId} added to the dev branch. Use "Promote & Deploy" or "Validate Only" for the next environment.`);
+                            storyProvider.refresh();
+                        }
+                        else {
+                            progress.report({ message: "① Pushing promotion branch..." });
+                            await gitHelper.finalizePromotion(op.storyId, op.targetEnv, op.mode ?? "promote");
+                            await (0, promoteStory_1.finalizeAndFinish)(bbClient, gitHelper, op.storyId, op.targetEnv, op.mode ?? "promote", storyProvider, progress);
+                        }
+                        return;
+                    }
+                    // User chose manual resolution — audit and pause
                     await gitHelper.appendAudit({
                         operation: "resumePromotion", storyId: op.storyId, targetEnv: op.targetEnv,
                         outcome: "conflict",
                         summary: `Still conflicting while resuming → ${label}`,
                         details: { conflicts: outcome.conflicts },
                     });
-                    await (0, promoteStory_1.reportOperationConflict)(gitHelper, outcome.conflicts, label);
                     storyProvider.refresh();
                     return;
                 }

@@ -41,17 +41,17 @@ const config_1 = require("../config");
 async function syncBranch(gitHelper, storyProvider) {
     const branch = await gitHelper.currentBranch();
     if (!(0, config_1.isFeatureBranch)(branch)) {
-        vscode.window.showWarningMessage("Sync is only available on feature branches.");
+        vscode.window.showWarningMessage("This is only available on story branches.");
         return;
     }
     if (await gitHelper.hasUncommittedChanges()) {
-        await (0, GitHelper_1.warnUncommittedChanges)(gitHelper, "Commit or stash your changes before syncing.");
+        await (0, GitHelper_1.warnUncommittedChanges)(gitHelper, "Save or discard your unsaved changes before getting the latest.");
         return;
     }
     const base = (0, config_1.getBaseBranch)();
     await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
-        title: `Syncing ${branch}…`,
+        title: `Getting latest changes for ${branch}…`,
         cancellable: false,
     }, async () => {
         try {
@@ -60,7 +60,7 @@ async function syncBranch(gitHelper, storyProvider) {
                 operation: "syncBranch", branch: branch ?? undefined, outcome: "success",
                 summary: `Synced ${branch} with origin and ${base}`,
             });
-            vscode.window.showInformationMessage(`✅ ${branch} is up to date with origin and ${base}`);
+            vscode.window.showInformationMessage(`✅ Your branch is up to date — all latest changes are included.`);
             storyProvider.refresh();
         }
         catch (err) {
@@ -69,7 +69,7 @@ async function syncBranch(gitHelper, storyProvider) {
                 summary: `Sync failed for ${branch}`,
                 details: { error: String(err) },
             });
-            vscode.window.showErrorMessage(`Sync failed: ${err}\n\nResolve conflicts manually then run: git rebase --continue`);
+            vscode.window.showErrorMessage(`Could not get the latest changes: ${err}\n\nThere may be a conflict with changes from a teammate. Resolve the conflict in each affected file, then try again.`);
         }
     });
 }

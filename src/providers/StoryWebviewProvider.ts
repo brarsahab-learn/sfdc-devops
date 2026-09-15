@@ -600,23 +600,23 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         if (isPublishStage) {
             switch (state) {
                 case "published":
-                    return `Published directly to ${envCfg.label} via Commit & Publish — no PR, no review. Next: promote it to the following stage.`;
+                    return `Your changes are uploaded to ${envCfg.label} — no review needed for this stage. Next: send them to the following stage.`;
                 default:
-                    return `The first stage — click "Commit & Publish" to push your changes straight to ${envCfg.label} (no PR, no review gate).`;
+                    return `The first stage — click "Save & Upload My Changes" to upload your work to ${envCfg.label}.`;
             }
         }
-        const roleNote = envCfg.requiredRole ? ` (requires the "${envCfg.requiredRole}" role to promote)` : "";
+        const roleNote = envCfg.requiredRole ? ` (requires the "${envCfg.requiredRole}" role)` : "";
         switch (state) {
             case "branch-created":
-                return `Promotion branch created, but validation hasn't passed yet — a PR can't open until it does. Click ✔ Validate or 🚀 Promote (which validates for you) to run a real check-only deploy against ${envCfg.label}.`;
+                return `Your changes are prepared but haven't been checked yet — a review request can't open until they pass. Click ✔ Check for Errors or 🚀 Send to ${envCfg.label} (which checks first) to run the pre-flight check.`;
             case "open":
-                return `Validated, and a promotion PR into ${envCfg.label} is open (or ready to be). Get it reviewed and merged — nothing deploys automatically when it merges.`;
+                return `Pre-flight check passed, and a review request into ${envCfg.label} is open. Get it reviewed and approved — nothing deploys automatically when it's approved.`;
             case "merged":
-                return `The PR merged, but that alone doesn't deploy anything. Click 🚀 to run a real deploy against the ${envCfg.label} org.`;
+                return `The review was approved and merged, but that alone doesn't deploy anything. Click 🚀 to do the actual deployment to ${envCfg.label}.`;
             case "deployed":
                 return `Deployed to ${envCfg.label}. This stage is complete for this story.`;
             default:
-                return `Not started for this story. Click ⬆ to pick a story and promote it to ${envCfg.label} — this opens a PR${roleNote}; merging it is the review gate, deploying is a separate step after that.`;
+                return `Not started yet. Click ⬆ to select a story and send it to ${envCfg.label} — this opens a review request${roleNote}; approving it is the review gate, deploying is a separate step after that.`;
         }
     }
 
@@ -699,14 +699,14 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         if (onFeatureBranch) {
             if (!devPublished) {
                 actionButton =
-                    `<button class="btn btn-primary" onclick="send('commitAndPush')">&#x2601; Commit &amp; Publish Feature Branch</button>`;
+                    `<button class="btn btn-primary" onclick="send('commitAndPush')">&#x2601; Save &amp; Upload My Changes</button>`;
             } else if (nextEnv && progress[nextEnv.name] === "merged") {
                 // PR already merged into nextEnv's branch — the real next step is deploying
                 // it, not another promotion. Hand off straight to the Deployment Dashboard.
                 actionButton = isLead
-                    ? `<div class="info">&#x26A1; ${escapeHtml(nextEnv.label)}'s PR is merged &mdash; deploy it to finish this stage.</div>
+                    ? `<div class="info">&#x26A1; ${escapeHtml(nextEnv.label)} review approved &mdash; click Deploy to send it live.</div>
                        <button class="btn btn-primary" onclick="send('openDeploymentDashboard', '${jsStr(nextEnv.name)}')">&#x1F680; Deploy &mdash; ${escapeHtml(nextEnv.label)}</button>`
-                    : `<div class="info">&#x26A1; ${escapeHtml(nextEnv.label)}'s PR is merged &mdash; a Lead or Admin needs to deploy it to finish this stage.</div>`;
+                    : `<div class="info">&#x26A1; ${escapeHtml(nextEnv.label)} review approved &mdash; a Lead or Admin needs to do the final deployment.</div>`;
             } else if (nextEnv) {
                 // Validation is mandatory and gates the PR — so which button is "primary"
                 // (the actually-next step) depends on whether nextEnv's promotion branch has
@@ -716,7 +716,7 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                 // Promote (open the PR) is next, Validate becomes a secondary "re-validate."
                 const isValidated = progress[nextEnv.name] === "open";
                 const validateBtn =
-                    `<button class="btn ${isValidated ? "btn-secondary" : "btn-primary"}" onclick="send('validate', '${jsStr(nextEnv.name)}')">&#x2714; ${isValidated ? "Re-validate" : "Validate Only"} &mdash; ${escapeHtml(nextEnv.label)}</button>`;
+                    `<button class="btn ${isValidated ? "btn-secondary" : "btn-primary"}" onclick="send('validate', '${jsStr(nextEnv.name)}')">&#x2714; ${isValidated ? "Re-run Check" : "Check for Errors"} &mdash; ${escapeHtml(nextEnv.label)}</button>`;
                 const coverageBlocked = coverageBlockedEnv === nextEnv.name;
 
                 // The env the story is CURRENTLY sitting in — the one immediately before
@@ -726,19 +726,19 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
                 const signoffBlocked = Boolean(currentEnv?.signoffGate && !signoffPassed[currentEnv.name]);
                 const signoffAction = signoffBlocked
                     ? (isLead
-                        ? `<div class="warning">&#x26A0; ${escapeHtml(currentEnv!.label)} sign-off required before promoting to ${escapeHtml(nextEnv.label)}.</div>
-                           <button class="btn btn-secondary" onclick="send('recordSignoff', '${jsStr(currentEnv!.name)}')">&#x2705; Record ${escapeHtml(currentEnv!.label)} Sign-off</button>`
-                        : `<div class="warning">&#x26A0; ${escapeHtml(currentEnv!.label)} sign-off by a Lead or Admin is required before promoting to ${escapeHtml(nextEnv.label)}.</div>`)
+                        ? `<div class="warning">&#x26A0; ${escapeHtml(currentEnv!.label)} approval required before sending to ${escapeHtml(nextEnv.label)}.</div>
+                           <button class="btn btn-secondary" onclick="send('recordSignoff', '${jsStr(currentEnv!.name)}')">&#x2705; Record ${escapeHtml(currentEnv!.label)} Approval</button>`
+                        : `<div class="warning">&#x26A0; ${escapeHtml(currentEnv!.label)} approval by a Lead or Admin is required before sending to ${escapeHtml(nextEnv.label)}.</div>`)
                     : "";
 
                 const promoteClass = isValidated ? "btn-primary" : "btn-secondary";
                 const promoteBtn = !canPromote(this._userRole, nextEnv)
-                    ? `<div class="info">&#x2705; A "${escapeHtml(nextEnv.requiredRole ?? "")}" runs Promote to ${escapeHtml(nextEnv.label)} (opens a PR — deploying is a separate step after it's merged)</div>`
+                    ? `<div class="info">&#x2705; A "${escapeHtml(nextEnv.requiredRole ?? "")}" team member needs to send this to ${escapeHtml(nextEnv.label)} (they'll open a review request; deployment happens after approval)</div>`
                     : (coverageBlocked || signoffBlocked)
-                    ? `${coverageBlocked ? `<div class="warning">&#x26A0; Coverage check required before promoting to ${escapeHtml(nextEnv.label)} &mdash; <a href="#" onclick="send('focusCoverage')">run it here</a>.</div>` : ""}
+                    ? `${coverageBlocked ? `<div class="warning">&#x26A0; A code coverage check is required before sending to ${escapeHtml(nextEnv.label)} &mdash; <a href="#" onclick="send('focusCoverage')">run it here</a>.</div>` : ""}
                        ${signoffAction}
-                       <button class="btn btn-primary" disabled title="Resolve the gate(s) above first">&#x1F680; Promote &mdash; ${escapeHtml(nextEnv.label)}</button>`
-                    : `<button class="btn ${promoteClass}" onclick="send('promote', '${jsStr(nextEnv.name)}')" title="${isValidated ? `Opens a PR into ${escapeHtml(nextEnv.label)} — deploying is a separate step once it's merged` : `Validates first, then opens a PR into ${escapeHtml(nextEnv.label)} once it passes`}">&#x1F680; Promote &mdash; ${escapeHtml(nextEnv.label)}</button>`;
+                       <button class="btn btn-primary" disabled title="Complete the steps above first">&#x1F680; Send to ${escapeHtml(nextEnv.label)}</button>`
+                    : `<button class="btn ${promoteClass}" onclick="send('promote', '${jsStr(nextEnv.name)}')" title="${isValidated ? `Opens a review request in ${escapeHtml(nextEnv.label)} — deploying happens separately after approval` : `Checks for errors first, then sends to ${escapeHtml(nextEnv.label)} for review`}">&#x1F680; Send to ${escapeHtml(nextEnv.label)}</button>`;
                 actionButton = isValidated ? (promoteBtn + validateBtn) : (validateBtn + promoteBtn);
             } else {
                 actionButton = `<div class="info">&#x2705; ${getTerminalStageMessage()}</div>`;
@@ -782,9 +782,9 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
             } else {
                 if (state === "published")  { icon = "✅"; label = "Published"; }
                 else if (state === "deployed") { icon = "✅"; label = "Deployed"; }
-                else if (state === "merged")   { icon = "⚡"; label = "Merged — ready to deploy"; }
-                else if (state === "open")  { icon = "🔄"; label = "Validated / In PR"; }
-                else if (state === "branch-created") { icon = "🧪"; label = "Branch created — validation required"; }
+                else if (state === "merged")   { icon = "⚡"; label = "Approved — ready to deploy"; }
+                else if (state === "open")  { icon = "🔄"; label = "Checks passed — awaiting approval"; }
+                else if (state === "branch-created") { icon = "🧪"; label = "Ready to check — run \"Check for Errors\" first"; }
                 if (isDone) { icon = "✓"; }
 
                 // DEV already shows "Published", but there's more local work since then —
@@ -854,17 +854,17 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
 
         const moreActions = onFeatureBranch
             ? `<div class="more-actions">
-                 ${devPublished ? `<a href="#" onclick="send('commitAndPush')">☁ Publish more changes</a> · ` : ""}
-                 <a href="#" onclick="send('syncBranch')">🔄 Sync branch</a>
+                 ${devPublished ? `<a href="#" onclick="send('commitAndPush')">☁ Upload more changes</a> · ` : ""}
+                 <a href="#" onclick="send('syncBranch')">🔄 Get Latest Changes</a>
                </div>`
             : "";
 
         const originWarning = behindOriginCount > 0
-            ? `<div class="warning">&#x26A0; Your branch is ${behindOriginCount} commit(s) behind <strong>origin/${branch}</strong> &mdash; a teammate may have pushed. <a href="#" onclick="send('syncBranch')">Sync now</a> to incorporate their changes before promoting.</div>`
+            ? `<div class="warning">&#x26A0; A teammate uploaded newer changes. <a href="#" onclick="send('syncBranch')">Get Latest Changes</a> before sending to the next stage.</div>`
             : "";
 
         const syncWarning = behindCount > 5
-            ? `<div class="warning">&#x26A0; ${behindCount} commits behind ${baseBranch} &mdash; <a href="#" onclick="send('syncBranch')">sync now</a></div>`
+            ? `<div class="warning">&#x26A0; You're ${behindCount} updates behind &mdash; <a href="#" onclick="send('syncBranch')">Get Latest Changes</a></div>`
             : "";
 
         // One-shot acknowledgment that something changed HEAD outside this panel's own
@@ -973,7 +973,7 @@ ${(() => {
     const threshold = getStaleStoryThresholdDays();
     if (staleAgeDays !== null && threshold > 0 && staleAgeDays > threshold) {
         const days = Math.floor(staleAgeDays);
-        return `<div class="warning">⏳ This branch has had no new commits for <strong>${days} day${days === 1 ? "" : "s"}</strong> — it may be stale. Consider syncing with ${escapeHtml(getBaseBranch())} to stay current. <a href="#" onclick="send('syncBranch')">Sync now</a></div>`;
+        return `<div class="warning">⏳ No new changes for <strong>${days} day${days === 1 ? "" : "s"}</strong> — this may be out of date. <a href="#" onclick="send('syncBranch')">Get Latest Changes</a> to stay current.</div>`;
     }
     return "";
 })()}
@@ -1332,7 +1332,7 @@ ${this._csp()}
         return `<!DOCTYPE html><html><head><meta charset="utf-8">${this._csp()}</head><body style="font-family:var(--vscode-font-family);padding:8px;color:var(--vscode-errorForeground)">Error: ${escapeHtml(err)}</body></html>`;
     }
 
-    /** Rendered while a cherry-pick (dev-publish or promotion) is paused on conflicts. */
+    /** Rendered while applying story changes is paused on conflicts. */
     private _getConflictHtml(
         pending:   PendingOp,
         conflicts: string[]
@@ -1375,11 +1375,11 @@ ${this._csp()}
 <body>
 ${BUSY_BAR_HTML}
 <div class="card">
-  <div class="title">⚙ Paused — resolve conflicts</div>
+  <div class="title">⚙ Action needed — file conflicts</div>
   <div class="branch">${pending.storyId} → ${target}</div>
   ${status}
   ${fileRows}
-  <div class="steps">1. Resolve conflicts in the Source Control view &nbsp; 2. Save &nbsp; 3. Resume</div>
+  <div class="steps">1. Click a file above to open it &nbsp; 2. Choose which version to keep and save &nbsp; 3. Click Resume</div>
   <button class="btn btn-primary" onclick="send('resumePromotion')">▶ Resume</button>
   <button class="btn btn-secondary" onclick="send('cancelPromotion')">✕ Cancel</button>
   <div style="text-align:right; font-size:10px; color:var(--vscode-descriptionForeground); margin-top:4px">

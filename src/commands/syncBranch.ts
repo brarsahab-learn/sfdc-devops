@@ -12,12 +12,12 @@ export async function syncBranch(
     const branch = await gitHelper.currentBranch();
 
     if (!isFeatureBranch(branch)) {
-        vscode.window.showWarningMessage("Sync is only available on feature branches.");
+        vscode.window.showWarningMessage("This is only available on story branches.");
         return;
     }
 
     if (await gitHelper.hasUncommittedChanges()) {
-        await warnUncommittedChanges(gitHelper, "Commit or stash your changes before syncing.");
+        await warnUncommittedChanges(gitHelper, "Save or discard your unsaved changes before getting the latest.");
         return;
     }
 
@@ -26,7 +26,7 @@ export async function syncBranch(
     await vscode.window.withProgress(
         {
             location: vscode.ProgressLocation.Notification,
-            title:    `Syncing ${branch}…`,
+            title:    `Getting latest changes for ${branch}…`,
             cancellable: false,
         },
         async () => {
@@ -37,7 +37,7 @@ export async function syncBranch(
                     summary: `Synced ${branch} with origin and ${base}`,
                 });
                 vscode.window.showInformationMessage(
-                    `✅ ${branch} is up to date with origin and ${base}`
+                    `✅ Your branch is up to date — all latest changes are included.`
                 );
                 storyProvider.refresh();
             } catch (err) {
@@ -47,7 +47,7 @@ export async function syncBranch(
                     details: { error: String(err) },
                 });
                 vscode.window.showErrorMessage(
-                    `Sync failed: ${err}\n\nResolve conflicts manually then run: git rebase --continue`
+                    `Could not get the latest changes: ${err}\n\nThere may be a conflict with changes from a teammate. Resolve the conflict in each affected file, then try again.`
                 );
             }
         }

@@ -170,13 +170,26 @@ async function commitAndPush(_bbClient, gitHelper, storyProvider) {
                 progress.report({ message: "Adding changes to dev branch..." });
                 const outcome = await gitHelper.publishToDevBranch(storyId, discardConflicting);
                 if (outcome.status === "conflict") {
+                    const resolution = await (0, promoteStory_1.reportOperationConflict)(gitHelper, outcome.conflicts, "Dev");
+                    if (resolution === "resolved") {
+                        await gitHelper.completeDevPublish(storyId);
+                        await gitHelper.appendAudit({
+                            operation: "commitAndPublish",
+                            storyId, branch: branch ?? undefined, outcome: "success",
+                            summary: `Published — feature branch pushed, changes added to dev (guided resolve)`,
+                            details: { commitMessage: commitMsg, changedFiles, packageXml, unmappedFiles },
+                        });
+                        vscode.window.showInformationMessage(`✅ ${storyId} published — feature branch pushed and changes added to the dev branch. ` +
+                            `Use "Promote" or "Validate Only" for the next environment.`);
+                        return;
+                    }
+                    // User chose manual resolution — save the audit trail and pause
                     await gitHelper.appendAudit({
                         operation: "commitAndPublish",
                         storyId, branch: branch ?? undefined, outcome: "conflict",
                         summary: `Conflict adding ${storyId} to the dev branch`,
                         details: { commitMessage: commitMsg, changedFiles, packageXml, unmappedFiles, conflicts: outcome.conflicts },
                     });
-                    await (0, promoteStory_1.reportOperationConflict)(gitHelper, outcome.conflicts, "dev branch");
                     return;
                 }
                 await gitHelper.appendAudit({

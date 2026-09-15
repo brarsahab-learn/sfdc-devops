@@ -158,6 +158,19 @@ async function runPromotionValidate(gitHelper, storyId, targetEnv, envCfg, progr
             return { result: { ran: false, success: true, numberComponentsDeployed: 0 }, testLevel: "NoTestRun" };
         }
     }
+    // TestSuite metadata files list specific test classes to run — when coverage isn't required
+    // (coverageGate: false on a sandbox), Salesforce still validates that every class named in
+    // a .testSuite actually exists in the org.  On a first deployment (dev/QA) the test class
+    // hasn't been deployed yet, so the component fails with "No classes found for <Class>".
+    // Excluding them here is safe because NoTestRun (see resolveEffectiveTestLevel) means the
+    // suite is never executed anyway.
+    if (!envCfg.isProd && !(envCfg.coverageGate ?? true)) {
+        const suiteFiles = files.filter(f => /\/testSuites\/|\.testSuite(-meta\.xml)?$/.test(f.path));
+        if (suiteFiles.length > 0) {
+            files = files.filter(f => !/\/testSuites\/|\.testSuite(-meta\.xml)?$/.test(f.path));
+            (0, Log_1.log)(`Skipping ${suiteFiles.length} Test Suite file(s) — coverage not required for ${targetEnv}.`);
+        }
+    }
     const apexClasses = (0, DeploymentPlanner_1.apexClassNamesIn)(files);
     let apexTestFilePaths = {};
     let apexTestMap = {};
@@ -165,7 +178,7 @@ async function runPromotionValidate(gitHelper, storyId, targetEnv, envCfg, progr
         const allClsFiles = await gitHelper.listFilesAtRef(promotionBranch, (0, config_1.getSourceRootFolder)());
         ({ apexTestMap, apexTestFilePaths } = (0, DeploymentPlanner_1.buildApexTestMap)(allClsFiles, apexClasses));
     }
-    let { testLevel, tests } = (0, DeploymentPlanner_1.resolveEffectiveTestLevel)(envCfg.deployTestLevel, "auto", apexClasses, apexTestMap, envCfg.isProd);
+    let { testLevel, tests } = (0, DeploymentPlanner_1.resolveEffectiveTestLevel)(envCfg.deployTestLevel, "auto", apexClasses, apexTestMap, envCfg.isProd, envCfg.coverageGate ?? true);
     // RunSpecifiedTests requires the named test class to be part of the deployment package
     // (or already exist in the org). Fold in test files that weren't otherwise selected.
     if (testLevel === "RunSpecifiedTests" && tests?.length) {
@@ -347,6 +360,15 @@ async function runPromotion(bbClient, gitHelper, storyId, targetEnv, mode, story
                 return;
             }
         }
+        // Warn if the local branch has commits that haven't been pushed — the validate always
+        // runs against origin/<feature>, so validating now would silently use stale content.
+        const localAhead = await gitHelper.commitsAhead(`origin/${featureBranch}`).catch(() => 0);
+        if (localAhead > 0) {
+            const push = await vscode.window.showWarningMessage(`⚠ Your local ${featureBranch} is ${localAhead} commit(s) ahead of origin — the validate will run against the PUSHED content, not what's in your working copy. Push first to include your latest changes.`, { modal: true }, "Continue anyway (validate stale)", "Cancel");
+            if (push !== "Continue anyway (validate stale)") {
+                return;
+            }
+        }
         const shown = preview.slice(0, 8).map(f => `  ${f.change === "added" ? "+" : f.change === "deleted" ? "-" : "~"} ${f.path}`);
         const more = preview.length > 8 ? `\n  ...and ${preview.length - 8} more` : "";
         const filesBlock = `\n\n${preview.length} file(s) (from origin/${featureBranch}):\n${shown.join("\n")}${more}`;
@@ -398,6 +420,14 @@ async function runPromotion(bbClient, gitHelper, storyId, targetEnv, mode, story
                 progress.report({ message: branchAlreadyExists ? "① Refreshing promotion branch..." : "① Creating promotion branch..." });
                 const outcome = await gitHelper.beginPromotion(storyId, targetEnv, mode, targetBranch, discardConflicting);
                 if (outcome.status === "conflict") {
+                    const resolution = await reportOperationConflict(gitHelper, outcome.conflicts, envUpper);
+                    if (resolution === "resolved") {
+                        progress.report({ message: "① Pushing promotion branch..." });
+                        await gitHelper.finalizePromotion(storyId, targetEnv, mode);
+                        await finalizeAndFinish(bbClient, gitHelper, storyId, targetEnv, mode, storyProvider, progress);
+                        return;
+                    }
+                    // User chose manual resolution — save the audit trail and pause here
                     const changedFiles = await storyChangedFiles(gitHelper, storyId);
                     const { xml: packageXml, unmapped: unmappedFiles } = (0, AuditLog_1.buildPackageXml)(changedFiles);
                     await gitHelper.appendAudit({
@@ -405,7 +435,6 @@ async function runPromotion(bbClient, gitHelper, storyId, targetEnv, mode, story
                         summary: `Conflict preparing promotion branch for ${envUpper}`,
                         details: { changedFiles, packageXml, unmappedFiles, conflicts: outcome.conflicts },
                     });
-                    await reportOperationConflict(gitHelper, outcome.conflicts, envUpper);
                     storyProvider.refresh();
                     return;
                 }
@@ -547,21 +576,69 @@ async function openPromotionPR(bbClient, gitHelper, storyId, targetEnv, storyPro
         `${targetEnv.toUpperCase()} deploys once you click Deploy in the Dashboard after it's merged.`);
     storyProvider.refresh();
 }
-/** Shows conflict guidance and offers to open the first conflicted file. */
+/**
+ * Guides the user through resolving each cherry-pick conflict one file at a time via
+ * a plain "Keep MY changes / Keep existing version" picker — no conflict markers or
+ * Source Control view required for basic users. If every file is resolved, continues
+ * the cherry-pick automatically and returns "resolved". Returns "manual" if the user
+ * opts out or if the cherry-pick still has conflicts after the guided pass.
+ */
 async function reportOperationConflict(gitHelper, conflicts, label) {
-    const list = conflicts.slice(0, 8).join(", ") + (conflicts.length > 8 ? ", ..." : "");
-    const choice = await vscode.window.showWarningMessage(`Conflicts while preparing ${label}:\n\n${list || "see Source Control"}\n\n` +
-        `Resolve them in the editor (Source Control view), save, then run "Resume".`, "Open Conflicts", "Later");
-    if (choice === "Open Conflicts") {
-        const toOpen = conflicts.slice(0, 8);
-        for (const conflictedFile of toOpen) {
-            const fileUri = vscode.Uri.joinPath(vscode.Uri.file(gitHelper.getWorkspaceRoot()), conflictedFile);
-            await vscode.window.showTextDocument(fileUri, { preview: false }).then(undefined, () => { });
+    for (const filePath of conflicts) {
+        const fileName = filePath.split("/").pop() ?? filePath;
+        const picks = [
+            {
+                label: `$(check)  Keep MY changes`,
+                description: `Use your story's version of ${fileName}`,
+                resolution: "theirs",
+                alwaysShow: true,
+            },
+            {
+                label: `$(x)  Keep the ${label} version`,
+                description: `Keep what's already in ${label} for ${fileName}`,
+                resolution: "ours",
+                alwaysShow: true,
+            },
+            {
+                label: `$(diff)  View both versions`,
+                description: `Open a side-by-side comparison of ${fileName}`,
+                resolution: "view",
+            },
+            {
+                label: `$(tools)  I'll resolve this myself`,
+                description: `Stop here — open Source Control to resolve manually`,
+                resolution: "manual",
+            },
+        ];
+        while (true) {
+            const pick = await vscode.window.showQuickPick(picks, {
+                title: `File conflict — ${fileName}`,
+                placeHolder: `Both "${label}" and your story changed this file. Which version should we use?`,
+                ignoreFocusOut: true,
+            });
+            if (!pick || pick.resolution === "manual") {
+                const remaining = conflicts.slice(conflicts.indexOf(filePath));
+                const list = remaining.slice(0, 6).join(", ") + (remaining.length > 6 ? ", …" : "");
+                vscode.window.showWarningMessage(`${remaining.length} file(s) still need manual resolution: ${list}.\n\n` +
+                    `Open Source Control (left sidebar), fix the highlighted conflicts, save each file, then click Resume.`);
+                return "manual";
+            }
+            if (pick.resolution === "view") {
+                const fileUri = vscode.Uri.joinPath(vscode.Uri.file(gitHelper.getWorkspaceRoot()), filePath);
+                await vscode.window.showTextDocument(fileUri, { preview: false }).then(undefined, () => { });
+                continue; // re-show the picker for this file
+            }
+            await gitHelper.resolveCherryPickFile(filePath, pick.resolution);
+            break;
         }
-        if (conflicts.length > 8) {
-            vscode.window.showInformationMessage(`…and ${conflicts.length - 8} more conflict(s) — see the Source Control view for the full list.`);
-        }
-        await vscode.commands.executeCommand("workbench.view.scm");
     }
+    // All files resolved — continue the cherry-pick
+    const newConflicts = await gitHelper.continueCherryPick();
+    if (newConflicts.length === 0) {
+        return "resolved";
+    }
+    const list = newConflicts.slice(0, 6).join(", ");
+    vscode.window.showWarningMessage(`${newConflicts.length} more conflict(s) appeared: ${list}. Open Source Control and resolve them, then click Resume.`);
+    return "manual";
 }
 //# sourceMappingURL=promoteStory.js.map

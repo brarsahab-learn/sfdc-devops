@@ -29,6 +29,9 @@ exports.VALID_TEST_LEVELS = ["NoTestRun", "RunSpecifiedTests", "RunLocalTests", 
  * sandbox deployments with no Apex/test-class changes get `NoTestRun` to skip the overhead.
  *
  *  - "all"  → RunAllTestsInOrg, unconditionally.
+ *  - sandbox + coverageGate===false → NoTestRun always (Apex still compiles; tests don't run,
+ *    coverage is not required). This is the right behaviour for dev/QA orgs where the team
+ *    deliberately opts out of the coverage gate.
  *  - "auto" with at least one detected test → RunSpecifiedTests naming just those tests.
  *  - "auto" with Apex in the selection but nothing detected → RunLocalTests (RunSpecifiedTests
  *    with an empty list is rejected by the CLI).
@@ -36,9 +39,14 @@ exports.VALID_TEST_LEVELS = ["NoTestRun", "RunSpecifiedTests", "RunLocalTests", 
  *  - no Apex in the selection + production (isProd === true) → use the configured level
  *    (Salesforce mandates tests on production deployments; never override to NoTestRun).
  */
-function resolveEffectiveTestLevel(configuredLevel, testMode, apexClassesInSelection, apexTestMap, isProd = false) {
+function resolveEffectiveTestLevel(configuredLevel, testMode, apexClassesInSelection, apexTestMap, isProd = false, coverageGate = true) {
     if (testMode === "all") {
         return { testLevel: "RunAllTestsInOrg" };
+    }
+    // Sandbox with coverage gate disabled: skip tests entirely — Apex is still compiled by
+    // Salesforce even with NoTestRun, so compile errors are still caught.
+    if (!isProd && !coverageGate) {
+        return { testLevel: "NoTestRun" };
     }
     const detected = Array.from(new Set(apexClassesInSelection.map(name => apexTestMap[name]).filter((t) => Boolean(t))));
     if (detected.length > 0) {

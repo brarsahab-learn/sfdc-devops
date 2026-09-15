@@ -48,7 +48,7 @@ export class GitHelper {
 
     private acquireGitLock(): void {
         if (this.gitOperationBusy) {
-            throw new Error("Another promotion/publish operation is already running — wait for it to finish before starting a new one.");
+            throw new Error("Another operation is still in progress — please wait for it to finish before starting a new one.");
         }
         this.gitOperationBusy = true;
     }
@@ -156,7 +156,7 @@ export class GitHelper {
         const base = getBaseBranch();
         await this.git(["fetch", "origin", "--prune"]);
         if (!(await this.remoteBranchExists(base))) {
-            throw new Error(`Base branch origin/${base} doesn't exist either — push that first (or fix sfDevops.baseBranch).`);
+            throw new Error(`The base branch (${base}) has not been pushed to the server yet. Please push it first, or check your sfDevops.baseBranch setting.`);
         }
         await this.git(["push", "origin", `origin/${base}:refs/heads/${branchName}`]);
     }
@@ -165,7 +165,7 @@ export class GitHelper {
     async pushLocalBranchToOrigin(branchName: string): Promise<void> {
         const localExists = await this.git(["rev-parse", "--verify", branchName]).then(() => true).catch(() => false);
         if (!localExists) {
-            throw new Error(`"${branchName}" doesn't exist locally — create it first or update sfDevops.baseBranch.`);
+            throw new Error(`Branch "${branchName}" doesn't exist locally. Create it first or check your sfDevops.baseBranch setting.`);
         }
         await this.git(["push", "-u", "origin", branchName]);
     }
@@ -473,6 +473,25 @@ export class GitHelper {
         return meta;
     }
 
+    /** Resolves a single cherry-pick conflicted file by choosing one side, then stages it. */
+    async resolveCherryPickFile(filePath: string, side: "ours" | "theirs"): Promise<void> {
+        await this.git(["checkout", `--${side}`, "--", filePath]);
+        await this.git(["add", "--", filePath]);
+    }
+
+    /**
+     * Continues an in-progress cherry-pick after all conflicts have been resolved and staged.
+     * Returns the list of any NEW conflicts that appeared (should be empty for a single squash).
+     */
+    async continueCherryPick(): Promise<string[]> {
+        try {
+            await this.git(["-c", "core.editor=true", "cherry-pick", "--continue"]);
+            return [];
+        } catch {
+            return await this.unmergedFiles();
+        }
+    }
+
     private async cherryPickInProgress(): Promise<boolean> {
         try {
             await this.git(["rev-parse", "--verify", "--quiet", "CHERRY_PICK_HEAD"]);
@@ -495,8 +514,8 @@ export class GitHelper {
 
         if (!(await this.remoteBranchExists(featureBranch))) {
             throw new Error(
-                `Feature branch origin/${featureBranch} not found. Expected it to be pushed under this name ` +
-                `for story "${storyId}" — check that the branch was created via Start New Study and pushed.`
+                `Feature branch origin/${featureBranch} not found. ` +
+                `Make sure the story "${storyId}" was started using "Start New Story" and the branch has been uploaded (pushed) to the server.`
             );
         }
 
@@ -516,7 +535,7 @@ export class GitHelper {
         });
 
         if (changedFiles.length === 0) {
-            throw new Error(`No changes found for ${storyId} relative to ${base}.`);
+            throw new Error(`No Salesforce metadata changes found for story "${storyId}". Make sure you have saved and uploaded your changes before promoting.`);
         }
 
         // Build the squash on a branch cut from the merge-base so its parent is clean.
@@ -555,8 +574,8 @@ export class GitHelper {
 
         if (!(await this.remoteBranchExists(featureBranch))) {
             throw new Error(
-                `Feature branch origin/${featureBranch} not found. Expected it to be pushed under this name ` +
-                `for story "${storyId}" — check that the branch was created via Start New Story and pushed.`
+                `Feature branch origin/${featureBranch} not found. ` +
+                `Make sure the story "${storyId}" was started using "Start New Story" and the branch has been uploaded (pushed) to the server.`
             );
         }
 
@@ -616,16 +635,16 @@ export class GitHelper {
             try {
                 await this.git(["rev-parse", "--verify", `origin/${devBranch}`]);
             } catch {
-                throw new Error(`${devBranch} branch not found on remote (origin/${devBranch}).`);
+                throw new Error(`The dev branch "${devBranch}" was not found on the server. Ask your admin to create and push it.`);
             }
 
             const conflicting = await this.conflictingPendingOperation(storyId);
             if (conflicting) {
                 if (!force) {
                     throw new Error(
-                        `Another operation is still pending for ${conflicting.storyId}` +
-                        `${conflicting.targetEnv ? ` → ${conflicting.targetEnv}` : ""} (unresolved conflict). ` +
-                        `Resolve or discard it before starting a new one.`
+                        `Story "${conflicting.storyId}" still has unresolved conflicts` +
+                        `${conflicting.targetEnv ? ` (sending to ${conflicting.targetEnv})` : ""}. ` +
+                        `Resolve or cancel that story's conflicts first before starting another operation.`
                     );
                 }
                 await this.abortPendingOperationImpl(conflicting.storyId);
@@ -713,21 +732,21 @@ export class GitHelper {
             try {
                 await this.git(["rev-parse", "--verify", `origin/${featureBranch}`]);
             } catch {
-                throw new Error(`Source branch not found on remote: ${featureBranch}. Push the feature branch first.`);
+                throw new Error(`Your story branch "${featureBranch}" has not been uploaded to the server. Please upload (push) it first.`);
             }
             try {
                 await this.git(["rev-parse", "--verify", `origin/${targetBranch}`]);
             } catch {
-                throw new Error(`Target environment branch not found: origin/${targetBranch}.`);
+                throw new Error(`The target environment branch "${targetBranch}" was not found on the server. Ask your admin to create and push it.`);
             }
 
             const conflicting = await this.conflictingPendingOperation(storyId, targetEnv);
             if (conflicting) {
                 if (!force) {
                     throw new Error(
-                        `Another operation is still pending for ${conflicting.storyId}` +
-                        `${conflicting.targetEnv ? ` → ${conflicting.targetEnv}` : ""} (unresolved conflict). ` +
-                        `Resolve or discard it before starting a new one.`
+                        `Story "${conflicting.storyId}" still has unresolved conflicts` +
+                        `${conflicting.targetEnv ? ` (sending to ${conflicting.targetEnv})` : ""}. ` +
+                        `Resolve or cancel that story's conflicts first before starting another operation.`
                     );
                 }
                 await this.abortPendingOperationImpl(conflicting.storyId);
