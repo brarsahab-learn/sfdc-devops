@@ -51,22 +51,22 @@ async function syncBranch(gitHelper, storyProvider) {
     const base = (0, config_1.getBaseBranch)();
     await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
-        title: `Syncing ${branch} with ${base}...`,
+        title: `Syncing ${branch}…`,
         cancellable: false,
     }, async () => {
         try {
             await gitHelper.syncWithDev();
             await gitHelper.appendAudit({
                 operation: "syncBranch", branch: branch ?? undefined, outcome: "success",
-                summary: `Synced ${branch} with ${base}`,
+                summary: `Synced ${branch} with origin and ${base}`,
             });
-            vscode.window.showInformationMessage(`✅ ${branch} synced with ${base}`);
+            vscode.window.showInformationMessage(`✅ ${branch} is up to date with origin and ${base}`);
             storyProvider.refresh();
         }
         catch (err) {
             await gitHelper.appendAudit({
                 operation: "syncBranch", branch: branch ?? undefined, outcome: "failure",
-                summary: `Sync with ${base} failed`,
+                summary: `Sync failed for ${branch}`,
                 details: { error: String(err) },
             });
             vscode.window.showErrorMessage(`Sync failed: ${err}\n\nResolve conflicts manually then run: git rebase --continue`);

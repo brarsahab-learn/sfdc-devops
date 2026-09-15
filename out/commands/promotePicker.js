@@ -1,9 +1,9 @@
 "use strict";
 // promotePicker.ts — "Promote to {env}" entry point.
 // Shows every story sitting on the previous stage's branch that hasn't been promoted to
-// the target stage yet, and lets the user pick one — works regardless of which branch is
-// currently checked out, unlike the old flow which silently acted on whatever feature
-// branch happened to be current.
+// the target stage yet.  Supports multi-select so several stories can be queued in one
+// session.  After selection a change-preview step lists every file touched per story so
+// the developer knows exactly what is about to be validated/deployed before anything runs.
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     var desc = Object.getOwnPropertyDescriptor(m, k);
@@ -55,8 +55,6 @@ async function findPromotionCandidates(gitHelper, prevBranch, targetBranch) {
     const byStory = (0, DeploymentPlanner_1.distinctStoryIdsFromCommits)(commits, (0, config_1.getTicketKeyPattern)());
     const out = [];
     for (const [storyId, storyCommits] of byStory) {
-        // Greps the whole target-branch history for the story id — survives squash-merges
-        // (which replace the commit message with the PR title, not the raw squash commit).
         const alreadyOnTarget = await gitHelper.storyCommitShaOnBranch(targetBranch, storyId);
         if (alreadyOnTarget) {
             continue;
@@ -65,6 +63,54 @@ async function findPromotionCandidates(gitHelper, prevBranch, targetBranch) {
         out.push({ storyId, commitCount: storyCommits.length, lastDate: latest.date, lastMessage: latest.message });
     }
     return out.sort((a, b) => a.storyId.localeCompare(b.storyId));
+}
+/**
+ * Builds a QuickPick-compatible file preview for a batch of stories.
+ * Shows a "Promote N stories" action item at the top so the user can confirm from inside
+ * the same list they just reviewed — no separate modal needed.
+ * Returns true when the user clicked the Promote action; false / undefined if they escaped.
+ */
+async function showChangePreview(gitHelper, storyIds, envLabel) {
+    const actionLabel = storyIds.length === 1
+        ? `$(rocket)  Promote ${storyIds[0]} to ${envLabel}`
+        : `$(rocket)  Promote all ${storyIds.length} stories to ${envLabel}`;
+    const items = [
+        {
+            label: actionLabel,
+            description: "Select this to start — validations run one story at a time",
+            alwaysShow: true,
+        },
+        { kind: vscode.QuickPickItemKind.Separator, label: "Changes included" },
+    ];
+    for (const storyId of storyIds) {
+        items.push({ kind: vscode.QuickPickItemKind.Separator, label: storyId });
+        try {
+            const files = await gitHelper.previewStoryFiles(storyId);
+            if (files.length === 0) {
+                items.push({ label: "  (no metadata changes)", description: storyId });
+            }
+            else {
+                const shown = files.slice(0, 25);
+                for (const f of shown) {
+                    const icon = f.change === "added" ? "$(add)" : f.change === "deleted" ? "$(trash)" : "$(edit)";
+                    items.push({ label: `  ${icon}  ${f.path}`, description: f.change });
+                }
+                if (files.length > 25) {
+                    items.push({ label: `  … and ${files.length - 25} more`, description: "" });
+                }
+            }
+        }
+        catch {
+            items.push({ label: "  (could not load file list — branch may not be pushed yet)", description: storyId });
+        }
+    }
+    const picked = await vscode.window.showQuickPick(items, {
+        title: `Change Preview — Promoting to ${envLabel}`,
+        placeHolder: "Review changes, then select 'Promote' at the top to begin",
+        canPickMany: false,
+        ignoreFocusOut: true,
+    });
+    return Boolean(picked && picked.label === actionLabel);
 }
 async function promoteViaPicker(bbClient, gitHelper, targetEnv, storyProvider) {
     const envCfg = (0, config_1.findEnvironment)(targetEnv);
@@ -76,9 +122,6 @@ async function promoteViaPicker(bbClient, gitHelper, targetEnv, storyProvider) {
     const promotable = (0, config_1.getPromotableEnvironments)();
     const idx = promotable.findIndex(e => e.name === targetEnv);
     const prevEnv = idx > 0 ? promotable[idx - 1] : (0, config_1.getPublishEnvironment)();
-    // Same hard gate as Deploy/Validate and the direct promote command — enforced again
-    // here so the picker can never be used to bypass it, even though runPromotion (called
-    // below once a story is picked) also enforces it independently.
     if (idx > 0) {
         const gap = await gitHelper.checkPrevEnvDeployed(prevEnv, envCfg.label);
         if (gap.blocked) {
@@ -103,22 +146,32 @@ async function promoteViaPicker(bbClient, gitHelper, targetEnv, storyProvider) {
         description: `${c.commitCount} commit(s)`,
         detail: `${c.lastDate.slice(0, 10)} — ${c.lastMessage}`,
         storyId: c.storyId,
+        picked: false,
     }));
-    const picked = await vscode.window.showQuickPick(items, {
+    // ── Step 1: select stories (multi-select) ─────────────────────────────────
+    const selected = await vscode.window.showQuickPick(items, {
         title: `Promote to ${envCfg.label}`,
-        placeHolder: `Select a story currently on ${prevEnv.label} to promote to ${envCfg.label}`,
+        placeHolder: `Select stories to promote (Space to toggle, Enter to confirm)`,
+        canPickMany: true,
     });
-    if (!picked) {
+    if (!selected || selected.length === 0) {
         return;
     }
-    await promoteSelectedStory(bbClient, gitHelper, picked.storyId, targetEnv, storyProvider);
+    // ── Step 2: change preview before anything runs ───────────────────────────
+    const confirmed = await showChangePreview(gitHelper, selected.map(s => s.storyId), envCfg.label);
+    if (!confirmed) {
+        return;
+    }
+    // ── Step 3: run promotions sequentially ───────────────────────────────────
+    for (const pick of selected) {
+        await promoteSelectedStory(bbClient, gitHelper, pick.storyId, targetEnv, storyProvider);
+    }
 }
 /**
  * Runs the existing promotion flow for an explicitly chosen story, from whatever branch
- * happens to be checked out — beginPromotion/finalizeAndFinish always end by checking out
- * the PROMOTED story's feature branch (never the one you started on), so this restores
- * the original branch afterward, mirroring the same originalBranch/checkoutBranch pattern
- * DeploymentDashboardPanel._runAction already uses for its own temporary branch switches.
+ * happens to be checked out.  Restores the original branch after the promotion finishes
+ * (beginPromotion / finalizeAndFinish end on the promoted story's feature branch, not the
+ * one the user started on).
  */
 async function promoteSelectedStory(bbClient, gitHelper, storyId, targetEnv, storyProvider) {
     if (await gitHelper.hasUncommittedChanges()) {
