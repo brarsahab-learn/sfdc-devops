@@ -6,7 +6,7 @@ import * as vscode from "vscode";
 import { GitHelper } from "../GitHelper";
 import { IGitProviderClient } from "../GitProviderClient";
 import { runSetupChecks, SetupCheckItem } from "../SetupCheck";
-import { getOrgAliasSlots, setOrgAliasSlot, OrgAliasSlot, getAuditLogRetentionDays, getEnvironments, saveEnvironments, EnvironmentSetting, getBaseBranch, saveBaseBranch, getCoverageThreshold, getCoverageTimeoutSeconds, saveCoverageThreshold, saveCoverageTimeoutSeconds } from "../config";
+import { getOrgAliasSlots, setOrgAliasSlot, OrgAliasSlot, getAuditLogRetentionDays, getEnvironments, saveEnvironments, EnvironmentSetting, getBaseBranch, saveBaseBranch, getCoverageThreshold, getCoverageTimeoutSeconds, saveCoverageThreshold, saveCoverageTimeoutSeconds, getGitProvider, getRepoWorkspace, getRepoSlug, saveRepoIdentity } from "../config";
 import { canAccessConfig } from "../RoleManager";
 import { getEffectiveRole } from "../RoleManager";
 import { sharedCss, cspMeta, loadingHtml } from "../ui/shared";
@@ -58,7 +58,8 @@ export class AdminPanel {
                 case "saveBaseBranch":  await this._saveBaseBranch(msg.branch); break;
                 case "pushBranch":      await this._pushBranch(msg.branch); break;
                 case "createEnvBranch": await this._createEnvBranch(msg.branch); break;
-                case "saveGuardrails":  await this._saveGuardrails(msg.threshold, msg.timeout); break;
+                case "saveGuardrails":   await this._saveGuardrails(msg.threshold, msg.timeout); break;
+                case "saveRepoIdentity": await this._saveRepoIdentity(msg.provider, msg.workspace, msg.slug); break;
                 case "openTerminal":
                     vscode.window.createTerminal("Salesforce-DevOps").show();
                     break;
@@ -127,6 +128,18 @@ export class AdminPanel {
         }
     }
 
+    private async _saveRepoIdentity(provider: string, workspace: string, slug: string): Promise<void> {
+        const role = getEffectiveRole(this._ctx);
+        if (!canAccessConfig(role)) { return; }
+        try {
+            await saveRepoIdentity(provider, workspace, slug);
+            vscode.window.showInformationMessage("Repo identity saved.");
+            await this._refresh();
+        } catch (err) {
+            vscode.window.showErrorMessage(`Could not save repo identity: ${err}`);
+        }
+    }
+
     private async _saveEnvironments(envs: EnvironmentSetting[]): Promise<void> {
         const role = getEffectiveRole(this._ctx);
         if (!canAccessConfig(role)) { return; }
@@ -152,7 +165,10 @@ export class AdminPanel {
             const retentionDays     = getAuditLogRetentionDays();
             const coverageThreshold = getCoverageThreshold();
             const coverageTimeout   = getCoverageTimeoutSeconds();
-            this._panel.webview.html = this._renderHtml(checks, slots, envs, baseBranch, role, sizeKb, retentionDays, coverageThreshold, coverageTimeout);
+            const gitProvider       = getGitProvider();
+            const repoWorkspace     = getRepoWorkspace();
+            const repoSlug          = getRepoSlug();
+            this._panel.webview.html = this._renderHtml(checks, slots, envs, baseBranch, role, sizeKb, retentionDays, coverageThreshold, coverageTimeout, gitProvider, repoWorkspace, repoSlug);
         } catch (err) {
             this._panel.webview.html = `<body style="padding:20px;font-family:sans-serif;color:#f48771">Error: ${String(err)}</body>`;
         } finally {
@@ -203,6 +219,9 @@ export class AdminPanel {
         retentionDays:     number,
         coverageThreshold: number,
         coverageTimeout:   number,
+        gitProvider:       string,
+        repoWorkspace:     string,
+        repoSlug:          string,
     ): string {
         const isAdmin  = canAccessConfig(role);
         const failing  = checks.filter(c => c.required && !c.passed).length;
@@ -342,6 +361,39 @@ ${checkRows}
 </p>
 ${slotRows}
 
+<h2>Repo Identity</h2>
+<p style="font-size:12px;color:var(--muted);margin:0 0 10px">
+  The GitHub account and repo used to build PR and branch links. Overrides what's auto-derived from the <code>origin</code> remote URL.
+  ${isAdmin ? "Changes save to <code>.vscode/settings.json</code>." : "<strong>Admin access required to edit.</strong>"}
+</p>
+${isAdmin ? `
+<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:8px">
+  <div>
+    <div style="font-size:11px;color:var(--vscode-descriptionForeground);margin-bottom:3px">Git Provider</div>
+    <select class="et-select" id="repoProvider" style="font-size:12px;padding:4px 6px">
+      <option value="github"${gitProvider === "github" ? " selected" : ""}>GitHub</option>
+      <option value="bitbucket"${gitProvider === "bitbucket" ? " selected" : ""}>Bitbucket</option>
+    </select>
+  </div>
+  <div>
+    <div style="font-size:11px;color:var(--vscode-descriptionForeground);margin-bottom:3px">Owner / Workspace</div>
+    <input class="et-input" id="repoWorkspace" value="${escapeHtml(repoWorkspace)}" placeholder="e.g. brar-sahab" style="width:180px">
+  </div>
+  <div>
+    <div style="font-size:11px;color:var(--vscode-descriptionForeground);margin-bottom:3px">Repo Name</div>
+    <input class="et-input" id="repoSlug" value="${escapeHtml(repoSlug)}" placeholder="e.g. sfdc-devops" style="width:180px">
+  </div>
+  <div>
+    <button class="btn btn-sm" onclick="saveRepoIdentity()">Save</button>
+    <span id="repoIdentityMsg" style="font-size:11px;color:var(--ok);display:none;margin-left:6px">Saved ✓</span>
+  </div>
+</div>` : `
+<div style="font-size:12px;display:flex;gap:16px;flex-wrap:wrap">
+  <span><strong>Provider:</strong> ${escapeHtml(gitProvider)}</span>
+  <span><strong>Owner:</strong> ${escapeHtml(repoWorkspace || "(derived from remote)")}</span>
+  <span><strong>Repo:</strong> ${escapeHtml(repoSlug || "(derived from remote)")}</span>
+</div>`}
+
 <h2>Guardrails</h2>
 <p style="font-size:12px;color:var(--muted);margin:0 0 10px">
   Per-environment gate settings live in the Pipeline table below. Configure the global coverage threshold here.
@@ -465,6 +517,14 @@ ${isAdmin ? `
   function createEnvBranch(branch, btn) {
     if (btn) { btn.disabled = true; btn.textContent = '⏳ Creating…'; }
     vscode.postMessage({ command: 'createEnvBranch', branch: branch });
+  }
+  function saveRepoIdentity() {
+    var provider  = (document.getElementById('repoProvider')  || {}).value || '';
+    var workspace = (document.getElementById('repoWorkspace') || {}).value || '';
+    var slug      = (document.getElementById('repoSlug')      || {}).value || '';
+    vscode.postMessage({ command: 'saveRepoIdentity', provider: provider, workspace: workspace, slug: slug });
+    var msg = document.getElementById('repoIdentityMsg');
+    if (msg) { msg.style.display = 'inline'; setTimeout(function() { msg.style.display = 'none'; }, 2500); }
   }
   function saveGuardrails() {
     var threshold = parseInt((document.getElementById('guardrailThreshold') || {}).value, 10);

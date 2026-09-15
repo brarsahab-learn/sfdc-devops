@@ -75,6 +75,7 @@ exports.getGitProvider = getGitProvider;
 exports.getGitProviderRaw = getGitProviderRaw;
 exports.getRepoWorkspace = getRepoWorkspace;
 exports.getRepoSlug = getRepoSlug;
+exports.saveRepoIdentity = saveRepoIdentity;
 exports.getCoverageThreshold = getCoverageThreshold;
 exports.getCoverageTimeoutSeconds = getCoverageTimeoutSeconds;
 exports.saveCoverageThreshold = saveCoverageThreshold;
@@ -487,6 +488,15 @@ function getRepoWorkspace() {
 }
 function getRepoSlug() {
     return cfg().get("repoSlug") || cfg().get("bitbucketRepoSlug") || "";
+}
+async function saveRepoIdentity(provider, workspace, slug) {
+    const target = vscode.workspace.workspaceFolders?.length
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global;
+    const c = vscode.workspace.getConfiguration("sfDevops");
+    await c.update("gitProvider", provider || undefined, target);
+    await c.update("repoWorkspace", workspace || undefined, target);
+    await c.update("repoSlug", slug || undefined, target);
 }
 // ── Coverage / source layout ─────────────────────────────────────────────────
 function getCoverageThreshold() {

@@ -469,6 +469,16 @@ export function getRepoSlug(): string {
     return cfg().get<string>("repoSlug") || cfg().get<string>("bitbucketRepoSlug") || "";
 }
 
+export async function saveRepoIdentity(provider: string, workspace: string, slug: string): Promise<void> {
+    const target = vscode.workspace.workspaceFolders?.length
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global;
+    const c = vscode.workspace.getConfiguration("sfDevops");
+    await c.update("gitProvider",    provider  || undefined, target);
+    await c.update("repoWorkspace",  workspace || undefined, target);
+    await c.update("repoSlug",       slug      || undefined, target);
+}
+
 // ── Coverage / source layout ─────────────────────────────────────────────────
 
 export function getCoverageThreshold(): number {
