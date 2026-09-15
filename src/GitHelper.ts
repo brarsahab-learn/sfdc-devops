@@ -1207,9 +1207,29 @@ export class GitHelper {
 
         await this.git(["fetch", "origin"]);
 
+        // If a remote copy of this branch exists and is ahead, incorporate those commits
+        // first so the subsequent base-rebase doesn't replay work a teammate already pushed.
+        const remoteExists = await this.remoteBranchExists(branch);
+        if (remoteExists) {
+            const behindOrigin = parseInt(
+                await this.git(["rev-list", "--count", `${branch}..origin/${branch}`]).catch(() => "0"), 10
+            ) || 0;
+            if (behindOrigin > 0) {
+                try {
+                    // fast-forward when possible, rebase when diverged
+                    await this.git(["rebase", `origin/${branch}`]);
+                } catch (pullErr) {
+                    try { await this.git(["rebase", "--abort"]); } catch {}
+                    throw new Error(
+                        `Could not sync with origin/${branch} — conflicts exist. Resolve manually:\n` +
+                        `  git rebase origin/${branch}\n  (fix conflicts)\n  git rebase --continue`
+                    );
+                }
+            }
+        }
+
         const base2 = getBaseBranch();
         try {
-            // Try rebase first (cleaner history)
             await this.git(["rebase", `origin/${base2}`]);
             await this.git(["push", "--force-with-lease", "origin", branch]);
         } catch (rebaseErr) {
@@ -1226,6 +1246,16 @@ export class GitHelper {
     async commitsBehind(branch: string, ref: string): Promise<number> {
         try {
             const out = await this.git(["rev-list", "--count", `${branch}..${ref}`]);
+            return parseInt(out, 10) || 0;
+        } catch {
+            return 0;
+        }
+    }
+
+    /** How many commits `origin/<branch>` is ahead of the local `branch` — 0 when there is no remote copy. */
+    async commitsBehindOrigin(branch: string): Promise<number> {
+        try {
+            const out = await this.git(["rev-list", "--count", `${branch}..origin/${branch}`]);
             return parseInt(out, 10) || 0;
         } catch {
             return 0;

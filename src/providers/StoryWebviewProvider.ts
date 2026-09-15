@@ -415,6 +415,9 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
             const behind    = onFeature
                 ? await this._gitHelper.commitsBehind(branch!, `origin/${getBaseBranch()}`)
                 : 0;
+            const behindOrigin = (onFeature && branch)
+                ? await this._gitHelper.commitsBehindOrigin(branch)
+                : 0;
             const localChanges = onFeature ? await this._getLocalChangesSummary() : null;
             const coverageBlockedEnv = await this._getCoverageBlockedEnv(storyId);
             const repoOverride = await this._gitHelper.resolveRepoIdentity(this._bbClient);
@@ -431,7 +434,7 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
             const pendingActionsCount = await this._countPendingActions();
 
             this._view.webview.html = this._getWebviewHtml(
-                branch ?? "No branch", storyId, progress, behind, coverageBlockedEnv, repoOverride, signoffPassed, localChanges, timelines, deletionAckPending, staleAgeDays, pendingActionsCount
+                branch ?? "No branch", storyId, progress, behind, coverageBlockedEnv, repoOverride, signoffPassed, localChanges, timelines, deletionAckPending, staleAgeDays, pendingActionsCount, behindOrigin
             );
             this._externalSwitchNotice = undefined; // one-shot: shown once, then cleared
 
@@ -669,7 +672,8 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         timelines: Record<string, EnvTimeline>,
         deletionAckPending: { env: string; envLabel: string; files: string[] } | null = null,
         staleAgeDays: number | null = null,
-        pendingActionsCount = 0
+        pendingActionsCount = 0,
+        behindOriginCount = 0
     ): string {
         const onFeatureBranch = isFeatureBranch(branch);
         const baseBranch      = getBaseBranch();
@@ -851,8 +855,12 @@ export class StoryWebviewProvider implements vscode.WebviewViewProvider {
         const moreActions = onFeatureBranch
             ? `<div class="more-actions">
                  ${devPublished ? `<a href="#" onclick="send('commitAndPush')">☁ Publish more changes</a> · ` : ""}
-                 <a href="#" onclick="send('syncBranch')">🔄 Sync with ${baseBranch}</a>
+                 <a href="#" onclick="send('syncBranch')">🔄 Sync branch</a>
                </div>`
+            : "";
+
+        const originWarning = behindOriginCount > 0
+            ? `<div class="warning">&#x26A0; Your branch is ${behindOriginCount} commit(s) behind <strong>origin/${branch}</strong> &mdash; a teammate may have pushed. <a href="#" onclick="send('syncBranch')">Sync now</a> to incorporate their changes before promoting.</div>`
             : "";
 
         const syncWarning = behindCount > 5
@@ -955,6 +963,7 @@ ${this._csp()}
 ${BUSY_BAR_HTML}
 
 ${externalSwitchNotice}
+${originWarning}
 ${syncWarning}
 ${deletionAckPending ? `<div class="warning">
   ⚠ ${escapeHtml(storyId)} deletes ${deletionAckPending.files.length} component(s) not yet manually removed from ${escapeHtml(deletionAckPending.envLabel)}.
