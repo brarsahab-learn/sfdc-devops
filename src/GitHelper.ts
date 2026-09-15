@@ -446,6 +446,33 @@ export class GitHelper {
         for (const f of files) { log(`  ${f.change === "added" ? "+" : f.change === "deleted" ? "-" : "~"} ${f.path}`); }
     }
 
+    /**
+     * After a cherry-pick conflict: for every conflicted file that lives OUTSIDE the
+     * Salesforce source root (e.g. `.forceignore`, `.sf/`, `config/`, `README.md`), accepts
+     * the incoming story version automatically and stages it.  Returns the files that are
+     * still conflicted after the auto-resolution — these are the metadata files the user
+     * must resolve manually.
+     *
+     * Using --theirs keeps the story's intent: the developer changed a config file for a
+     * reason, and those changes should propagate.  The environment-specific files (if any)
+     * will surface during PR review before ever reaching prod.
+     */
+    private async autoResolveNonMetadataConflicts(conflicts: string[]): Promise<string[]> {
+        const sourceRoot = getSourceRootFolder();
+        const nonMeta = conflicts.filter(f => !f.startsWith(sourceRoot + "/") && f !== sourceRoot);
+        const meta    = conflicts.filter(f =>  f.startsWith(sourceRoot + "/") || f === sourceRoot);
+        if (nonMeta.length > 0) {
+            try {
+                await this.git(["checkout", "--theirs", "--", ...nonMeta]);
+                await this.git(["add", "--", ...nonMeta]);
+                log(`Auto-resolved ${nonMeta.length} non-metadata conflict(s): ${nonMeta.join(", ")}`);
+            } catch (e) {
+                log(`[warn] Could not auto-resolve non-metadata conflicts: ${e}`);
+            }
+        }
+        return meta;
+    }
+
     private async cherryPickInProgress(): Promise<boolean> {
         try {
             await this.git(["rev-parse", "--verify", "--quiet", "CHERRY_PICK_HEAD"]);
@@ -588,14 +615,23 @@ export class GitHelper {
                 await this.git(["-c", "core.editor=true", "cherry-pick", squashSha]);
                 log("Applied cleanly.");
             } catch {
-                const conflicts = await this.unmergedFiles();
-                if (conflicts.length === 0) {
+                const allConflicts = await this.unmergedFiles();
+                if (allConflicts.length === 0) {
                     // Story already present in dev → finish the no-op cherry-pick.
                     await this.git(["cherry-pick", "--skip"]).catch(() => {});
                     log("Already up to date in dev — nothing new to apply.");
                 } else {
-                    log(`Conflicts in ${conflicts.length} file(s) — resolve them, then click Resume.`);
-                    return { status: "conflict", branch: devBranch, conflicts };
+                    // Auto-resolve conflicts in non-metadata files so the developer doesn't have to
+                    // manually fix e.g. `.forceignore` or `.sf/` diffs that aren't deployed anyway.
+                    const remaining = await this.autoResolveNonMetadataConflicts(allConflicts);
+                    if (remaining.length === 0) {
+                        // All conflicts were in config/ignore files — continue the cherry-pick.
+                        await this.git(["-c", "core.editor=true", "cherry-pick", "--continue"]);
+                        log("Applied after auto-resolving non-metadata conflicts.");
+                    } else {
+                        log(`Conflicts in ${remaining.length} metadata file(s) — resolve them, then click Resume.`);
+                        return { status: "conflict", branch: devBranch, conflicts: remaining };
+                    }
                 }
             }
 
@@ -683,15 +719,22 @@ export class GitHelper {
                 log("Applied cleanly.");
                 return { status: "clean", branch: promotionBranch, conflicts: [] };
             } catch {
-                const conflicts = await this.unmergedFiles();
-                if (conflicts.length === 0) {
+                const allConflicts = await this.unmergedFiles();
+                if (allConflicts.length === 0) {
                     // Story already present in the target → finish the no-op cherry-pick.
                     await this.git(["cherry-pick", "--skip"]).catch(() => {});
                     log(`Already up to date in ${targetEnv} — nothing new to apply.`);
                     return { status: "clean", branch: promotionBranch, conflicts: [] };
                 }
-                log(`Conflicts in ${conflicts.length} file(s) — resolve them, then click Resume.`);
-                return { status: "conflict", branch: promotionBranch, conflicts };
+                // Auto-resolve conflicts in non-metadata files (e.g. .forceignore, .sf/, config/).
+                const remaining = await this.autoResolveNonMetadataConflicts(allConflicts);
+                if (remaining.length === 0) {
+                    await this.git(["-c", "core.editor=true", "cherry-pick", "--continue"]);
+                    log("Applied after auto-resolving non-metadata conflicts.");
+                    return { status: "clean", branch: promotionBranch, conflicts: [] };
+                }
+                log(`Conflicts in ${remaining.length} metadata file(s) — resolve them, then click Resume.`);
+                return { status: "conflict", branch: promotionBranch, conflicts: remaining };
             }
         } finally {
             this.releaseGitLock();

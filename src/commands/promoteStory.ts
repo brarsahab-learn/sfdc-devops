@@ -165,7 +165,7 @@ async function runPromotionValidate(
         const allClsFiles = await gitHelper.listFilesAtRef(promotionBranch, getSourceRootFolder());
         ({ apexTestMap, apexTestFilePaths } = buildApexTestMap(allClsFiles, apexClasses));
     }
-    let { testLevel, tests } = resolveEffectiveTestLevel(envCfg.deployTestLevel, "auto", apexClasses, apexTestMap, envCfg.isProd);
+    let { testLevel, tests } = resolveEffectiveTestLevel(envCfg.deployTestLevel, "auto", apexClasses, apexTestMap, envCfg.isProd, envCfg.coverageGate ?? true);
 
     // RunSpecifiedTests requires the named test class to be part of the deployment package
     // (or already exist in the org). Fold in test files that weren't otherwise selected.
@@ -393,6 +393,18 @@ export async function runPromotion(
             );
             return;
         }
+    }
+
+    // Warn if the local branch has commits that haven't been pushed — the validate always
+    // runs against origin/<feature>, so validating now would silently use stale content.
+    const localAhead = await gitHelper.commitsAhead(`origin/${featureBranch}`).catch(() => 0);
+    if (localAhead > 0) {
+        const push = await vscode.window.showWarningMessage(
+            `⚠ Your local ${featureBranch} is ${localAhead} commit(s) ahead of origin — the validate will run against the PUSHED content, not what's in your working copy. Push first to include your latest changes.`,
+            { modal: true },
+            "Continue anyway (validate stale)", "Cancel"
+        );
+        if (push !== "Continue anyway (validate stale)") { return; }
     }
 
     const shown = preview.slice(0, 8).map(f => `  ${f.change === "added" ? "+" : f.change === "deleted" ? "-" : "~"} ${f.path}`);
@@ -652,10 +664,14 @@ export async function reportOperationConflict(
     conflicts: string[],
     label:     string
 ): Promise<void> {
+    // All conflicts surfaced here are already Salesforce metadata (non-metadata conflicts
+    // were auto-resolved before this point) — include a clear tip about what to keep.
     const list   = conflicts.slice(0, 8).join(", ") + (conflicts.length > 8 ? ", ..." : "");
     const choice = await vscode.window.showWarningMessage(
-        `Conflicts while preparing ${label}:\n\n${list || "see Source Control"}\n\n` +
-        `Resolve them in the editor (Source Control view), save, then run "Resume".`,
+        `Conflicts in ${conflicts.length} metadata file(s) while preparing ${label}:\n\n` +
+        `${list || "see Source Control"}\n\n` +
+        `Open each file, resolve the conflict markers (keep the version you want), save, then click "Resume". ` +
+        `Tip: conflict markers show "<<<< ours (${label})" vs ">>>> theirs (story changes)" — keep the story's section unless it conflicts with another story already in ${label}.`,
         "Open Conflicts",
         "Later"
     );
