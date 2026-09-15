@@ -491,23 +491,49 @@ export class GitHelper {
     private async storySquashRef(storyId: string, base: string): Promise<string> {
         const featureBranch = featureBranchName(storyId);
         const tmpBranch     = `sf-devops-squash/${storyId}`;
+        const sourceRoot    = getSourceRootFolder();
 
         if (!(await this.remoteBranchExists(featureBranch))) {
             throw new Error(
                 `Feature branch origin/${featureBranch} not found. Expected it to be pushed under this name ` +
-                `for story "${storyId}" — check that the branch was created via Start New Story and pushed.`
+                `for story "${storyId}" — check that the branch was created via Start New Study and pushed.`
             );
         }
 
         const mergeBase = await this.git(["merge-base", `origin/${base}`, `origin/${featureBranch}`]);
 
-        await this.git(["checkout", "-B", tmpBranch, `origin/${featureBranch}`]);
-        await this.git(["reset", "--soft", mergeBase]);
-        try {
-            await this.git(["-c", "core.editor=true", "commit", "--no-verify", "-m", `${storyId}: consolidated story changes`]);
-        } catch {
+        // Compute the story's net diff scoped to the Salesforce source root only.
+        // Using a scoped diff rather than "reset --soft + commit everything" prevents
+        // squash commit drift: if the developer ran `git merge origin/<env>` on their feature
+        // branch (instead of rebase), the unscoped approach would pull base-branch metadata
+        // changes into the squash even though the developer never authored them.
+        const diffRaw = await this.git(["diff", "--name-status", mergeBase, `origin/${featureBranch}`, "--", sourceRoot]);
+        const changedFiles = diffRaw.split("\n").filter(Boolean).map(line => {
+            const tab     = line.indexOf("\t");
+            const status  = line.slice(0, tab).trim();
+            const relPath = line.slice(tab + 1).trim();
+            return { status, path: relPath };
+        });
+
+        if (changedFiles.length === 0) {
             throw new Error(`No changes found for ${storyId} relative to ${base}.`);
         }
+
+        // Build the squash on a branch cut from the merge-base so its parent is clean.
+        await this.git(["checkout", "-B", tmpBranch, mergeBase]);
+
+        const added   = changedFiles.filter(f => !f.status.startsWith("D")).map(f => f.path);
+        const deleted = changedFiles.filter(f =>  f.status.startsWith("D")).map(f => f.path);
+
+        if (added.length > 0) {
+            await this.git(["checkout", `origin/${featureBranch}`, "--", ...added]);
+        }
+        if (deleted.length > 0) {
+            await this.git(["rm", "--force", "--", ...deleted]).catch(() => {});
+        }
+
+        await this.git(["add", "--", sourceRoot]);
+        await this.git(["-c", "core.editor=true", "commit", "--no-verify", "-m", `${storyId}: consolidated story changes`]);
         return this.git(["rev-parse", "HEAD"]);
     }
 
