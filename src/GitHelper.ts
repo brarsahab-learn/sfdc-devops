@@ -161,6 +161,15 @@ export class GitHelper {
         await this.git(["push", "origin", `origin/${base}:refs/heads/${branchName}`]);
     }
 
+    /** Pushes a local branch to origin with -u (sets upstream tracking). Used by the Setup panel to publish a branch that already exists locally but hasn't been pushed yet. */
+    async pushLocalBranchToOrigin(branchName: string): Promise<void> {
+        const localExists = await this.git(["rev-parse", "--verify", branchName]).then(() => true).catch(() => false);
+        if (!localExists) {
+            throw new Error(`"${branchName}" doesn't exist locally — create it first or update sfDevops.baseBranch.`);
+        }
+        await this.git(["push", "-u", "origin", branchName]);
+    }
+
     // ── Pending cherry-pick state (survives reloads via a file in the git dir) ──
 
     private async gitDirPath(): Promise<string> {

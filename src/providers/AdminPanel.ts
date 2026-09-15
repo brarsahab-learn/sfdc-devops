@@ -6,7 +6,7 @@ import * as vscode from "vscode";
 import { GitHelper } from "../GitHelper";
 import { IGitProviderClient } from "../GitProviderClient";
 import { runSetupChecks, SetupCheckItem } from "../SetupCheck";
-import { getOrgAliasSlots, setOrgAliasSlot, OrgAliasSlot, getAuditLogRetentionDays, getEnvironments, saveEnvironments, EnvironmentSetting, getBaseBranch, saveBaseBranch } from "../config";
+import { getOrgAliasSlots, setOrgAliasSlot, OrgAliasSlot, getAuditLogRetentionDays, getEnvironments, saveEnvironments, EnvironmentSetting, getBaseBranch, saveBaseBranch, getCoverageThreshold, getCoverageTimeoutSeconds, saveCoverageThreshold, saveCoverageTimeoutSeconds } from "../config";
 import { canAccessConfig } from "../RoleManager";
 import { getEffectiveRole } from "../RoleManager";
 import { sharedCss, cspMeta, loadingHtml } from "../ui/shared";
@@ -56,6 +56,9 @@ export class AdminPanel {
                 case "clearAudit":      await this._clearAudit(); break;
                 case "saveEnvironments": await this._saveEnvironments(msg.envs); break;
                 case "saveBaseBranch":  await this._saveBaseBranch(msg.branch); break;
+                case "pushBranch":      await this._pushBranch(msg.branch); break;
+                case "createEnvBranch": await this._createEnvBranch(msg.branch); break;
+                case "saveGuardrails":  await this._saveGuardrails(msg.threshold, msg.timeout); break;
                 case "openTerminal":
                     vscode.window.createTerminal("Salesforce-DevOps").show();
                     break;
@@ -83,6 +86,47 @@ export class AdminPanel {
         }
     }
 
+    private async _pushBranch(branch: string): Promise<void> {
+        const role = getEffectiveRole(this._ctx);
+        if (!canAccessConfig(role)) { return; }
+        try {
+            await this._git.pushLocalBranchToOrigin(branch);
+            vscode.window.showInformationMessage(`Pushed "${branch}" to origin.`);
+            await this._refresh();
+        } catch (err) {
+            vscode.window.showErrorMessage(`Could not push "${branch}" to origin: ${err}`);
+        }
+    }
+
+    private async _createEnvBranch(branch: string): Promise<void> {
+        const role = getEffectiveRole(this._ctx);
+        if (!canAccessConfig(role)) { return; }
+        try {
+            await this._git.createEnvBranchOnOrigin(branch);
+            vscode.window.showInformationMessage(`Created "${branch}" on origin from base branch.`);
+            await this._refresh();
+        } catch (err) {
+            vscode.window.showErrorMessage(`Could not create "${branch}" on origin: ${err}`);
+        }
+    }
+
+    private async _saveGuardrails(threshold: number, timeout: number): Promise<void> {
+        const role = getEffectiveRole(this._ctx);
+        if (!canAccessConfig(role)) { return; }
+        try {
+            if (Number.isFinite(threshold) && threshold > 0 && threshold <= 100) {
+                await saveCoverageThreshold(threshold);
+            }
+            if (Number.isFinite(timeout) && timeout >= 30) {
+                await saveCoverageTimeoutSeconds(timeout);
+            }
+            vscode.window.showInformationMessage("Guardrails saved.");
+            await this._refresh();
+        } catch (err) {
+            vscode.window.showErrorMessage(`Could not save guardrails: ${err}`);
+        }
+    }
+
     private async _saveEnvironments(envs: EnvironmentSetting[]): Promise<void> {
         const role = getEffectiveRole(this._ctx);
         if (!canAccessConfig(role)) { return; }
@@ -99,14 +143,16 @@ export class AdminPanel {
         if (this._refreshing) { return; }
         this._refreshing = true;
         try {
-            const role       = getEffectiveRole(this._ctx);
-            const checks     = await runSetupChecks(this._git, this._bb, this._ctx, role);
-            const slots      = getOrgAliasSlots();
-            const envs       = getEnvironments();
-            const baseBranch = getBaseBranch();
-            const sizeKb     = Math.round(await this._git.getAuditLogSizeBytes() / 1024);
-            const retentionDays = getAuditLogRetentionDays();
-            this._panel.webview.html = this._renderHtml(checks, slots, envs, baseBranch, role, sizeKb, retentionDays);
+            const role              = getEffectiveRole(this._ctx);
+            const checks            = await runSetupChecks(this._git, this._bb, this._ctx, role);
+            const slots             = getOrgAliasSlots();
+            const envs              = getEnvironments();
+            const baseBranch        = getBaseBranch();
+            const sizeKb            = Math.round(await this._git.getAuditLogSizeBytes() / 1024);
+            const retentionDays     = getAuditLogRetentionDays();
+            const coverageThreshold = getCoverageThreshold();
+            const coverageTimeout   = getCoverageTimeoutSeconds();
+            this._panel.webview.html = this._renderHtml(checks, slots, envs, baseBranch, role, sizeKb, retentionDays, coverageThreshold, coverageTimeout);
         } catch (err) {
             this._panel.webview.html = `<body style="padding:20px;font-family:sans-serif;color:#f48771">Error: ${String(err)}</body>`;
         } finally {
@@ -148,13 +194,15 @@ export class AdminPanel {
     }
 
     private _renderHtml(
-        checks:        SetupCheckItem[],
-        slots:         OrgAliasSlot[],
-        envs:          ReturnType<typeof getEnvironments>,
-        baseBranch:    string,
-        role:          string,
-        auditSizeKb:   number,
-        retentionDays: number,
+        checks:            SetupCheckItem[],
+        slots:             OrgAliasSlot[],
+        envs:              ReturnType<typeof getEnvironments>,
+        baseBranch:        string,
+        role:              string,
+        auditSizeKb:       number,
+        retentionDays:     number,
+        coverageThreshold: number,
+        coverageTimeout:   number,
     ): string {
         const isAdmin  = canAccessConfig(role);
         const failing  = checks.filter(c => c.required && !c.passed).length;
@@ -180,10 +228,25 @@ export class AdminPanel {
             const cls     = c.passed ? "pass" : (c.required ? "fail" : "warn");
             const fixHtml = !c.passed && c.fixSteps.length
                 ? `<ol class="fix">${c.fixSteps.map(s => `<li>${escapeHtml(s)}</li>`).join("")}</ol>` : "";
+            let quickActionHtml = "";
+            if (!c.passed && isAdmin) {
+                if (c.key === "baseBranch") {
+                    quickActionHtml = `<div style="margin:6px 0 0 24px">
+  <button class="btn btn-sm" onclick="pushBranch(${JSON.stringify(baseBranch)})">⬆ Push "${escapeHtml(baseBranch)}" to origin</button>
+</div>`;
+                } else if (c.key === "environmentBranches" && c.missingEnvBranches?.length) {
+                    const btns = c.missingEnvBranches.map(m =>
+                        `<button class="btn btn-sm" onclick="createEnvBranch(${JSON.stringify(m.branch)})">+ ${escapeHtml(m.label)} (${escapeHtml(m.branch)})</button>`
+                    ).join(" ");
+                    quickActionHtml = `<div style="margin:6px 0 0 24px">
+  <span style="font-size:11px;color:var(--vscode-descriptionForeground)">Create on origin from base branch: </span>${btns}
+</div>`;
+                }
+            }
             return `<div class="check ${cls}">
   <div class="check-head">${icon} <strong>${escapeHtml(c.label)}</strong>${c.required ? "" : " <span class='opt'>optional</span>"}</div>
   <div class="check-detail">${escapeHtml(c.detail)}</div>
-  ${fixHtml}
+  ${fixHtml}${quickActionHtml}
 </div>`;
         }).join("");
 
@@ -240,6 +303,16 @@ ol.fix { margin: 5px 0 0 24px; padding-left: 16px; font-size: 12px; color: var(-
 .collapsible-h2 { display: flex; align-items: center; gap: 6px; }
 .collapsible-h2 span { font-size: 11px; transition: transform 0.15s; display: inline-block; }
 .collapsible-h2.collapsed span { transform: rotate(-90deg); }
+.guardrail-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 10px; }
+.guardrail-table th { text-align: left; padding: 5px 8px; font-size: 11px; color: var(--vscode-descriptionForeground); font-weight: 600; border-bottom: 1px solid var(--vscode-panel-border); white-space: nowrap; }
+.guardrail-table td { padding: 5px 8px; border-bottom: 1px solid var(--vscode-panel-border); vertical-align: middle; }
+.guardrail-table tr:last-child td { border-bottom: none; }
+.guardrail-table tr:hover td { background: var(--vscode-list-hoverBackground); }
+.gate-on  { color: var(--ok, #4caf50); font-weight: 600; }
+.gate-off { color: var(--vscode-descriptionForeground); }
+.guardrail-inputs { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.guardrail-inputs label { font-size: 12px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
+.guardrail-inputs input { width: 70px; }
 </style>
 </head>
 <body>
@@ -267,6 +340,45 @@ ${checkRows}
   ${isAdmin ? "" : "Only Admins can change org aliases."}
 </p>
 ${slotRows}
+
+<h2>Guardrails</h2>
+<p style="font-size:12px;color:var(--muted);margin:0 0 10px">
+  Per-environment gate settings live in the Pipeline table below. Configure the global coverage threshold here.
+</p>
+<div class="guardrail-inputs">
+  <label>Coverage threshold:</label>
+  ${isAdmin
+    ? `<input class="et-input" id="guardrailThreshold" type="number" min="1" max="100" value="${coverageThreshold}" style="width:60px"> %`
+    : `<strong>${coverageThreshold}%</strong>`
+  }
+  <label style="margin-left:10px">Apex test timeout:</label>
+  ${isAdmin
+    ? `<input class="et-input" id="guardrailTimeout" type="number" min="30" value="${coverageTimeout}" style="width:80px"> s`
+    : `<strong>${coverageTimeout}s</strong>`
+  }
+  ${isAdmin ? `<button class="btn btn-sm" onclick="saveGuardrails()">Save</button>
+  <span id="guardrailMsg" style="font-size:11px;color:var(--ok);display:none">Saved ✓</span>` : ""}
+</div>
+<table class="guardrail-table">
+  <thead><tr>
+    <th>Environment</th>
+    <th title="Coverage check must pass before story can promote to this env">Coverage Gate</th>
+    <th title="Human sign-off required before story can promote from this env">Sign-off Gate</th>
+    <th>Required Role</th>
+    <th title="Enables production safety guards (no auto-deploy, etc.)">Production</th>
+    <th title="All promotions and deploys blocked for all roles">Locked</th>
+  </tr></thead>
+  <tbody>
+    ${envs.map(e => `<tr>
+      <td><strong>${escapeHtml(e.label)}</strong> <span style="font-size:10px;color:var(--vscode-descriptionForeground)">(${escapeHtml(e.branch)})</span></td>
+      <td class="${e.coverageGate ? "gate-on" : "gate-off"}">${e.coverageGate ? `✅ ≥ ${coverageThreshold}%` : "—"}</td>
+      <td class="${e.signoffGate ? "gate-on" : "gate-off"}">${e.signoffGate ? "✅ Required" : "—"}</td>
+      <td>${escapeHtml(e.requiredRole ?? "Any")}</td>
+      <td>${e.isProd ? "🏭 Yes" : "—"}</td>
+      <td class="${e.locked ? "gate-on" : "gate-off"}">${e.locked ? "🔒 Locked" : "—"}</td>
+    </tr>`).join("")}
+  </tbody>
+</table>
 
 <h2>Pipeline / Branch Setup</h2>
 <p style="font-size:12px;color:var(--muted);margin:0 0 10px">
@@ -342,6 +454,15 @@ ${isAdmin ? `
   function saveAlias(key) {
     var val = document.getElementById('alias-' + key).value;
     vscode.postMessage({ command: 'setOrgAlias', key: key, alias: val });
+  }
+  function pushBranch(branch) { vscode.postMessage({ command: 'pushBranch', branch: branch }); }
+  function createEnvBranch(branch) { vscode.postMessage({ command: 'createEnvBranch', branch: branch }); }
+  function saveGuardrails() {
+    var threshold = parseInt((document.getElementById('guardrailThreshold') || {}).value, 10);
+    var timeout   = parseInt((document.getElementById('guardrailTimeout')   || {}).value, 10);
+    vscode.postMessage({ command: 'saveGuardrails', threshold: threshold, timeout: timeout });
+    var msg = document.getElementById('guardrailMsg');
+    if (msg) { msg.style.display = 'inline'; setTimeout(function() { msg.style.display = 'none'; }, 2500); }
   }
 
   function toggleSection(id, header) {
