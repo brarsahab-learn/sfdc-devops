@@ -77,6 +77,8 @@ exports.getRepoWorkspace = getRepoWorkspace;
 exports.getRepoSlug = getRepoSlug;
 exports.getCoverageThreshold = getCoverageThreshold;
 exports.getCoverageTimeoutSeconds = getCoverageTimeoutSeconds;
+exports.saveCoverageThreshold = saveCoverageThreshold;
+exports.saveCoverageTimeoutSeconds = saveCoverageTimeoutSeconds;
 exports.getDevOrgAlias = getDevOrgAlias;
 exports.getProdOrgAlias = getProdOrgAlias;
 exports.getDemoOrgAlias = getDemoOrgAlias;
@@ -492,6 +494,18 @@ function getCoverageThreshold() {
 }
 function getCoverageTimeoutSeconds() {
     return cfg().get("coverageTimeoutSeconds") ?? 600;
+}
+async function saveCoverageThreshold(threshold) {
+    const target = vscode.workspace.workspaceFolders?.length
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global;
+    await vscode.workspace.getConfiguration("sfDevops").update("coverageThreshold", threshold, target);
+}
+async function saveCoverageTimeoutSeconds(seconds) {
+    const target = vscode.workspace.workspaceFolders?.length
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global;
+    await vscode.workspace.getConfiguration("sfDevops").update("coverageTimeoutSeconds", seconds, target);
 }
 function getDevOrgAlias() {
     return readOrgAliases().dev || cfg().get("devOrgAlias") || "";

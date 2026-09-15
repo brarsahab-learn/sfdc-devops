@@ -479,6 +479,20 @@ export function getCoverageTimeoutSeconds(): number {
     return cfg().get<number>("coverageTimeoutSeconds") ?? 600;
 }
 
+export async function saveCoverageThreshold(threshold: number): Promise<void> {
+    const target = vscode.workspace.workspaceFolders?.length
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global;
+    await vscode.workspace.getConfiguration("sfDevops").update("coverageThreshold", threshold, target);
+}
+
+export async function saveCoverageTimeoutSeconds(seconds: number): Promise<void> {
+    const target = vscode.workspace.workspaceFolders?.length
+        ? vscode.ConfigurationTarget.Workspace
+        : vscode.ConfigurationTarget.Global;
+    await vscode.workspace.getConfiguration("sfDevops").update("coverageTimeoutSeconds", seconds, target);
+}
+
 export function getDevOrgAlias(): string {
     return readOrgAliases().dev || cfg().get<string>("devOrgAlias") || "";
 }
