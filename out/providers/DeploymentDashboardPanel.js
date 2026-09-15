@@ -46,6 +46,7 @@ const DeploymentPlanner_1 = require("../DeploymentPlanner");
 const AuditLog_1 = require("../AuditLog");
 const config_1 = require("../config");
 const RoleManager_1 = require("../RoleManager");
+const coverageCheck_1 = require("../commands/coverageCheck");
 const Log_1 = require("../Log");
 const shared_1 = require("../ui/shared");
 function escapeHtml(s) {
@@ -436,6 +437,37 @@ class DeploymentDashboardPanel {
             if (selection.mode !== "all" && files.length === 0) {
                 vscode.window.showWarningMessage("No files selected — check at least one file, or use Deploy ALL.");
                 return;
+            }
+            // Coverage gate — sfDevops.environments[].coverageGate is a per-env checkbox in the
+            // Admin panel; skip this entirely when it's unchecked for env (the default), same as
+            // if the feature didn't exist for that env. When checked, block Deploy (never Validate
+            // — you should still be able to Validate to see other problems) for any story in this
+            // selection that has Apex changes but hasn't recorded a passing Code Coverage run yet.
+            // Mirrors the same gate promoteStory.ts already enforces for the QA/UAT promotion picker.
+            if (requestedMode === "deploy" && env.coverageGate) {
+                const storyIds = selection.mode === "all"
+                    ? model.groups.map(g => g.storyId)
+                    : (() => {
+                        const paths = new Set(files.map(f => f.path));
+                        return model.groups.filter(g => g.files.some(f => paths.has(f.path))).map(g => g.storyId);
+                    })();
+                const failing = [];
+                for (const storyId of new Set(storyIds)) {
+                    const apex = await this._gitHelper.featureApexClasses(storyId);
+                    if (apex.length > 0 && !(await this._gitHelper.isCoveragePassed(storyId))) {
+                        failing.push({ storyId, apex });
+                    }
+                }
+                if (failing.length > 0) {
+                    const { threshold } = (0, coverageCheck_1.coverageSettings)();
+                    const names = failing.map(f => f.storyId).join(", ");
+                    const choice = await vscode.window.showWarningMessage(`${names} ${failing.length === 1 ? "has" : "have"} Apex classes without a passing Code Coverage check (≥ ${threshold}%) yet — ` +
+                        `${env.label} requires it (Admin panel: Coverage Gate). Run the Code Coverage check first.`, "Open Coverage Panel");
+                    if (choice === "Open Coverage Panel") {
+                        await vscode.commands.executeCommand("sfDevopsCoverageView.focus");
+                    }
+                    return;
+                }
             }
             // Hard server-side gate — a standalone manual Deploy is locked until Validate has
             // actually passed for EXACTLY this selection (never trust the client button's enabled
