@@ -521,25 +521,38 @@ export class GitHelper {
 
         const mergeBase = await this.git(["merge-base", `origin/${base}`, `origin/${featureBranch}`]);
 
-        // Compute the story's net diff scoped to the Salesforce source root only.
-        // Using a scoped diff rather than "reset --soft + commit everything" prevents
-        // squash commit drift: if the developer ran `git merge origin/<env>` on their feature
-        // branch (instead of rebase), the unscoped approach would pull base-branch metadata
-        // changes into the squash even though the developer never authored them.
-        const diffRaw = await this.git(["diff", "--name-status", mergeBase, `origin/${featureBranch}`, "--", sourceRoot]);
-        const changedFiles = diffRaw.split("\n").filter(Boolean).map(line => {
-            const tab     = line.indexOf("\t");
-            const status  = line.slice(0, tab).trim();
-            const relPath = line.slice(tab + 1).trim();
-            return { status, path: relPath };
-        });
+        // Diff from origin/base (current dev) rather than mergeBase so the squash only
+        // carries what's actually new.  Files already published in a prior session are
+        // identical in origin/base AND origin/featureBranch, so they don't appear here.
+        // Diffing from mergeBase inflated the count when prior cherry-picks landed on dev
+        // but the developer never rebased — those already-in-dev files showed up as changed.
+        const diffRaw = await this.git(["diff", "--name-status", `origin/${base}`, `origin/${featureBranch}`, "--", sourceRoot]);
+        const parseDiffLine = (line: string) => {
+            const tab = line.indexOf("\t");
+            return { status: line.slice(0, tab).trim(), path: line.slice(tab + 1).trim() };
+        };
+        const baseChanges = diffRaw.split("\n").filter(Boolean).map(parseDiffLine);
+
+        // For Deleted entries: a file absent from featureBranch but present in origin/base
+        // is either (a) intentionally deleted by the developer, or (b) added to dev by
+        // another story after this branch was cut.  Only (a) belongs in the squash.
+        // Files that existed at the original branch point (mergeBase) and are now gone from
+        // featureBranch are case (a).  Files that weren't in mergeBase are case (b).
+        const filesAtMergeBase = new Set(
+            (await this.git(["ls-tree", "-r", "--name-only", mergeBase, "--", sourceRoot])).split("\n").filter(Boolean)
+        );
+        const changedFiles = baseChanges.filter(f =>
+            !f.status.startsWith("D") || filesAtMergeBase.has(f.path)
+        );
 
         if (changedFiles.length === 0) {
             throw new Error(`No Salesforce metadata changes found for story "${storyId}". Make sure you have saved and uploaded your changes before promoting.`);
         }
 
-        // Build the squash on a branch cut from the merge-base so its parent is clean.
-        await this.git(["checkout", "-B", tmpBranch, mergeBase]);
+        // Build the squash on top of origin/base so cherry-pick onto dev is clean — the
+        // squash parent IS the current dev HEAD, so git applies exactly the new delta with
+        // no spurious three-way conflicts from the old base.
+        await this.git(["checkout", "-B", tmpBranch, `origin/${base}`]);
 
         const added   = changedFiles.filter(f => !f.status.startsWith("D")).map(f => f.path);
         const deleted = changedFiles.filter(f =>  f.status.startsWith("D")).map(f => f.path);

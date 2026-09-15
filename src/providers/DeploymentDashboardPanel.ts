@@ -440,15 +440,16 @@ export class DeploymentDashboardPanel {
         // trusted from the client — same "never trust the client for what actually executes"
         // principle as the deploy-lock/prod gates above. "auto" is the default whenever the
         // client doesn't say otherwise.
-        // Strip TestSuite metadata when coverage isn't required — Salesforce validates that
-        // every class referenced in a .testSuite exists in the org, even for NoTestRun deploys,
-        // so deploying a testSuite before those classes exist causes a component failure.
-        if (!env.isProd && !(env.coverageGate ?? true)) {
-            files = files.filter(f => !/\/testSuites\/|\.testSuite(-meta\.xml)?$/.test(f.path));
-        }
-
         const testMode: "auto" | "all" = msg.testMode === "all" ? "all" : "auto";
         const { testLevel, tests } = resolveEffectiveTestLevel(env.deployTestLevel, testMode, apexClassNamesIn(files), model.apexTestMap, env.isProd, env.coverageGate ?? true);
+
+        // TestSuite files reference test classes by name.  Salesforce validates those class
+        // names exist in the org even for NoTestRun — on a first deployment the class hasn't
+        // been deployed yet, causing "No classes found for <Class>".  Safe to skip when
+        // NoTestRun because the suite is never executed anyway.
+        if (testLevel === "NoTestRun") {
+            files = files.filter(f => !/\/testSuites\/|\.testSuite(-meta\.xml)?$/.test(f.path));
+        }
 
         // RunSpecifiedTests requires each named test class to actually be part of the
         // deployment package (or already exist in the target org) — on a never-deployed

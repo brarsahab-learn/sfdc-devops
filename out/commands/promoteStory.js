@@ -158,19 +158,6 @@ async function runPromotionValidate(gitHelper, storyId, targetEnv, envCfg, progr
             return { result: { ran: false, success: true, numberComponentsDeployed: 0 }, testLevel: "NoTestRun" };
         }
     }
-    // TestSuite metadata files list specific test classes to run — when coverage isn't required
-    // (coverageGate: false on a sandbox), Salesforce still validates that every class named in
-    // a .testSuite actually exists in the org.  On a first deployment (dev/QA) the test class
-    // hasn't been deployed yet, so the component fails with "No classes found for <Class>".
-    // Excluding them here is safe because NoTestRun (see resolveEffectiveTestLevel) means the
-    // suite is never executed anyway.
-    if (!envCfg.isProd && !(envCfg.coverageGate ?? true)) {
-        const suiteFiles = files.filter(f => /\/testSuites\/|\.testSuite(-meta\.xml)?$/.test(f.path));
-        if (suiteFiles.length > 0) {
-            files = files.filter(f => !/\/testSuites\/|\.testSuite(-meta\.xml)?$/.test(f.path));
-            (0, Log_1.log)(`Skipping ${suiteFiles.length} Test Suite file(s) — coverage not required for ${targetEnv}.`);
-        }
-    }
     const apexClasses = (0, DeploymentPlanner_1.apexClassNamesIn)(files);
     let apexTestFilePaths = {};
     let apexTestMap = {};
@@ -179,6 +166,18 @@ async function runPromotionValidate(gitHelper, storyId, targetEnv, envCfg, progr
         ({ apexTestMap, apexTestFilePaths } = (0, DeploymentPlanner_1.buildApexTestMap)(allClsFiles, apexClasses));
     }
     let { testLevel, tests } = (0, DeploymentPlanner_1.resolveEffectiveTestLevel)(envCfg.deployTestLevel, "auto", apexClasses, apexTestMap, envCfg.isProd, envCfg.coverageGate ?? true);
+    // TestSuite files reference specific test classes by name.  Salesforce validates that every
+    // referenced class exists in the org even when tests aren't run (NoTestRun).  On a first
+    // deployment to dev/QA the test class hasn't been deployed yet, so the org rejects the
+    // testSuite with "No classes found for <Class>".  Since NoTestRun means no suites run,
+    // filtering them out is safe — they'll be included once test classes exist in the org.
+    if (testLevel === "NoTestRun") {
+        const suiteFiles = files.filter(f => /\/testSuites\/|\.testSuite(-meta\.xml)?$/.test(f.path));
+        if (suiteFiles.length > 0) {
+            files = files.filter(f => !/\/testSuites\/|\.testSuite(-meta\.xml)?$/.test(f.path));
+            (0, Log_1.log)(`Skipping ${suiteFiles.length} test suite file(s) — tests not required for this deployment.`);
+        }
+    }
     // RunSpecifiedTests requires the named test class to be part of the deployment package
     // (or already exist in the org). Fold in test files that weren't otherwise selected.
     if (testLevel === "RunSpecifiedTests" && tests?.length) {
