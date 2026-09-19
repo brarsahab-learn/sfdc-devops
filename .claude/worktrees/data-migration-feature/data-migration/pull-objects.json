@@ -1,0 +1,57 @@
+[
+    {
+        "active": true,
+        "sobject": "Product_Group__c",
+        "query": "SELECT Id, Name FROM Product_Group__c"
+    },
+    { 
+        "active": true,
+        "sobject": "Team__c",
+        "query": "SELECT Id, Name, Team_Type__c, Group_Queue_Name__c, Group_Queue_Api_Name__c FROM Team__c"
+    },
+    { 
+        "active": true,
+        "sobject": "Product__c",
+        "query": "SELECT Id, Name, Product_Code__c, Product_Class__c, Business_Type__c, Customer_Type__c, Is_Active__c, Record_Type__c, Product_Group__c FROM Product__c"
+    },
+    { 
+        "active": true,
+        "sobject": "Product_Plan_Mapping__c",
+        "query": "SELECT Id,Name, Product__c, Insurer__c,Is_Active__c,Mark_It_As_Default_Plan__c from Product_Plan_Mapping__c"
+    },
+    { 
+        "active": true,
+        "sobject": "Component_Master__c",
+        "query": "SELECT Id, Component_Category__c, Component_Label__c, Selection_Type__c FROM Component_Master__c"
+    },
+    { 
+        "active": true,
+        "sobject": "Broker__c",
+        "query": "SELECT Id, Name, Email__c FROM Broker__c"
+    },
+    { 
+        "active": true,
+        "sobject": "Account",
+        "query": "SELECT Id, Name FROM Account WHERE RecordType.DeveloperName = 'Insurer'"
+    },
+    { 
+        "active": true,
+        "sobject": "Product_Team_Mapping__c",
+        "query": "SELECT Id, Team__c, Product_Group__c, Team_Name1__c, Team_Type__c, Available_for_Policy_Ownership__c FROM Product_Team_Mapping__c"
+    },
+    { 
+        "active": true,
+        "sobject": "Broker_Office_Location__c",
+        "query": "SELECT Id, Account__c, Address__Street__s, Address__City__s, Address__PostalCode__s, Address__StateCode__s, Address__CountryCode__s, Address__Latitude__s, Address__Longitude__s, Address__GeocodeAccuracy__s, Reporting_Office__c FROM Broker_Office_Location__c WHERE Account__r.RecordType.DeveloperName = 'Insurer'"
+    },
+    {
+        "active": false,
+        "sobject": "Contact",
+        "query": "SELECT Id, FirstName, LastName, Email, Phone, Title, AccountId, Level__c, Role__c, Status__c FROM Contact WHERE RecordType.DeveloperName = 'Insurer_Contact' "
+    },
+    { 
+        "active": true,
+        "sobject": "Product_Component__c",
+        "query": "SELECT Id, Product__c, Component_Master__c, Default_Coverage__c, Default_Remarks__c, Default_Selection__c, Default_Sublimit__c , Insurer__c, Product_Plan_Mapping__c  FROM Product_Component__c"
+    }
+]

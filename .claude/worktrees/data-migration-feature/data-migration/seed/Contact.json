@@ -1,0 +1,400 @@
+{
+    "records": [
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef1"
+            },
+            "FirstName": "Vishu",
+            "LastName": "Jain",
+            "Email": "vishu.jain@bajajgeneral.com",
+            "AccountId": "@AccountRef2",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef2"
+            },
+            "FirstName": "Abhinav",
+            "LastName": "Tripathi",
+            "Email": "abhinavtripathi@cholams.murugappa.com",
+            "AccountId": "@AccountRef3",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef3"
+            },
+            "FirstName": "Nitin",
+            "LastName": "Vaidhya",
+            "Email": "nitin.vaidhya@ecgc.in",
+            "AccountId": "@AccountRef4",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef4"
+            },
+            "FirstName": "Sanjeev",
+            "LastName": "Chauhan",
+            "Email": "sanjeev.chauhan@generalicentral.com",
+            "AccountId": "@AccountRef5",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef5"
+            },
+            "FirstName": "Ankur",
+            "LastName": "Rohilla",
+            "Email": "ankur.rohilla@godigit.com",
+            "AccountId": "@AccountRef6",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef6"
+            },
+            "FirstName": "Ranjeet",
+            "LastName": "Patra",
+            "Email": "ranjeet.patra1@hdfcergo.com",
+            "AccountId": "@AccountRef7",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef7"
+            },
+            "FirstName": "Mani",
+            "LastName": "Sinha",
+            "Email": "mani.sinha@icicilombard.com",
+            "AccountId": "@AccountRef8",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef8"
+            },
+            "FirstName": "Kapil",
+            "LastName": "Goyal",
+            "Email": "kapil1.goyal@iffcotokio.co.in",
+            "AccountId": "@AccountRef9",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef9"
+            },
+            "FirstName": "Virender",
+            "LastName": "Roha",
+            "Email": "virender.roha@libertyinsurance.in",
+            "AccountId": "@AccountRef12",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef10"
+            },
+            "FirstName": "Ankit",
+            "LastName": "Mehta",
+            "Email": "ankit.mehta@magmainsurance.com",
+            "AccountId": "@AccountRef13",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef11"
+            },
+            "FirstName": "Neha",
+            "LastName": "Mehta",
+            "Email": "neha.mehtabatra@nic.co.in",
+            "AccountId": "@AccountRef14",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef12"
+            },
+            "FirstName": "Suryakant",
+            "LastName": "Gautam",
+            "Email": "suryakant.gautam@nic.co.in",
+            "AccountId": "@AccountRef14",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef13"
+            },
+            "FirstName": "Nitisha",
+            "LastName": "Balu",
+            "Email": "nitisha.balu@nic.co.in",
+            "AccountId": "@AccountRef14",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef14"
+            },
+            "FirstName": "Ramesh",
+            "LastName": "Chand Sahu",
+            "Email": "rc.sahu@nic.co.in",
+            "AccountId": "@AccountRef14",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef15"
+            },
+            "FirstName": "Himanshu",
+            "LastName": "Ahuja",
+            "Email": "himanshu.ahuja@rahejaqbe.com",
+            "AccountId": "@AccountRef16",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef16"
+            },
+            "FirstName": "Anup",
+            "LastName": "Singh",
+            "Email": "anup.a.singh@indusindinsurance.com",
+            "AccountId": "@AccountRef17",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef17"
+            },
+            "FirstName": "Chandan",
+            "LastName": "Kumar",
+            "Email": "chandan.kumar@royalsundaram.in",
+            "AccountId": "@AccountRef18",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef18"
+            },
+            "FirstName": "Surpreet",
+            "LastName": "Singh",
+            "Email": "surpreet.singh1@sbigeneral.in",
+            "AccountId": "@AccountRef19",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef19"
+            },
+            "FirstName": "Arun",
+            "LastName": "Singh",
+            "Email": "arun.singh@shriramgi.com",
+            "AccountId": "@AccountRef20",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef20"
+            },
+            "FirstName": "Anjali",
+            "LastName": "Mehta",
+            "Email": "anjali.mehta@tataaig.com",
+            "AccountId": "@AccountRef21",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef21"
+            },
+            "FirstName": "Rahul",
+            "LastName": "Kanaujia",
+            "Email": "rahul.kanaujia@newindia.co.in",
+            "AccountId": "@AccountRef22",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef22"
+            },
+            "FirstName": "Umesh",
+            "LastName": "Datta",
+            "Email": "umesh.datta@newindia.co.in",
+            "AccountId": "@AccountRef22",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef23"
+            },
+            "FirstName": "Garima",
+            "LastName": "Kalra",
+            "Email": "garima.kalra@newindia.co.in",
+            "AccountId": "@AccountRef22",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef24"
+            },
+            "FirstName": "Udayakumar",
+            "LastName": "Puthran ",
+            "Email": "uk.puthran@newindia.co.in",
+            "AccountId": "@AccountRef22",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef25"
+            },
+            "FirstName": "Rajnish",
+            "LastName": "Ranga",
+            "Email": "rajnish.ranga@orientalinsurance.co.in",
+            "AccountId": "@AccountRef23",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef26"
+            },
+            "FirstName": "Kriti",
+            "LastName": "Chowdhary",
+            "Email": "kriti.chowdhary@orientalinsurance.co.in",
+            "AccountId": "@AccountRef23",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef27"
+            },
+            "FirstName": "Avinash",
+            "LastName": "Kumar",
+            "Email": "avinashkumar1@uiic.co.in",
+            "AccountId": "@AccountRef24",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef28"
+            },
+            "FirstName": "Dev",
+            "LastName": "Anand",
+            "Email": "rdanand@uiic.co.in",
+            "AccountId": "@AccountRef24",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef29"
+            },
+            "FirstName": "Rajat",
+            "LastName": "Khanna",
+            "Email": "rajatkhanna@uiic.co.in",
+            "AccountId": "@AccountRef24",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef30"
+            },
+            "FirstName": "Tarun",
+            "LastName": "Sharma",
+            "Email": "tarun.sharma@universalsompo.com",
+            "AccountId": "@AccountRef25",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef31"
+            },
+            "FirstName": "Jitendra",
+            "LastName": "Kushwaha",
+            "Email": "jitendra.kushwaha@hizuno.com",
+            "AccountId": "@AccountRef26",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef32"
+            },
+            "FirstName": "Ekta",
+            "LastName": "Kumari",
+            "Email": "ekta.kumari1@adityabirlacapital.com",
+            "AccountId": "@AccountRef27",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef33"
+            },
+            "FirstName": "Ankita",
+            "LastName": "Gahlot",
+            "Email": "ankita.gahlot@careinsurance.com",
+            "AccountId": "@AccountRef28",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef34"
+            },
+            "FirstName": "Shekhar",
+            "LastName": "Tyagi",
+            "Email": "shekhar.tyagi@manipalcigna.com",
+            "AccountId": "@AccountRef31",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef35"
+            },
+            "FirstName": "Gopal",
+            "LastName": "Kumar",
+            "Email": "gopal.kumar1@nivabupa.com",
+            "AccountId": "@AccountRef32",
+            "Role__c": "Other"
+        },
+        {
+            "attributes": {
+                "type": "Contact",
+                "referenceId": "ContactRef36"
+            },
+            "FirstName": "Arti",
+            "LastName": "Yadav",
+            "Email": "arti.yadav@starinsurance.in",
+            "AccountId": "@AccountRef33",
+            "Role__c": "Other"
+        }
+    ]
+}

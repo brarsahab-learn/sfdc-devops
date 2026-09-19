@@ -1,0 +1,17 @@
+{
+    "defaults": {
+        "lastName": "Admin",
+        "profileName": "System Administrator",
+        "timeZoneSidKey": "Asia/Kolkata",
+        "localeSidKey": "en_IN",
+        "emailEncodingKey": "UTF-8",
+        "languageLocaleKey": "en_US"
+    },
+    "users": [
+        { "email": "Saugat@insurebridge.co" },
+        { "email": "Esha@insurebridge.co" },
+        { "email": "Kanika@insurebridge.co" },
+        { "email": "Amit@insurebridge.co" },
+        { "email": "Parvesh@insurebridge.co" }
+    ]
+}

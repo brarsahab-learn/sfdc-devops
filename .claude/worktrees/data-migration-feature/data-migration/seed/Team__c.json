@@ -1,0 +1,260 @@
+{
+    "records": [
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef1"
+            },
+            "Name": "Employee Benefit Servicing Team",
+            "Team_Type__c": "Servicing"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef2"
+            },
+            "Name": "Employee Benefit Claims Team",
+            "Team_Type__c": "Claims"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef3"
+            },
+            "Name": "Employee Benefit Operations Team",
+            "Team_Type__c": "Operations"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef4"
+            },
+            "Name": "Employee Benefit Placement Team",
+            "Team_Type__c": "Placement"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef5"
+            },
+            "Name": "Speciality Claims Team",
+            "Team_Type__c": "Claims"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef6"
+            },
+            "Name": "Speciality Operations Team",
+            "Team_Type__c": "Operations"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef7"
+            },
+            "Name": "Non Employee Benefit Servicing Team",
+            "Team_Type__c": "Servicing"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef8"
+            },
+            "Name": "Non Employee Benefit Placement Team",
+            "Team_Type__c": "Placement"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef9"
+            },
+            "Name": "Non Employee Benefit Operations Team",
+            "Team_Type__c": "Operations"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef10"
+            },
+            "Name": "Non Employee Benefit Claims Team",
+            "Team_Type__c": "Claims"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef11"
+            },
+            "Name": "Speciality Placement Team",
+            "Team_Type__c": "Placement"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef12"
+            },
+            "Name": "Speciality Servicing Team",
+            "Team_Type__c": "Servicing"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef13"
+            },
+            "Name": "Life Operations Team",
+            "Team_Type__c": "Operations"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef14"
+            },
+            "Name": "Life Claims Team",
+            "Team_Type__c": "Claims"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef15"
+            },
+            "Name": "Life Placement Team",
+            "Team_Type__c": "Placement"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef16"
+            },
+            "Name": "Life Servicing Team",
+            "Team_Type__c": "Servicing"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef17"
+            },
+            "Name": "Employee Benefit Servicing Team",
+            "Team_Type__c": "Servicing"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef18"
+            },
+            "Name": "Employee Benefit Claims Team",
+            "Team_Type__c": "Claims"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef19"
+            },
+            "Name": "Employee Benefit Operations Team",
+            "Team_Type__c": "Operations"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef20"
+            },
+            "Name": "Employee Benefit Placement Team",
+            "Team_Type__c": "Placement"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef21"
+            },
+            "Name": "Speciality Claims Team",
+            "Team_Type__c": "Claims"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef22"
+            },
+            "Name": "Speciality Operations Team",
+            "Team_Type__c": "Operations"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef23"
+            },
+            "Name": "Non Employee Benefit Servicing Team",
+            "Team_Type__c": "Servicing"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef24"
+            },
+            "Name": "Non Employee Benefit Placement Team",
+            "Team_Type__c": "Placement"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef25"
+            },
+            "Name": "Non Employee Benefit Operations Team",
+            "Team_Type__c": "Operations"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef26"
+            },
+            "Name": "Non Employee Benefit Claims Team",
+            "Team_Type__c": "Claims"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef27"
+            },
+            "Name": "Speciality Placement Team",
+            "Team_Type__c": "Placement"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef28"
+            },
+            "Name": "Speciality Servicing Team",
+            "Team_Type__c": "Servicing"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef29"
+            },
+            "Name": "Life Operations Team",
+            "Team_Type__c": "Operations"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef30"
+            },
+            "Name": "Life Claims Team",
+            "Team_Type__c": "Claims"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef31"
+            },
+            "Name": "Life Placement Team",
+            "Team_Type__c": "Placement"
+        },
+        {
+            "attributes": {
+                "type": "Team__c",
+                "referenceId": "Team__cRef32"
+            },
+            "Name": "Life Servicing Team",
+            "Team_Type__c": "Servicing"
+        }
+    ]
+}
