@@ -46,6 +46,7 @@ const ACTIONS = [
     { label: "Code Coverage", icon: "beaker", command: "sfDevops.runCoverage", tooltip: "Run Apex code coverage" },
     { label: "Compare Branches", icon: "diff", command: "sfDevops.openDiffViewer", tooltip: "Open branch diff viewer" },
     { label: "Pending Actions", icon: "zap", command: "sfDevops.viewPendingActions", tooltip: "View stories pending your action" },
+    { label: "Clean Ignored Files", icon: "trash", command: "sfDevops.cleanIgnoredFiles", tooltip: "Untrack files matched by .gitignore" },
 ];
 class ActionTreeItem extends vscode.TreeItem {
     constructor(action) {

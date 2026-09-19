@@ -47,7 +47,6 @@ const config_1 = require("./config");
 const AuditLog_1 = require("./AuditLog");
 const Log_1 = require("./Log");
 const DeploymentPlanner_1 = require("./DeploymentPlanner");
-const GlobMatch_1 = require("./GlobMatch");
 const execFileAsync = (0, util_1.promisify)(child_process_1.execFile);
 class GitHelper {
     constructor() {
@@ -133,7 +132,11 @@ class GitHelper {
                     GCM_INTERACTIVE: "never",
                 },
             });
-            return stdout.trim();
+            // Trailing whitespace/newline only — `git status --porcelain` lines are fixed-width
+            // "XY filename" (X/Y can each be a literal space, e.g. " M file" for an unstaged-only
+            // change), so a blanket .trim() eats that leading space off the FIRST line only,
+            // shifting every `line.slice(3)` status-prefix parse of that one entry by a char.
+            return stdout.replace(/\s+$/, "");
         }
         catch (e) {
             (0, Log_1.debugLog)(`$ git ${args.join(" ")} — failed: ${e?.message ?? e}`);
@@ -444,13 +447,75 @@ class GitHelper {
             return null;
         }
     }
-    /** Drops paths matching sfDevops.ignorePatterns — applied at every raw git listing below so every panel that lists files (Deployment Dashboard, Diff Viewer, Coverage) hides them uniformly, without each caller having to remember to. */
-    ignoreFiltered(items) {
-        const patterns = (0, config_1.getIgnorePatterns)();
-        if (patterns.length === 0) {
+    /** Paths (from `candidates`) that `.gitignore`/`.git/info/exclude` actually ignores, tracked or not — the single source of truth for "should this be hidden/excluded," instead of a separate extension-level pattern list that can drift from it. */
+    async gitIgnoredPaths(candidates) {
+        if (candidates.length === 0) {
+            return new Set();
+        }
+        try {
+            const out = await this.git(["check-ignore", "--", ...candidates]);
+            return new Set(out ? out.split("\n").filter(Boolean) : []);
+        }
+        catch {
+            return new Set(); // exit code 1 = none of them are ignored
+        }
+    }
+    /** Drops paths matched by `.gitignore` — applied at every raw git listing below so every panel that lists files (Deployment Dashboard, Diff Viewer, Coverage) hides them uniformly, without each caller having to remember to. */
+    async ignoreFiltered(items) {
+        const ignored = await this.gitIgnoredPaths(items.map(i => i.path));
+        if (ignored.size === 0) {
             return items;
         }
-        return items.filter(item => !(0, GlobMatch_1.matchesAnyGlob)(item.path, patterns));
+        return items.filter(item => !ignored.has(item.path));
+    }
+    /** Tracked files that also match `.gitignore` — e.g. committed before the ignore rule existed. `.gitignore` can't retroactively untrack them, so plain `git add .`/`-A` (and a raw `git status`) still pick up their changes forever. Exposed for the "Clean Ignored Files from Git" command and used internally to keep them out of staging and the uncommitted-changes gate. */
+    async trackedIgnoredFiles() {
+        const out = await this.git(["ls-files", "-ci", "--exclude-standard"]).catch(() => "");
+        return out ? out.split("\n").filter(Boolean) : [];
+    }
+    /** One-time cleanup: untracks the given (already tracked-but-ignored) files and commits the untracking, in its own commit separate from any feature-story work. Leaves the files on disk. */
+    async untrackIgnoredFiles(files) {
+        if (files.length === 0) {
+            return;
+        }
+        await this.git(["rm", "--cached", "--", ...files]);
+        await this.git(["commit", "-m", "chore: untrack files matched by .gitignore"]);
+    }
+    /**
+     * Stages everything EXCEPT tracked-but-ignored files and secret-shaped untracked files —
+     * used instead of a plain `git add .`/`-A` by every staging call site (commitAndPush,
+     * commitAllChanges, continuePendingOperation) so none of them can re-stage what the user
+     * never intended to commit. Returns what got skipped, for a visible warning.
+     */
+    async stageAllExceptIgnoredAndSensitive() {
+        const trackedIgnored = await this.trackedIgnoredFiles();
+        const status = await this.git(["status", "--porcelain"]).catch(() => "");
+        const untrackedSensitive = status
+            .split("\n").filter(Boolean)
+            .filter(line => line.startsWith("??"))
+            .map(line => line.slice(3).trim())
+            .filter(p => GitHelper.SENSITIVE_FILE_PATTERN.test(p));
+        const skip = [...new Set([...trackedIgnored, ...untrackedSensitive])];
+        if (skip.length === 0) {
+            await this.git(["add", "."]);
+        }
+        else {
+            await this.git(["add", "--", ".", ...skip.map(p => `:(exclude,literal)${p}`)]);
+        }
+        return skip;
+    }
+    /** `git status --porcelain` lines, minus tracked-but-ignored files — those would otherwise report as permanently "uncommitted" the moment they're added to `.gitignore`, blocking every uncommitted-changes gate (Promote/Validate/Deploy/Resume) forever. */
+    async relevantStatusLines() {
+        const raw = await this.git(["status", "--porcelain"]);
+        if (!raw) {
+            return [];
+        }
+        const lines = raw.split("\n").filter(Boolean);
+        const trackedIgnored = new Set(await this.trackedIgnoredFiles());
+        if (trackedIgnored.size === 0) {
+            return lines;
+        }
+        return lines.filter(line => !trackedIgnored.has(line.slice(3).trim()));
     }
     /** Files touched by a single commit, in the same shape as `diffNameStatusBetween`. */
     async filesInCommit(sha) {
@@ -462,7 +527,7 @@ class GitHelper {
             const change = code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : "modified";
             return { path: filePath, change };
         });
-        return this.ignoreFiltered(files);
+        return await this.ignoreFiltered(files);
     }
     /** Logs the file list a squashed commit is about to cherry-pick, so it's visible before the pick runs. */
     async logChangedFiles(sha) {
@@ -805,7 +870,7 @@ class GitHelper {
             if (unmerged.length > 0) {
                 return { status: "conflict", branch, conflicts: unmerged };
             }
-            await this.git(["add", "-A"]);
+            await this.stageAllExceptIgnoredAndSensitive();
             const staged = await this.git(["diff", "--cached", "--name-only"]).catch(() => "");
             try {
                 const op = staged ? "--continue" : "--skip";
@@ -1225,16 +1290,11 @@ class GitHelper {
     async checkoutFeature(storyId) {
         await this.git(["checkout", (0, config_1.featureBranchName)(storyId)]).catch(() => { });
     }
+    /** Stages and commits everything (except tracked-ignored/secret-shaped files, see `stageAllExceptIgnoredAndSensitive`), then pushes the current branch. Returns the files it skipped staging, if any, so the caller can warn. */
     async commitAndPush(message) {
-        const preStatus = await this.git(["status", "--porcelain"]);
-        const sensitivePattern = /\.(env|key|pem|p12|pfx)$|credentials|secret/i;
-        const sensitive = preStatus.split('\n').filter(l => l.startsWith('??') && sensitivePattern.test(l));
-        if (sensitive.length > 0) {
-            console.warn('[sfDevops] git add . would stage potentially sensitive files:', sensitive);
-        }
-        await this.git(["add", "."]);
-        const status = await this.git(["status", "--porcelain"]);
-        if (!status) {
+        const skipped = await this.stageAllExceptIgnoredAndSensitive();
+        const staged = await this.stagedFiles();
+        if (staged.length === 0) {
             throw new Error("No changes to commit.");
         }
         await this.git(["commit", "-m", message]);
@@ -1242,6 +1302,7 @@ class GitHelper {
         if (branch) {
             await this.git(["push", "origin", branch]);
         }
+        return skipped;
     }
     /** Files currently staged in the index. */
     async stagedFiles() {
@@ -1379,8 +1440,7 @@ class GitHelper {
         }
     }
     async hasUncommittedChanges() {
-        const out = await this.git(["status", "--porcelain"]);
-        return out.length > 0;
+        return (await this.relevantStatusLines()).length > 0;
     }
     /**
      * Stashes whatever's currently uncommitted (including untracked files), labeled so it
@@ -1427,14 +1487,10 @@ class GitHelper {
         const out = await this.git(["diff", "--name-only", `origin/${base}...HEAD`, "--diff-filter=ACMRD"]);
         return out ? out.split("\n").filter(Boolean) : [];
     }
-    /** Returns all locally modified/new files (staged + unstaged) */
+    /** Returns all locally modified/new files (staged + unstaged), excluding tracked-but-ignored ones */
     async workingTreeFiles() {
-        const out = await this.git(["status", "--porcelain"]);
-        return out
-            ? out.split("\n")
-                .filter(Boolean)
-                .map(line => line.slice(3).trim()) // strip status prefix (" M ", "?? " etc)
-            : [];
+        const lines = await this.relevantStatusLines();
+        return lines.map(line => line.slice(3).trim()); // strip status prefix (" M ", "?? " etc)
     }
     /** Lists all local + remote feature branches for the Resume Story picker */
     async listFeatureBranches() {
@@ -1623,7 +1679,7 @@ class GitHelper {
             const change = code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : "modified";
             return { path: filePath, change };
         });
-        return this.ignoreFiltered(files);
+        return await this.ignoreFiltered(files);
     }
     /** Every file path at a remote ref, optionally restricted to `pathspec` — used to find candidate test classes without needing a local checkout. */
     async listFilesAtRef(ref, pathspec) {
@@ -1636,7 +1692,7 @@ class GitHelper {
             }
             const out = await this.git(args);
             const files = out ? out.split("\n").filter(Boolean) : [];
-            return this.ignoreFiltered(files.map(path => ({ path }))).map(f => f.path);
+            return (await this.ignoreFiltered(files.map(path => ({ path })))).map(f => f.path);
         }
         catch {
             return [];
@@ -1671,7 +1727,7 @@ class GitHelper {
             if (!raw) {
                 return warning ? [{ path: "", status: "", _warning: warning }].slice(0, 0) : [];
             }
-            const files = this.ignoreFiltered(raw.split("\n").filter(Boolean).map(line => {
+            const files = await this.ignoreFiltered(raw.split("\n").filter(Boolean).map(line => {
                 const parts = line.split("\t");
                 const code = parts[0].trim();
                 const s0 = code.charAt(0).toUpperCase();
@@ -1747,11 +1803,11 @@ class GitHelper {
             return null;
         }
     }
-    /** Stages everything and commits, if there's anything to commit. Returns whether a commit happened. */
+    /** Stages everything (except tracked-ignored/secret-shaped files) and commits, if there's anything to commit. Returns whether a commit happened. */
     async commitAllChanges(message) {
-        await this.git(["add", "-A"]);
-        const status = await this.git(["status", "--porcelain"]);
-        if (!status) {
+        await this.stageAllExceptIgnoredAndSensitive();
+        const staged = await this.stagedFiles();
+        if (staged.length === 0) {
             return false;
         }
         await this.git(["commit", "-m", message]);
@@ -1763,6 +1819,8 @@ class GitHelper {
     }
 }
 exports.GitHelper = GitHelper;
+/** Filenames that look like secrets regardless of `.gitignore` — a project might not have these ignored yet, so this is a separate safety net, not a replacement for it. */
+GitHelper.SENSITIVE_FILE_PATTERN = /\.(env|key|pem|p12|pfx)$|credentials|secret/i;
 /**
  * Shows a warning that local changes are blocking an operation, with a "Review Changes"
  * button that reveals VS Code's own Source Control view — real color-coded diffs, staging,

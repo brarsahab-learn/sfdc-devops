@@ -46,6 +46,7 @@ const promoteStory_1 = require("./commands/promoteStory");
 const promotePicker_1 = require("./commands/promotePicker");
 const resumePromotion_1 = require("./commands/resumePromotion");
 const syncBranch_1 = require("./commands/syncBranch");
+const cleanIgnoredFiles_1 = require("./commands/cleanIgnoredFiles");
 const prepare2gpBeta_1 = require("./commands/prepare2gpBeta");
 const GitProviderClient_1 = require("./GitProviderClient");
 const GitHelper_1 = require("./GitHelper");
@@ -169,6 +170,11 @@ async function activate(context) {
     // No Dev org deploy.
     vscode.commands.registerCommand("sfDevops.commitAndPush", async () => {
         await (0, submitForReview_1.commitAndPush)(bbClient, gitHelper, storyProvider);
+    }), 
+    // Clean Ignored Files from Git — one-time cleanup for files committed before being
+    // added to .gitignore (which can't retroactively untrack them). ALL roles.
+    vscode.commands.registerCommand("sfDevops.cleanIgnoredFiles", async () => {
+        await (0, cleanIgnoredFiles_1.cleanIgnoredFiles)(gitHelper);
     }), 
     // Validate Only — any configured environment, ALL roles. Creates the validate
     // branch and runs a check-only validation. Never gated by role.

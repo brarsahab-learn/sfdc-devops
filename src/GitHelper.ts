@@ -10,13 +10,12 @@ import * as path          from "path";
 import {
     getBaseBranch, getDevBranch, featureBranchName, isFeatureBranch as isFeatureBranchName,
     promoBranchName as buildPromoBranchName, getSourceRootFolder, getRepoWorkspace, getRepoSlug,
-    ResolvedEnvironment, getTicketKeyPattern, getPromotionBranchTemplate, getIgnorePatterns,
+    ResolvedEnvironment, getTicketKeyPattern, getPromotionBranchTemplate,
 } from "./config";
 import { IGitProviderClient } from "./GitProviderClient";
 import { AuditEntry, renderAuditHtml } from "./AuditLog";
 import { log, revealLog, debugLog } from "./Log";
 import { storyIdFromMessage } from "./DeploymentPlanner";
-import { matchesAnyGlob } from "./GlobMatch";
 
 const execFileAsync = promisify(execFile);
 
@@ -95,7 +94,11 @@ export class GitHelper {
                     GCM_INTERACTIVE:     "never",
                 },
             });
-            return stdout.trim();
+            // Trailing whitespace/newline only — `git status --porcelain` lines are fixed-width
+            // "XY filename" (X/Y can each be a literal space, e.g. " M file" for an unstaged-only
+            // change), so a blanket .trim() eats that leading space off the FIRST line only,
+            // shifting every `line.slice(3)` status-prefix parse of that one entry by a char.
+            return stdout.replace(/\s+$/, "");
         } catch (e: any) {
             debugLog(`$ git ${args.join(" ")} — failed: ${e?.message ?? e}`);
             throw e;
@@ -417,11 +420,71 @@ export class GitHelper {
         }
     }
 
-    /** Drops paths matching sfDevops.ignorePatterns — applied at every raw git listing below so every panel that lists files (Deployment Dashboard, Diff Viewer, Coverage) hides them uniformly, without each caller having to remember to. */
-    private ignoreFiltered<T extends { path: string }>(items: T[]): T[] {
-        const patterns = getIgnorePatterns();
-        if (patterns.length === 0) { return items; }
-        return items.filter(item => !matchesAnyGlob(item.path, patterns));
+    /** Paths (from `candidates`) that `.gitignore`/`.git/info/exclude` actually ignores, tracked or not — the single source of truth for "should this be hidden/excluded," instead of a separate extension-level pattern list that can drift from it. */
+    private async gitIgnoredPaths(candidates: string[]): Promise<Set<string>> {
+        if (candidates.length === 0) { return new Set(); }
+        try {
+            const out = await this.git(["check-ignore", "--", ...candidates]);
+            return new Set(out ? out.split("\n").filter(Boolean) : []);
+        } catch {
+            return new Set(); // exit code 1 = none of them are ignored
+        }
+    }
+
+    /** Drops paths matched by `.gitignore` — applied at every raw git listing below so every panel that lists files (Deployment Dashboard, Diff Viewer, Coverage) hides them uniformly, without each caller having to remember to. */
+    private async ignoreFiltered<T extends { path: string }>(items: T[]): Promise<T[]> {
+        const ignored = await this.gitIgnoredPaths(items.map(i => i.path));
+        if (ignored.size === 0) { return items; }
+        return items.filter(item => !ignored.has(item.path));
+    }
+
+    /** Tracked files that also match `.gitignore` — e.g. committed before the ignore rule existed. `.gitignore` can't retroactively untrack them, so plain `git add .`/`-A` (and a raw `git status`) still pick up their changes forever. Exposed for the "Clean Ignored Files from Git" command and used internally to keep them out of staging and the uncommitted-changes gate. */
+    async trackedIgnoredFiles(): Promise<string[]> {
+        const out = await this.git(["ls-files", "-ci", "--exclude-standard"]).catch(() => "");
+        return out ? out.split("\n").filter(Boolean) : [];
+    }
+
+    /** One-time cleanup: untracks the given (already tracked-but-ignored) files and commits the untracking, in its own commit separate from any feature-story work. Leaves the files on disk. */
+    async untrackIgnoredFiles(files: string[]): Promise<void> {
+        if (files.length === 0) { return; }
+        await this.git(["rm", "--cached", "--", ...files]);
+        await this.git(["commit", "-m", "chore: untrack files matched by .gitignore"]);
+    }
+
+    /** Filenames that look like secrets regardless of `.gitignore` — a project might not have these ignored yet, so this is a separate safety net, not a replacement for it. */
+    private static readonly SENSITIVE_FILE_PATTERN = /\.(env|key|pem|p12|pfx)$|credentials|secret/i;
+
+    /**
+     * Stages everything EXCEPT tracked-but-ignored files and secret-shaped untracked files —
+     * used instead of a plain `git add .`/`-A` by every staging call site (commitAndPush,
+     * commitAllChanges, continuePendingOperation) so none of them can re-stage what the user
+     * never intended to commit. Returns what got skipped, for a visible warning.
+     */
+    private async stageAllExceptIgnoredAndSensitive(): Promise<string[]> {
+        const trackedIgnored = await this.trackedIgnoredFiles();
+        const status = await this.git(["status", "--porcelain"]).catch(() => "");
+        const untrackedSensitive = status
+            .split("\n").filter(Boolean)
+            .filter(line => line.startsWith("??"))
+            .map(line => line.slice(3).trim())
+            .filter(p => GitHelper.SENSITIVE_FILE_PATTERN.test(p));
+        const skip = [...new Set([...trackedIgnored, ...untrackedSensitive])];
+        if (skip.length === 0) {
+            await this.git(["add", "."]);
+        } else {
+            await this.git(["add", "--", ".", ...skip.map(p => `:(exclude,literal)${p}`)]);
+        }
+        return skip;
+    }
+
+    /** `git status --porcelain` lines, minus tracked-but-ignored files — those would otherwise report as permanently "uncommitted" the moment they're added to `.gitignore`, blocking every uncommitted-changes gate (Promote/Validate/Deploy/Resume) forever. */
+    private async relevantStatusLines(): Promise<string[]> {
+        const raw = await this.git(["status", "--porcelain"]);
+        if (!raw) { return []; }
+        const lines = raw.split("\n").filter(Boolean);
+        const trackedIgnored = new Set(await this.trackedIgnoredFiles());
+        if (trackedIgnored.size === 0) { return lines; }
+        return lines.filter(line => !trackedIgnored.has(line.slice(3).trim()));
     }
 
     /** Files touched by a single commit, in the same shape as `diffNameStatusBetween`. */
@@ -435,7 +498,7 @@ export class GitHelper {
                 code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : "modified";
             return { path: filePath, change };
         });
-        return this.ignoreFiltered(files);
+        return await this.ignoreFiltered(files);
     }
 
     /** Logs the file list a squashed commit is about to cherry-pick, so it's visible before the pick runs. */
@@ -813,7 +876,7 @@ export class GitHelper {
                 return { status: "conflict", branch, conflicts: unmerged };
             }
 
-            await this.git(["add", "-A"]);
+            await this.stageAllExceptIgnoredAndSensitive();
             const staged = await this.git(["diff", "--cached", "--name-only"]).catch(() => "");
 
             try {
@@ -1256,19 +1319,15 @@ export class GitHelper {
         await this.git(["checkout", featureBranchName(storyId)]).catch(() => {});
     }
 
-    async commitAndPush(message: string): Promise<void> {
-        const preStatus = await this.git(["status", "--porcelain"]);
-        const sensitivePattern = /\.(env|key|pem|p12|pfx)$|credentials|secret/i;
-        const sensitive = preStatus.split('\n').filter(l => l.startsWith('??') && sensitivePattern.test(l));
-        if (sensitive.length > 0) {
-            console.warn('[sfDevops] git add . would stage potentially sensitive files:', sensitive);
-        }
-        await this.git(["add", "."]);
-        const status = await this.git(["status", "--porcelain"]);
-        if (!status) { throw new Error("No changes to commit."); }
+    /** Stages and commits everything (except tracked-ignored/secret-shaped files, see `stageAllExceptIgnoredAndSensitive`), then pushes the current branch. Returns the files it skipped staging, if any, so the caller can warn. */
+    async commitAndPush(message: string): Promise<string[]> {
+        const skipped = await this.stageAllExceptIgnoredAndSensitive();
+        const staged = await this.stagedFiles();
+        if (staged.length === 0) { throw new Error("No changes to commit."); }
         await this.git(["commit", "-m", message]);
         const branch = await this.currentBranch();
         if (branch) { await this.git(["push", "origin", branch]); }
+        return skipped;
     }
 
     /** Files currently staged in the index. */
@@ -1401,8 +1460,7 @@ export class GitHelper {
     }
 
     async hasUncommittedChanges(): Promise<boolean> {
-        const out = await this.git(["status", "--porcelain"]);
-        return out.length > 0;
+        return (await this.relevantStatusLines()).length > 0;
     }
 
     /**
@@ -1449,14 +1507,10 @@ export class GitHelper {
         return out ? out.split("\n").filter(Boolean) : [];
     }
 
-    /** Returns all locally modified/new files (staged + unstaged) */
+    /** Returns all locally modified/new files (staged + unstaged), excluding tracked-but-ignored ones */
     async workingTreeFiles(): Promise<string[]> {
-        const out = await this.git(["status", "--porcelain"]);
-        return out
-            ? out.split("\n")
-                .filter(Boolean)
-                .map(line => line.slice(3).trim())  // strip status prefix (" M ", "?? " etc)
-            : [];
+        const lines = await this.relevantStatusLines();
+        return lines.map(line => line.slice(3).trim()); // strip status prefix (" M ", "?? " etc)
     }
 
     /** Lists all local + remote feature branches for the Resume Story picker */
@@ -1685,7 +1739,7 @@ export class GitHelper {
                 code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : "modified";
             return { path: filePath, change };
         });
-        return this.ignoreFiltered(files);
+        return await this.ignoreFiltered(files);
     }
 
     /** Every file path at a remote ref, optionally restricted to `pathspec` — used to find candidate test classes without needing a local checkout. */
@@ -1697,7 +1751,7 @@ export class GitHelper {
             if (pathspec) { args.push("--", pathspec); }
             const out = await this.git(args);
             const files = out ? out.split("\n").filter(Boolean) : [];
-            return this.ignoreFiltered(files.map(path => ({ path }))).map(f => f.path);
+            return (await this.ignoreFiltered(files.map(path => ({ path })))).map(f => f.path);
         } catch {
             return [];
         }
@@ -1733,7 +1787,7 @@ export class GitHelper {
         try {
             const raw = await this.git(["diff", "--name-status", "-M", from, to]);
             if (!raw) { return warning ? [{ path: "", status: "", _warning: warning }].slice(0, 0) : []; }
-            const files = this.ignoreFiltered(raw.split("\n").filter(Boolean).map(line => {
+            const files = await this.ignoreFiltered(raw.split("\n").filter(Boolean).map(line => {
                 const parts = line.split("\t");
                 const code  = parts[0].trim();
                 const s0    = code.charAt(0).toUpperCase();
@@ -1816,11 +1870,11 @@ export class GitHelper {
         }
     }
 
-    /** Stages everything and commits, if there's anything to commit. Returns whether a commit happened. */
+    /** Stages everything (except tracked-ignored/secret-shaped files) and commits, if there's anything to commit. Returns whether a commit happened. */
     async commitAllChanges(message: string): Promise<boolean> {
-        await this.git(["add", "-A"]);
-        const status = await this.git(["status", "--porcelain"]);
-        if (!status) { return false; }
+        await this.stageAllExceptIgnoredAndSensitive();
+        const staged = await this.stagedFiles();
+        if (staged.length === 0) { return false; }
         await this.git(["commit", "-m", message]);
         return true;
     }

@@ -10,6 +10,7 @@ import { promoteStory }    from "./commands/promoteStory";
 import { promoteViaPicker } from "./commands/promotePicker";
 import { resumePromotion, cancelPromotion } from "./commands/resumePromotion";
 import { syncBranch }      from "./commands/syncBranch";
+import { cleanIgnoredFiles } from "./commands/cleanIgnoredFiles";
 import { prepare2gpBetaCommand } from "./commands/prepare2gpBeta";
 import { createGitProviderClient } from "./GitProviderClient";
 import { GitHelper, warnUncommittedChanges } from "./GitHelper";
@@ -163,6 +164,12 @@ export async function activate(context: vscode.ExtensionContext) {
         // No Dev org deploy.
         vscode.commands.registerCommand("sfDevops.commitAndPush", async () => {
             await commitAndPush(bbClient, gitHelper, storyProvider);
+        }),
+
+        // Clean Ignored Files from Git — one-time cleanup for files committed before being
+        // added to .gitignore (which can't retroactively untrack them). ALL roles.
+        vscode.commands.registerCommand("sfDevops.cleanIgnoredFiles", async () => {
+            await cleanIgnoredFiles(gitHelper);
         }),
 
         // Validate Only — any configured environment, ALL roles. Creates the validate

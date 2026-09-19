@@ -630,18 +630,6 @@ const DEFAULT_PACKAGING: PackagingSettings = {
     devHubOrgAlias:   "",
 };
 
-/**
- * Glob patterns (repo-relative, matched against forward-slash paths) for files that
- * should never appear in any file listing this extension shows — Deployment Dashboard
- * tree/counts, Diff Viewer, Coverage panels. Distinct from sfDevops.packaging.excludedMetadata,
- * which routes 2GP-beta files to neither package bucket but still needs to see and report
- * on them; this setting hides files from view entirely. Empty by default — no behavior
- * change until configured.
- */
-export function getIgnorePatterns(): string[] {
-    return cfg().get<string[]>("ignorePatterns") || [];
-}
-
 /** Everything the 2GP Release Gate needs — a single settings object, sfDevops.packaging. */
 export function getPackagingSettings(): PackagingSettings {
     const raw = cfg().get<Partial<PackagingSettings>>("packaging") || {};
